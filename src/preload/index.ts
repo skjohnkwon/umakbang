@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { toUmakbangFileUrl } from '../shared/url'
 import type { BackupSummary, FolderMapping, SettingsBackup } from '../shared/backup'
+import type { BundleHeader } from '../shared/bundle'
 import type {
   ContractData,
   ContractInput,
@@ -58,16 +59,48 @@ const api = {
   clearDetected: (paths: string[]): Promise<void> =>
     ipcRenderer.invoke('store:clearDetected', paths),
 
-  /** Writes every persisted setting, tag, rating and detected tempo to a chosen file. */
-  exportSettings: (): Promise<{ path?: string; error?: string }> =>
-    ipcRenderer.invoke('store:export'),
-  /** Reads one back. Resolves with the merged data, or nothing if the user backed out. */
-  /** Step one: read a backup and report what it refers to. Applies nothing. */
+  /**
+   * The whole profile - settings plus the file index, probe cache and cached waveforms -
+   * as one gzipped `.umak` file, so restoring a machine doesn't mean rescanning it.
+   *
+   * Split in two so the renderer can tell choosing a name from writing to it: the write is
+   * tens of seconds on a large library and needs saying out loud.
+   */
+  pickBundlePath: (): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('store:pickBundlePath'),
+  writeBundle: (file: string): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('store:writeBundle', file),
+  /**
+   * Unpacks one. Resolves with `applied` when every library folder was already here and
+   * there was nothing to map; otherwise with a backup for the mapping wizard, the caches
+   * for any folder that moved having been skipped.
+   */
+  restoreBundle: (
+    file: string
+  ): Promise<{
+    applied?: boolean
+    backup?: SettingsBackup
+    summary?: BackupSummary
+    here?: 'windows' | 'posix'
+    restored?: string[]
+    skipped?: string[]
+    peaks?: number
+    metadataLines?: number
+    data?: UserData
+    error?: string
+  }> => ipcRenderer.invoke('store:restoreBundle', file),
+  /**
+   * Step one: read a backup and report what it refers to. Applies nothing.
+   *
+   * Takes `.json` and `.umak` alike. A bundle comes back as `bundle` plus its `path`, which
+   * is the caller's cue to call `restoreBundle` with it rather than the wizard.
+   */
   readBackup: (): Promise<{
     backup?: SettingsBackup
     summary?: BackupSummary
     here?: 'windows' | 'posix'
     path?: string
+    bundle?: BundleHeader
     error?: string
   }> => ipcRenderer.invoke('store:readBackup'),
   /**

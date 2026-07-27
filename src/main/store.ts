@@ -351,6 +351,38 @@ export function forgetPeaks(paths: string[]): void {
   if (removed) scheduleWrite(peaksFile, () => peaksCache, 2000)
 }
 
+/** Every cached waveform, for the bundle writer. */
+export function allPeaks(): Array<{ p: string; d: string }> {
+  return Object.entries(peaksCache).map(([p, entry]) => ({ p, d: entry.data }))
+}
+
+/**
+ * Folds imported waveforms in, keeping anything already here.
+ *
+ * Imported entries are stamped as used now, so if the merge overflows the cache it is the
+ * local ones that go - which is the right way round: the file was just chosen by hand, and
+ * anything trimmed off it is a decode away from coming back.
+ */
+export function mergePeaks(entries: Array<{ p: string; d: string }>): number {
+  const now = Date.now()
+  let added = 0
+  for (const { p, d } of entries) {
+    if (typeof p !== 'string' || typeof d !== 'string') continue
+    peaksCache[p] = { data: d, usedAt: now }
+    added++
+  }
+  trimPeaks()
+  scheduleWrite(peaksFile, () => peaksCache, 2000)
+  return added
+}
+
+function trimPeaks(): void {
+  const keys = Object.keys(peaksCache)
+  if (keys.length <= MAX_PEAKS_ENTRIES) return
+  keys.sort((a, b) => peaksCache[a].usedAt - peaksCache[b].usedAt)
+  for (const key of keys.slice(0, keys.length - MAX_PEAKS_ENTRIES)) delete peaksCache[key]
+}
+
 export function putPeaks(path: string, data: string): void {
   peaksCache[path] = { data, usedAt: Date.now() }
 

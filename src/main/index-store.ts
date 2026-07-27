@@ -21,6 +21,22 @@ export function initIndexStore(dir: string): void {
   dataDir = dir
 }
 
+/**
+ * Where a root's index and journal live, for the bundle writer and reader.
+ *
+ * Exported rather than reimplemented there because the name is `sha1(root)` and the two
+ * would have to agree on the hash, the truncation and the lowercasing forever. A bundle
+ * restored under a filename the scanner doesn't look for is a 200MB file that silently
+ * does nothing.
+ */
+export function indexFileFor(root: string): string {
+  return indexPath(root)
+}
+
+export function patchFileFor(root: string): string {
+  return patchPath(root)
+}
+
 /** One index file per library root, named by a hash so any path is a safe filename. */
 function indexPath(root: string): string {
   const hash = createHash('sha1').update(root.toLowerCase()).digest('hex').slice(0, 16)

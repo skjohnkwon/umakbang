@@ -42,7 +42,6 @@ import {
   trashEntries
 } from './fs-ops'
 import {
-  exportBackup,
   flushStore,
   getDataDir,
   getPeaks,
@@ -61,6 +60,15 @@ import {
   updateSettings
 } from './store'
 import { appendIndexPatch, initIndexStore } from './index-store'
+import {
+  fitFor,
+  looksLikeBundle,
+  offerRestart,
+  readBundleHeader,
+  restoreBundle,
+  writeBundle
+} from './bundle'
+import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { usePortableDataDir } from './portable'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
@@ -576,27 +584,14 @@ function registerIpc(): void {
     updateSettings(patch)
   )
 
-  /**
-   * Writes everything umakbang remembers to a file the user can carry to another machine.
-   * The library root is deliberately not in it - the new machine has its own copy, and
-   * pointing umakbang at it is the one step that has to happen there.
+  /*
+   * There is no settings-only `.json` export any more, only the bundle. Two export buttons
+   * asked the user a question they had no way to weigh - both carry everything that cannot
+   * be reproduced, and the only difference is whether the receiving machine spends a minute
+   * rebuilding caches - and the bigger file is always the better answer. `exportBackup()`
+   * lives on because it is the bundle's settings section, and `.json` files already written
+   * still import below.
    */
-  ipcMain.handle('store:export', async (): Promise<{ path?: string; error?: string }> => {
-    if (!mainWindow) return { error: 'No window.' }
-    const stamp = new Date().toISOString().slice(0, 10)
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Export umakbang settings',
-      defaultPath: `umakbang-settings-${stamp}.json`,
-      filters: [{ name: 'umakbang settings', extensions: ['json'] }]
-    })
-    if (result.canceled || !result.filePath) return {}
-    try {
-      await writeFile(result.filePath, JSON.stringify(exportBackup(), null, 2), 'utf8')
-      return { path: result.filePath }
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) }
-    }
-  })
 
   /**
    * Step one of an import: read the file and say what is in it.
@@ -613,15 +608,31 @@ function registerIpc(): void {
       summary?: BackupSummary
       here?: 'windows' | 'posix'
       path?: string
+      /** Set when the chosen file is a `.umak` bundle, which the renderer restores instead. */
+      bundle?: BundleHeader
       error?: string
     }> => {
       if (!mainWindow) return { error: 'No window.' }
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Import umakbang settings',
         properties: ['openFile'],
-        filters: [{ name: 'umakbang settings', extensions: ['json'] }]
+        // One dialog for both, because from the user's side there is one thing here: the
+        // file umakbang wrote. Which of the two it is, is the file's business.
+        filters: [
+          { name: 'umakbang settings or bundle', extensions: ['json', BUNDLE_EXTENSION] },
+          { name: 'umakbang settings', extensions: ['json'] },
+          { name: 'umakbang bundle', extensions: [BUNDLE_EXTENSION] }
+        ]
       })
       if (result.canceled || result.filePaths.length === 0) return {}
+
+      // Sniffed rather than taken from the extension: a bundle renamed to .json would
+      // otherwise be read as text and reported as corrupt.
+      if (await looksLikeBundle(result.filePaths[0])) {
+        const header = await readBundleHeader(result.filePaths[0])
+        if (!header) return { error: "That doesn't look like a umakbang bundle." }
+        return { bundle: header, path: result.filePaths[0] }
+      }
 
       try {
         const parsed = JSON.parse(await readFile(result.filePaths[0], 'utf8')) as SettingsBackup
@@ -660,6 +671,115 @@ function registerIpc(): void {
         kept: remapped.kept,
         dropped: remapped.dropped,
         adopted: adoptExportedRoots(backup, mapping)
+      }
+    }
+  )
+
+  /**
+   * The whole profile in one file: settings plus the index, probe cache and waveforms.
+   *
+   * A separate action from the `.json` export rather than a checkbox on it, because the two
+   * are for different things. The JSON is small, readable and portable between machines,
+   * and it is what the folder-mapping wizard was built for. This is a restore of *this*
+   * machine - or of a stick that carries the library with it - and it trades all of that
+   * for not spending a minute rebuilding caches that already exist.
+   */
+  /*
+   * Deliberately two calls rather than one.
+   *
+   * Compressing 300MB takes the better part of half a minute, and with the dialog and the
+   * write behind a single `await` the renderer cannot tell "waiting for the user to choose a
+   * name" from "working" - so it can say nothing at all, and what the user sees instead is a
+   * `.part` file appearing beside the name they just typed. Picking first lets the renderer
+   * say what is happening for the part that takes the time.
+   */
+  ipcMain.handle('store:pickBundlePath', async (): Promise<{ path?: string; error?: string }> => {
+    if (!mainWindow) return { error: 'No window.' }
+    const stamp = new Date().toISOString().slice(0, 10)
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export umakbang library bundle',
+      defaultPath: `umakbang-${stamp}.${BUNDLE_EXTENSION}`,
+      filters: [{ name: 'umakbang bundle', extensions: [BUNDLE_EXTENSION] }]
+    })
+    if (result.canceled || !result.filePath) return {}
+    return { path: result.filePath }
+  })
+
+  ipcMain.handle(
+    'store:writeBundle',
+    async (_event, file: string): Promise<{ path?: string; error?: string }> => {
+      try {
+        await writeBundle(file)
+        return { path: file }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  /**
+   * Unpacks a bundle, then applies its settings the same way an import always did.
+   *
+   * The caches land only for library folders that are on this machine at the same absolute
+   * path (`fitFor`). The settings go in whole when every folder is present, and through the
+   * mapping wizard when they are not - which is why this can hand a backup back to the
+   * renderer rather than always finishing the job itself.
+   */
+  ipcMain.handle(
+    'store:restoreBundle',
+    async (
+      _event,
+      file: string
+    ): Promise<{
+      applied?: boolean
+      backup?: SettingsBackup
+      summary?: BackupSummary
+      here?: 'windows' | 'posix'
+      restored?: string[]
+      skipped?: string[]
+      peaks?: number
+      metadataLines?: number
+      data?: UserData
+      error?: string
+    }> => {
+      try {
+        const header = await readBundleHeader(file)
+        if (!header) return { error: "That doesn't look like a umakbang bundle." }
+
+        const fit = fitFor(header.exportedRoots)
+        const restore = await restoreBundle(file)
+        const backup = restore.settings
+
+        // Every folder is here, so there is nothing to map and nothing to ask: fold the
+        // settings straight in, the way a restore onto the machine that wrote it should.
+        if (backup && fit.missing.length === 0) {
+          importBackup(backup)
+          void offerRestart(mainWindow)
+          return {
+            applied: true,
+            data: getUserData(),
+            restored: restore.restored,
+            skipped: restore.skipped,
+            peaks: restore.peaks,
+            metadataLines: restore.metadataLines
+          }
+        }
+
+        // Some folder moved. The caches for it were skipped above; the settings still have
+        // to be translated, so hand them to the wizard exactly as `store:readBackup` does.
+        if (!backup) return { error: 'That bundle has no settings in it.' }
+        return {
+          applied: false,
+          backup,
+          summary: summariseBackup(backup),
+          here: isWindows ? 'windows' : 'posix',
+          restored: restore.restored,
+          skipped: restore.skipped,
+          peaks: restore.peaks,
+          metadataLines: restore.metadataLines
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
       }
     }
   )

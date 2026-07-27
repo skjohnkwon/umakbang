@@ -1,6 +1,15 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { Download, FolderMinus, FolderPlus, Plus, RotateCcw, Upload, X } from 'lucide-react'
+import {
+  Download,
+  FolderMinus,
+  FolderPlus,
+  Loader2,
+  Package,
+  Plus,
+  RotateCcw,
+  X
+} from 'lucide-react'
 import { DEFAULT_VISUALIZER_STOPS, type QuickMoveTarget, type Settings } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
@@ -80,7 +89,8 @@ const SECTIONS = [
 export function SettingsPage(): React.JSX.Element {
   const settings = useLibrary((s) => s.settings)
   const patchSettings = useLibrary((s) => s.patchSettings)
-  const exportSettings = useLibrary((s) => s.exportSettings)
+  const exportBundle = useLibrary((s) => s.exportBundle)
+  const bundleBusy = useLibrary((s) => s.bundleBusy)
   const beginImport = useLibrary((s) => s.beginImport)
 
   // Empty means the built-in ramp, which is what the visualizers draw, so the pickers
@@ -365,24 +375,46 @@ export function SettingsPage(): React.JSX.Element {
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('backup'))}>
           <Section
             title="Backup"
-            hint="Everything umakbang remembers: preferences, tags, ratings and detected tempo."
+            hint="Everything umakbang remembers, in one .umak file: preferences, tags, ratings and detected tempo, plus the file index, probe results and cached waveforms."
           >
             <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" onClick={() => void exportSettings()} className="gap-1.5">
-                <Upload className="h-3.5 w-3.5" />
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={bundleBusy}
+                onClick={() => void exportBundle()}
+                className="gap-1.5"
+              >
+                {bundleBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Package className="h-3.5 w-3.5" />
+                )}
                 Export…
               </Button>
-              <Button variant="outline" size="sm" onClick={() => void beginImport()} className="gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={bundleBusy}
+                onClick={() => void beginImport()}
+                className="gap-1.5"
+              >
                 <Download className="h-3.5 w-3.5" />
                 Import…
               </Button>
             </div>
             <p className="text-[11px] leading-snug text-muted-foreground/60">
-              Where the window sits stays with the machine. Importing asks where each folder
-              lives here, opens the ones that were libraries, and brings the rest across.
+              A bundle opens indexed rather than spending a minute rebuilding what it already
+              knows, so it is what a restore or a stick wants. Writing one takes a few
+              seconds and leaves a <code className="rounded bg-secondary px-1 py-px">.part</code>{' '}
+              file beside it until it is finished. Where the window sits stays with the
+              machine. Importing asks where each folder lives here, opens the ones that were
+              libraries, and brings the rest across; the index comes back only for folders
+              still at the same path, and anything that moved is rebuilt by a scan. Older
+              <code className="rounded bg-secondary px-1 py-px">.json</code> settings files
+              still import.
             </p>
           </Section>
-
         </div>
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('window'))}>

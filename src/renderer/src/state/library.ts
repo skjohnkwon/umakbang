@@ -9,7 +9,8 @@ import type {
   Track,
   TrackKind,
   TransferMode,
-  TransferResult
+  TransferResult,
+  UserData
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { setInternalDropHandler } from '@/lib/drag'
@@ -63,6 +64,52 @@ function sameView(a: ViewMode | undefined, b: ViewMode): boolean {
  * walk a long way through. Fifty is far more than anybody retraces by hand.
  */
 const HISTORY_LIMIT = 50
+
+/**
+ * One place in the history: a view, and the file that was revealed to reach it.
+ *
+ * The selection is here rather than in `ViewMode` deliberately. `ViewMode` is also the
+ * store's `view`, the persisted `lastViewMode` and what `sameView` compares, so a field
+ * added to it for the benefit of Back would have to be reasoned about everywhere those are.
+ *
+ * Only reveals record one. Going back into a folder you were merely browsing restores the
+ * folder and no selection, because the entry for it was pushed on arrival - before you had
+ * selected anything - and keeping it current would mean writing to the history stack on
+ * every click.
+ */
+interface HistoryEntry {
+  view: ViewMode
+  /** The revealed file, if this entry came from `revealTrack`. */
+  selected?: string
+}
+
+/**
+ * An entry added to the stack, with anything ahead of it discarded. Null when it is the
+ * place we are already standing.
+ *
+ * Shared by `setView` and `revealTrack` rather than living inside `setView`, because a
+ * reveal moves the explorer and so is somewhere you can want to come back from, but it
+ * cannot go through `setView`: it carries a pile of its own state - the cleared query, the
+ * selected row, the filters it had to drop to show that row at all - which has to land in
+ * the same commit as the view or the table renders once against the new folder with the old
+ * selection still in it.
+ *
+ * The selected file is part of what makes an entry distinct, not just the view. Two random
+ * beats out of the same folder are two places you have been, and comparing the folder alone
+ * collapsed them into one - so Back walked out of the folder rather than to the beat before.
+ */
+function pushed(
+  history: HistoryEntry[],
+  historyIndex: number,
+  entry: HistoryEntry
+): { history: HistoryEntry[]; historyIndex: number } | null {
+  const current = history[historyIndex]
+  if (current && sameView(current.view, entry.view) && current.selected === entry.selected) {
+    return null
+  }
+  const trimmed = [...history.slice(0, historyIndex + 1), entry].slice(-HISTORY_LIMIT)
+  return { history: trimmed, historyIndex: trimmed.length - 1 }
+}
 
 interface LibraryState {
   ready: boolean
@@ -162,12 +209,18 @@ interface LibraryState {
    * including sideways moves between saved views and Stats. Navigating anywhere new
    * discards whatever was ahead, the way a browser does.
    */
-  history: ViewMode[]
+  history: HistoryEntry[]
   historyIndex: number
   goBack: () => void
   goForward: () => void
-  /** Shows a view without recording it. Back and Forward use this; nothing else should. */
-  showView: (view: ViewMode) => void
+  /**
+   * Shows a view without recording it. Back and Forward use this; nothing else should.
+   *
+   * `selected` restores the row the entry was made on, so stepping back into a folder you
+   * reached by pressing random lands on the beat rather than on a list of names you never
+   * read. It selects and scrolls to it; it does not play it.
+   */
+  showView: (view: ViewMode, selected?: string) => void
   setQuery: (query: string) => void
   /** Selects exactly one row, and makes it the anchor for a later shift-click. */
   setSelected: (path: string | null) => void
@@ -245,9 +298,19 @@ interface LibraryState {
   dismissNotice: () => void
   setMiniPlayer: (mini: boolean) => void
 
-  /** Writes every persisted preference to a file, for carrying to another machine. */
-  exportSettings: () => Promise<void>
-  /** Reads one back and applies it, without touching which library is open. */
+  /**
+   * Writes the whole profile - preferences, tags, ratings, and every cache - to one `.umak`
+   * file.
+   *
+   * There used to be a second, settings-only `.json` export beside this. It went because
+   * two export buttons made the user answer a question they had no way to weigh: both carry
+   * everything that cannot be reproduced, and the only difference is whether the receiving
+   * machine spends a minute rebuilding caches. A bundle is bigger and always the better
+   * answer. `.json` files are still read on import, so nothing already written is orphaned.
+   */
+  exportBundle: () => Promise<void>
+  /** True while a bundle is being written or unpacked, since both take a moment. */
+  bundleBusy: boolean
   /** A backup that has been read but not yet applied, driving the import wizard. */
   importing: {
     backup: SettingsBackup
@@ -257,6 +320,11 @@ interface LibraryState {
   beginImport: () => Promise<void>
   cancelImport: () => void
   applyBackup: (backup: SettingsBackup, mapping: FolderMapping) => Promise<void>
+  /**
+   * Takes the store's own copy of everything main just wrote, keeping the settings that
+   * describe this window rather than this library. Shared by both kinds of import.
+   */
+  adoptUserData: (data: UserData) => void
 }
 
 export const useLibrary = create<LibraryState>((set, get) => ({
@@ -326,7 +394,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       typeFilter: userData.settings.typeFilter ?? { kinds: [], exts: [] },
       view,
       // The place the session opens in is the first thing Back can return to.
-      history: [view],
+      history: [{ view }],
       historyIndex: 0,
       lastFolderDir: lastDir
     })
@@ -480,10 +548,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   setView: (view) => {
     // Somewhere new: anything that was ahead is discarded, the way a browser does.
     const { history, historyIndex } = get()
-    if (!sameView(history[historyIndex], view)) {
-      const trimmed = [...history.slice(0, historyIndex + 1), view].slice(-HISTORY_LIMIT)
-      set({ history: trimmed, historyIndex: trimmed.length - 1 })
-    }
+    const next = pushed(history, historyIndex, { view })
+    if (next) set(next)
     get().showView(view)
   },
 
@@ -495,7 +561,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     if (historyIndex <= 0) return
     const index = historyIndex - 1
     set({ historyIndex: index })
-    get().showView(history[index])
+    get().showView(history[index].view, history[index].selected)
   },
 
   goForward: () => {
@@ -503,7 +569,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     if (historyIndex >= history.length - 1) return
     const index = historyIndex + 1
     set({ historyIndex: index })
-    get().showView(history[index])
+    get().showView(history[index].view, history[index].selected)
   },
 
   /**
@@ -514,11 +580,24 @@ export const useLibrary = create<LibraryState>((set, get) => ({
    * location - without pushing the place they just moved to onto the stack, which would
    * make Back its own Forward and trap you between two entries.
    */
-  showView: (view) => {
+  showView: (view, selected) => {
     // Remember where browsing left off so returning from Stats or a saved view drops
     // you back exactly where you were.
     const lastFolderDir = view.mode === 'folder' ? view.dir : get().lastFolderDir
-    set({ view, selectedPath: null, selection: new Set(), lastFolderDir })
+    set({
+      view,
+      selectedPath: selected ?? null,
+      selection: selected ? new Set([selected]) : new Set(),
+      lastFolderDir,
+      // The same nonce a reveal uses, so the table scrolls the row into view once the new
+      // folder's rows exist. Selecting a row 4,000 down a folder and leaving it off screen
+      // answers the question no better than not selecting it at all.
+      //
+      // Nothing here plays it: both audition paths are event handlers in `FileTable`, not
+      // subscriptions, so arriving at a selection is silent. Back should tell you which
+      // beat it was, not start it again.
+      ...(selected ? { revealNonce: get().revealNonce + 1 } : {})
+    })
 
     // Persisted too, so closing and reopening lands in the same place. Writes are
     // debounced in the main process, so navigating quickly costs nothing.
@@ -555,7 +634,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   setRecursive: (recursive) => set({ recursive }),
 
   revealTrack: (track) => {
-    const { typeFilter, tagFilter, tags } = get()
+    const { typeFilter, tagFilter, tags, history, historyIndex } = get()
     // Clear a filter that would hide the very row we're trying to show.
     const passesType =
       (typeFilter.kinds.length === 0 || typeFilter.kinds.includes(track.kind)) &&
@@ -563,8 +642,20 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     const passesTags =
       tagFilter.length === 0 || tagFilter.some((tag) => tags[track.path]?.includes(tag))
 
+    const view: ViewMode = { mode: 'folder', dir: track.relDir }
+
     set({
-      view: { mode: 'folder', dir: track.relDir },
+      view,
+      // A reveal is a place you arrived at, so Back has to be able to leave it. Without
+      // this the random button moved the explorer while history still named the folder you
+      // pressed it from, so Back skipped every beat it had drawn and went to whatever page
+      // came before - which reads as Back being wired to the wrong thing entirely.
+      // The revealed file rides along in the entry, so Back lands on the beat and not just
+      // on the folder it happened to live in.
+      ...(pushed(history, historyIndex, { view, selected: track.path }) ?? {}),
+      // And this is where browsing is now, so leaving Settings or Stats returns here rather
+      // than to the folder the random button took you out of.
+      lastFolderDir: track.relDir,
       query: '',
       recursive: false,
       selectedPath: track.path,
@@ -573,6 +664,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       tagFilter: passesTags ? tagFilter : [],
       revealNonce: get().revealNonce + 1
     })
+
+    // Persisted for the same reason `showView` does it: a restart should open where you
+    // were left, and a revealed folder is where you were left.
+    get().patchSettings({ lastDir: track.relDir, lastViewMode: 'folder' })
   },
 
   toggleKindFilter: (kind) => {
@@ -911,10 +1006,29 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ miniPlayer: mini })
   },
 
-  exportSettings: async () => {
-    const result = await window.umakbang.exportSettings()
-    if (result.error) get().notify(result.error, 'error')
-    else if (result.path) get().notify(`Settings written to ${baseName(result.path)}.`)
+  bundleBusy: false,
+
+  exportBundle: async () => {
+    if (get().bundleBusy) return
+    const chosen = await window.umakbang.pickBundlePath()
+    if (chosen.error) {
+      get().notify(chosen.error, 'error')
+      return
+    }
+    if (!chosen.path) return
+
+    set({ bundleBusy: true })
+    // Said before the write, not only after it. Compressing a large library takes tens of
+    // seconds, and the only thing on screen otherwise is a `.part` file appearing beside the
+    // name the user just typed, which reads as a failure rather than as progress.
+    get().notify(`Writing ${baseName(chosen.path)} - this takes a moment for a large library.`)
+    try {
+      const result = await window.umakbang.writeBundle(chosen.path)
+      if (result.error) get().notify(result.error, 'error')
+      else if (result.path) get().notify(`Bundle written to ${baseName(result.path)}.`)
+    } finally {
+      set({ bundleBusy: false })
+    }
   },
 
   /**
@@ -930,21 +1044,68 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       get().notify(result.error, 'error')
       return
     }
+
+    // A `.umak` bundle takes the other road: unpack the caches first, then either finish
+    // outright or fall into the same wizard with what is left. One dialog picked the file,
+    // so which of the two it was is not something the user should have had to decide.
+    if (result.bundle && result.path) {
+      set({ bundleBusy: true })
+      try {
+        const restored = await window.umakbang.restoreBundle(result.path)
+        if (restored.error) {
+          get().notify(restored.error, 'error')
+          return
+        }
+        const cached = [
+          restored.restored?.length ? `${restored.restored.length} folder index` : '',
+          restored.metadataLines ? `${restored.metadataLines.toLocaleString()} probe results` : '',
+          restored.peaks ? `${restored.peaks.toLocaleString()} waveforms` : ''
+        ].filter(Boolean)
+
+        if (restored.applied && restored.data) {
+          get().adoptUserData(restored.data)
+          get().notify(`Restored ${cached.join(', ') || 'settings'}.`)
+          return
+        }
+        // Folders moved, so their caches were skipped and only the settings are left to
+        // translate. Say what was skipped before the wizard covers the screen.
+        if (restored.skipped?.length) {
+          get().notify(
+            `${restored.skipped.length} library folder${
+              restored.skipped.length === 1 ? '' : 's'
+            } moved, so ${
+              restored.skipped.length === 1 ? 'its index was' : 'their indexes were'
+            } skipped and will be rebuilt by a scan.`
+          )
+        }
+        if (restored.backup && restored.summary && restored.here) {
+          set({
+            importing: {
+              backup: restored.backup,
+              summary: restored.summary,
+              here: restored.here
+            }
+          })
+        }
+      } finally {
+        set({ bundleBusy: false })
+      }
+      return
+    }
+
     if (!result.backup || !result.summary || !result.here) return
     set({ importing: { backup: result.backup, summary: result.summary, here: result.here } })
   },
 
   cancelImport: () => set({ importing: null }),
 
-  applyBackup: async (backup, mapping) => {
-    const result = await window.umakbang.applyBackup(backup, mapping)
-
+  adoptUserData: (data) => {
     // Which folders are open is still this machine's business, not the backup's - but main
     // has just opened any library folder the user located, so its list is the current one
     // and the local copy is a step behind. Where the window sits stays local either way.
     const { lastDir, windowBounds, windowMaximized } = get().settings
     const settings: Settings = {
-      ...result.data.settings,
+      ...data.settings,
       lastDir,
       windowBounds,
       windowMaximized
@@ -954,14 +1115,19 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // Also arrives as `library:roots` from the scan main kicked off, which sets `scanning`
       // with it. Set here too so the library appears whichever lands first.
       roots: settings.roots,
-      tags: result.data.tags,
-      ratings: result.data.ratings,
-      detectedBpm: result.data.detectedBpm,
-      detectedKey: result.data.detectedKey,
+      tags: data.tags,
+      ratings: data.ratings,
+      detectedBpm: data.detectedBpm,
+      detectedKey: data.detectedKey,
       typeFilter: settings.typeFilter ?? { kinds: [], exts: [] },
       importing: null
     })
     flushRevision()
+  },
+
+  applyBackup: async (backup, mapping) => {
+    const result = await window.umakbang.applyBackup(backup, mapping)
+    get().adoptUserData(result.data)
 
     const kept = result.kept.tags + result.kept.ratings + result.kept.detectedBpm + result.kept.detectedKey
     const dropped =
