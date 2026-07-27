@@ -32,6 +32,13 @@ win:
   target:
     - target: nsis
       arch: [x64]
+    # The same bytes, unpacked. Unzip it anywhere - a stick, a second machine - and it runs
+    # from that folder; make a `data` folder beside the exe and it keeps its settings there
+    # too. Deliberately a zip rather than electron-builder's `portable` target, which builds
+    # a self-extractor that unpacks to `%TEMP%` on every launch: that is a single file to
+    # carry, but it is not one folder holding everything, and the temp copy is on the host.
+    - target: zip
+      arch: [x64]
 nsis:
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico

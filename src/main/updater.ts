@@ -24,6 +24,7 @@ import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import type { UpdateStatus } from '../shared/types'
+import { isPortable } from './portable'
 
 /** How often to look, once the first check has run. Twelve hours. */
 const CHECK_INTERVAL = 12 * 60 * 60 * 1000
@@ -58,6 +59,14 @@ export function initUpdater(getWindow: () => BrowserWindow | null): void {
   // update: the thing running is the working tree.
   if (!app.isPackaged) {
     latest = { state: 'disabled', version: app.getVersion(), reason: 'development build' }
+    return
+  }
+  // A portable copy must never update itself. electron-updater's Windows path downloads the
+  // NSIS installer and runs it on quit, and that installs to the host machine - so a stick
+  // plugged into somebody else's PC would leave umakbang installed on it and still be
+  // running the old version itself. Updating a folder means replacing the folder.
+  if (isPortable()) {
+    latest = { state: 'disabled', version: app.getVersion(), reason: 'portable copy' }
     return
   }
 

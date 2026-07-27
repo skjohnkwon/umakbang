@@ -62,6 +62,7 @@ import {
 } from './store'
 import { appendIndexPatch, initIndexStore } from './index-store'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
+import { usePortableDataDir } from './portable'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
 import { watch, type FSWatcher } from 'node:fs'
 import type { ScannerCommand, ScannerEvent } from './scanner-process'
@@ -1156,6 +1157,16 @@ function registerIpc(): void {
 
 /* ------------------------------------------------------------------ lifecycle */
 
+// First, before anything at all resolves a path.
+//
+// `requestSingleInstanceLock` writes its lock file into `userData`, and `crashReporter`
+// puts dumps in a folder under it - so both have to come after the redirect or a portable
+// copy still writes to the host it is plugged into. The lock is the one that bites twice:
+// resolved against the default location, a portable copy shares a lock with an installed
+// one, so running umakbang off a stick on a machine that already has it just focuses the
+// installed copy and quits.
+const portableChoice = usePortableDataDir()
+
 // A second instance would fight over the same JSON store, so hand focus back instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -1172,6 +1183,14 @@ if (!app.requestSingleInstanceLock()) {
   crashReporter.start({ uploadToServer: false })
 
   void app.whenReady().then(() => {
+    // Said out loud because the failure it guards against is silent: a marker folder that
+    // could not be written to falls back to the usual location, and a portable copy quietly
+    // keeping its settings on the host machine looks exactly like one that worked.
+    if (portableChoice.portable) {
+      console.log(`umakbang: portable, data in ${portableChoice.dir}`)
+    } else if (portableChoice.reason && portableChoice.reason !== 'development build') {
+      console.log(`umakbang: not portable (${portableChoice.reason}), data in ${portableChoice.dir}`)
+    }
     initStore()
     initContracts(getDataDir(), app.getPath('documents'))
     // The scanner owns the index, but moves and renames happen here, and they have to be

@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
 import { labelForRoot } from '../shared/roots'
 import type { SettingsBackup } from '../shared/backup'
+import { isPortable } from './portable'
 export type { SettingsBackup }
 
 interface PeaksEntry {
@@ -67,8 +68,15 @@ export function initStore(): void {
   // It used to be one particular Windows path spelled out in full, which on a Mac is a
   // folder that can never be created - and the folder is made before the upload, so the
   // first split would fail before the service was ever reached.
+  //
+  // A portable copy defaults inside its own folder instead. The host's Music folder is a
+  // real place that would work, which is the problem: stems would be written to whichever
+  // machine the stick happened to be in, and the setting is remembered, so every later
+  // split on every later machine would aim at the first one's path.
   if (!userData.settings.stemOutputDir) {
-    userData.settings.stemOutputDir = join(app.getPath('music'), 'umakbang stems')
+    userData.settings.stemOutputDir = isPortable()
+      ? join(dataDir, 'stems')
+      : join(app.getPath('music'), 'umakbang stems')
   }
 
   userData.settings.quickMove ??= []
