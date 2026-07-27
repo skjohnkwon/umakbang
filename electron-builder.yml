@@ -1,0 +1,64 @@
+appId: dev.umakbang.app
+productName: umakbang
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asar: true
+
+# Where a built installer is published, and where the app looks for a newer one - this
+# block is baked into `app-update.yml` beside the packaged app, so it is the single place
+# that decides both. Fork this and change `owner`, or your users check the original repo
+# for updates and quietly install its builds over yours.
+#
+# Releases are public, so reading the feed needs no credential and none is compiled in.
+# Publishing still needs `GH_TOKEN` in the environment with write access to this repo's
+# contents; it is deliberately not written here, because this file is committed.
+publish:
+  provider: github
+  owner: skjohnkwon
+  repo: umakbang
+  # electron-builder defaults this to `draft`, and a draft release is invisible on the
+  # releases page and invisible to the updater - which reads as the publish having silently
+  # failed. Set it to `release` so `npm run release` produces something a user can actually
+  # download. Change it back to `draft` if you ever want to write release notes before it
+  # goes live, but then remember to publish the draft by hand.
+  releaseType: release
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: umakbang
+
+mac:
+  # electron-builder renders the .icns from the 1024px master.
+  icon: build/icon.png
+  category: public.app-category.music
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  darkModeSupport: true
+  # umakbang only reads local audio files; no entitlements beyond file access are needed.
+  extendInfo:
+    NSMicrophoneUsageDescription: false
+dmg:
+  title: umakbang
+
+linux:
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64]
+  category: AudioVideo

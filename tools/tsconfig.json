@@ -1,0 +1,20 @@
+{
+  "//": "The measurement tools are not part of the app build - they run through esbuild, which strips types without checking them. This exists so `npx tsc -p tools` can still catch a mistake in them. It carries the renderer's `@/*` alias because the tools import the real detector, which is the whole point of them.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["src/renderer/src/*"],
+      "@shared/*": ["src/shared/*"]
+    }
+  },
+  "include": ["keyeval/**/*.ts"]
+}

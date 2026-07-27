@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+release*/
+*.log
+.DS_Store
+Thumbs.db
+tsconfig.*.tsbuildinfo
+tools/keyeval/__pycache__/
+tools/keyeval/manifest.results.json
+tools/keyeval/manifest.csv
+CLAUDE.md
