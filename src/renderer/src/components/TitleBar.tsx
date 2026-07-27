@@ -16,6 +16,7 @@ import { MiniPlayerExit } from '@/components/MiniPlayer'
 import { Logo } from '@/components/Logo'
 import { useLibrary } from '@/state/library'
 import { baseName } from '@/lib/format'
+import { useUpdateStatus } from '@/lib/updates'
 import { cn } from '@/lib/utils'
 
 export const SEARCH_INPUT_ID = 'umakbang-search'
@@ -28,6 +29,7 @@ export function TitleBar(): React.JSX.Element {
   const scanning = useLibrary((s) => s.scanning)
   const miniPlayer = useLibrary((s) => s.miniPlayer)
   const setQuery = useLibrary((s) => s.setQuery)
+  const { version } = useUpdateStatus()
 
   const isMac = platform?.isMac ?? false
   const [searchFocused, setSearchFocused] = useState(false)
@@ -73,10 +75,24 @@ export function TitleBar(): React.JSX.Element {
       // caption buttons over the right edge of the web contents.
       style={{ paddingLeft: isMac ? 78 : 10, paddingRight: isMac ? 10 : 144 }}
     >
-      {/* The app mark, where a windowed app's icon goes. Deliberately not a button: every
-          other thing in this bar does something, and a logo that looked clickable and
-          wasn't would be the odd one out. Being plain also leaves it as drag surface. */}
-      <Logo className="h-4 w-4 text-primary" />
+      {/* The app mark, where a windowed app's icon goes, with the running version beside it.
+          Deliberately not a button: every other thing in this bar does something, and a logo
+          that looked clickable and wasn't would be the odd one out. Being plain also leaves
+          it as drag surface.
+
+          The version comes off the updater's status rather than a new IPC call - `latest` in
+          `updater.ts` is seeded with `app.getVersion()` at module scope, so it is answered
+          even when the updater itself is disabled, which is every dev run and every portable
+          copy. It renders nothing until the first status arrives; an empty gap for a moment
+          beats "v" with nothing after it. */}
+      <div className="flex items-center gap-1.5">
+        <Logo className="h-4 w-4 text-primary" />
+        {version && (
+          <span className="text-[10px] leading-none tabular-nums text-muted-foreground/70">
+            {version}
+          </span>
+        )}
+      </div>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
