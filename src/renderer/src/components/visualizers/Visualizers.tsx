@@ -227,7 +227,11 @@ export function Spectrogram(props: VisualizerProps): React.JSX.Element {
     // The visible canvas has no alpha, so every frame repaints its own backdrop. Colour
     // set here - before the buffer guard, since a theme change stops there - so the draw
     // never pays for parsing it.
-    surface.context.fillStyle = surface.palette.surface
+    //
+    // The backdrop is the ramp's own low end, not the app background: the panel is a scale,
+    // and its empty state should be the bottom of that scale rather than the colour of the
+    // window behind it.
+    surface.context.fillStyle = surface.palette.quiet
 
     // The heatmap is written at device resolution so it stays crisp on scaled displays.
     const width = Math.max(1, Math.floor(surface.width * surface.ratio))
@@ -246,8 +250,8 @@ export function Spectrogram(props: VisualizerProps): React.JSX.Element {
     const context = canvas.getContext('2d', { alpha: false })
     if (!context) return
     // Columns not yet written have to read as silence, not as the black an opaque canvas
-    // starts on.
-    context.fillStyle = surface.palette.surface
+    // starts on - and silence is the ramp's low end.
+    context.fillStyle = surface.palette.quiet
     context.fillRect(0, 0, width, height)
 
     // What was already on screen is carried into the new size rather than thrown away.
@@ -365,7 +369,7 @@ export function Spectrogram(props: VisualizerProps): React.JSX.Element {
   const clear = (surface: Surface): void => {
     const history = historyRef.current
     if (!history) return
-    history.context.fillStyle = surface.palette.surface
+    history.context.fillStyle = surface.palette.quiet
     history.context.fillRect(0, 0, history.width, history.height)
     history.head = 0
   }

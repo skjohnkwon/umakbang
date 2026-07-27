@@ -24,8 +24,19 @@ export interface Palette {
   border: string
   foreground: string
   hot: string
-  /** Opaque panel backdrop, for canvases that own every pixel and so skip alpha. */
-  surface: string
+  /**
+   * What silence looks like: the ramp's own low end, which is the lowest stop.
+   *
+   * Taken out of the rasterised ramp rather than from `stops[0]` directly, so a flat fill
+   * and the ramp's zero column are the same bytes. Mixing a CSS colour and a canvas gradient
+   * of the "same" oklch stop is a way to get two nearly-equal colours meeting at a seam.
+   *
+   * It used to be the `--card` token, so the spectrogram's quiet end was the app background
+   * and the ramp only reached the user's first stop 12% of the way up. A panel with nothing
+   * playing read as switched off rather than as silent, and the bottom eighth of every
+   * column was a colour the ramp never named.
+   */
+  quiet: string
   /**
    * Silence → full energy as 256 RGBA entries, indexed `heat[value * 4]`.
    *
@@ -50,8 +61,7 @@ const FALLBACK = {
   muted: 'oklch(0.655 0.014 260)',
   border: 'oklch(0.285 0.011 260)',
   foreground: 'oklch(0.93 0.005 260)',
-  hot: 'oklch(0.62 0.19 25)',
-  surface: 'oklch(0.205 0.009 260)'
+  hot: 'oklch(0.62 0.19 25)'
 }
 
 let cache: Palette | null = null
@@ -66,7 +76,6 @@ function readPalette(): Palette {
   // The visualizers are tinted by a ramp, quiet → loud, that the user owns end to end.
   // It arrives as one comma-separated variable; unset, it is the built-in five.
   const foreground = token('--foreground', FALLBACK.foreground)
-  const surface = token('--card', FALLBACK.surface)
   const declared = token('--visualizer-stops', '')
   const stops = declared
     ? declared.split(',').map((stop) => stop.trim()).filter(Boolean)
@@ -81,8 +90,7 @@ function readPalette(): Palette {
     border: token('--border', FALLBACK.border),
     foreground,
     hot,
-    surface,
-    ...buildRamps(stops, surface)
+    ...buildRamps(stops)
   }
 }
 
@@ -116,9 +124,8 @@ const STRIDE = RAMP_WIDTH * 4
  * here, so this has to stay cheap.
  */
 function buildRamps(
-  stops: string[],
-  surface: string
-): { heat: Uint8ClampedArray; bands: string[]; wave: string[] } {
+  stops: string[]
+): { heat: Uint8ClampedArray; quiet: string; bands: string[]; wave: string[] } {
   const primary = stops[0]
   const canvas = document.createElement('canvas')
   canvas.width = RAMP_WIDTH
@@ -127,20 +134,21 @@ function buildRamps(
   if (!context) {
     return {
       heat: new Uint8ClampedArray(STRIDE),
+      quiet: primary,
       bands: Array.from({ length: BAND_COUNT }, () => primary),
       wave: Array.from({ length: WAVE_STEPS }, () => primary)
     }
   }
 
-  // Silence is the opaque panel colour rather than transparent: the spectrogram paints
-  // every pixel it owns, which is what lets its canvas drop the alpha channel. Everything
-  // above it is the user's ramp, so a quiet bin sits at its low end and a loud one at its
-  // high end - the same reading the waveforms give.
+  // The stops edge to edge, so silence is the lowest colour the user picked and full energy
+  // is the highest. It used to start at the panel colour and only reach the first stop 12%
+  // of the way along, with a mix of the two in between - which spent the bottom eighth of
+  // every column on colours the ramp never named and made a quiet panel read as the app
+  // background rather than as the floor of the scale. Same shape as the bar ramp below, and
+  // for the same reason.
   const heatRamp = context.createLinearGradient(0, 0, RAMP_WIDTH, 0)
-  heatRamp.addColorStop(0, surface)
-  heatRamp.addColorStop(0.06, `color-mix(in oklab, ${primary} 30%, ${surface})`)
   for (let i = 0; i < stops.length; i++) {
-    heatRamp.addColorStop(0.12 + (0.88 * i) / (stops.length - 1), stops[i])
+    heatRamp.addColorStop(i / (stops.length - 1), stops[i])
   }
   context.fillStyle = heatRamp
   context.fillRect(0, 0, RAMP_WIDTH, 1)
@@ -173,7 +181,7 @@ function buildRamps(
     wave.push(sampleStops(stops, step / (WAVE_STEPS - 1)))
   }
 
-  return { heat, bands, wave }
+  return { heat, quiet: `rgb(${heat[0]}, ${heat[1]}, ${heat[2]})`, bands, wave }
 }
 
 export function getPalette(): Palette {
