@@ -1,5 +1,5 @@
 import type React from 'react'
-import { Download, FolderOpen, SearchX } from 'lucide-react'
+import { Download, FolderOpen, Loader2, SearchX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Logo } from '@/components/Logo'
 import { useLibrary } from '@/state/library'
@@ -41,6 +41,30 @@ export function NoLibrary(): React.JSX.Element {
           Coming from another machine? Bring your tags, ratings and preferences across from
           a backup.
         </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The window on the way in, before there is anything to browse.
+ *
+ * It replaces a launch that used to render the whole apparatus - sidebar, toolbar, column
+ * headers - around an empty table saying "Still indexing", which reads as a library that
+ * came back empty rather than one that hasn't arrived yet. There is nothing to click in
+ * that state anyway: no folders in the tree, no rows to select, nothing to sort.
+ *
+ * Only on the way in. A rescan later on leaves you where you are standing, with the
+ * toolbar's counter to say it is working, because by then the window is somewhere you
+ * were rather than somewhere you are waiting for.
+ */
+export function Loading(): React.JSX.Element {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-4">
+      <Logo className="h-10 w-10 text-primary/70" />
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span className="text-[12.5px]">Loading&hellip;</span>
       </div>
     </div>
   )

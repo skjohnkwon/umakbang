@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { MotionConfig } from 'motion/react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SEARCH_INPUT_ID, TitleBar } from '@/components/TitleBar'
@@ -10,7 +10,7 @@ import { NowPlayingPanel } from '@/components/NowPlayingPanel'
 import { NowPlayingBar } from '@/components/NowPlayingBar'
 import { ThemeBridge } from '@/components/ThemeBridge'
 import { VisualizerOnlyView } from '@/components/VisualizerOnlyView'
-import { NoLibrary, NoResults } from '@/components/EmptyState'
+import { Loading, NoLibrary, NoResults } from '@/components/EmptyState'
 import { absolutePath } from '@/lib/paths'
 import { connectUpdates } from '@/lib/updates'
 import { MiniPlayer } from '@/components/MiniPlayer'
@@ -38,6 +38,12 @@ export default function App(): React.JSX.Element {
   const visualizerOnly = useLibrary((s) => s.settings.visualizerOnly)
   const alwaysOnTop = useLibrary((s) => s.settings.alwaysOnTop)
   const miniPlayer = useLibrary((s) => s.miniPlayer)
+  const ready = useLibrary((s) => s.ready)
+  const progress = useLibrary((s) => s.progress)
+  // Tracks are mutated in place, so this reads the length off a store that changed for some
+  // other reason - which is exactly what the coalesced revision bump is, and what
+  // `Sidebar`'s total count already rides on.
+  const trackCount = useLibrary((s) => s.tracks.length)
   const rows = useVisibleRows()
   const folderCount = rows.reduce((total, row) => total + (row.type === 'folder' ? 1 : 0), 0)
 
@@ -51,6 +57,24 @@ export default function App(): React.JSX.Element {
    * it back off. Everything that hides chrome now asks this, not the setting.
    */
   const stage = visualizerOnly && roots.length > 0
+
+  /**
+   * Whether the window is still arriving.
+   *
+   * Latched, because `arrived` must not go false again: a rescan clears the index and would
+   * otherwise pull the whole UI back to a loading screen out from under someone who was
+   * using it.
+   *
+   * `ready` gates the first moment, and it was previously read by nothing at all - so
+   * `roots.length === 0` was evaluated before `hydrate`'s two IPC round trips had returned
+   * any roots, and every cold start flashed the welcome screen at a user who has a library.
+   * `progress === null` covers the gap on the other side, between hydrating and the scanner
+   * reporting for the first time, where `scanning` is still false.
+   */
+  const arrived = useRef(false)
+  if (trackCount > 0) arrived.current = true
+  const loading =
+    !ready || (!arrived.current && roots.length > 0 && (scanning || progress === null))
 
   useEffect(() => connectLibraryEvents(), [])
 
@@ -231,7 +255,9 @@ export default function App(): React.JSX.Element {
               see `stage` above. */}
           {!stage && <TitleBar />}
 
-          {miniPlayer ? (
+          {loading ? (
+            <Loading />
+          ) : miniPlayer ? (
             <MiniPlayer />
           ) : stage ? (
             /* Full-window visualizers - the library is still loaded behind it, so

@@ -25,6 +25,7 @@ export function TitleBar(): React.JSX.Element {
   const platform = useLibrary((s) => s.platform)
   const settings = useLibrary((s) => s.settings)
   const roots = useLibrary((s) => s.roots)
+  const ready = useLibrary((s) => s.ready)
   const query = useLibrary((s) => s.query)
   const scanning = useLibrary((s) => s.scanning)
   const miniPlayer = useLibrary((s) => s.miniPlayer)
@@ -99,11 +100,17 @@ export function TitleBar(): React.JSX.Element {
           <Button variant="ghost" size="sm" className="app-no-drag max-w-[240px] gap-1 px-1.5">
             <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span className="truncate">
-              {roots.length === 0
-                ? 'No library'
-                : roots.length === 1
-                  ? roots[0].label
-                  : `${roots.length} folders`}
+              {/* Blank rather than "No library" until settings have hydrated. Saying there
+                  is no library while the loading screen says otherwise is the same mistake
+                  the welcome-screen flash was, just in less space: nobody has been asked
+                  anything yet, so there is nothing true to say. */}
+              {!ready
+                ? ''
+                : roots.length === 0
+                  ? 'No library'
+                  : roots.length === 1
+                    ? roots[0].label
+                    : `${roots.length} folders`}
             </span>
             <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
           </Button>
