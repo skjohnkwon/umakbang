@@ -431,21 +431,44 @@ export const DEFAULT_SETTINGS: Settings = {
   sortKey: 'mtimeMs',
   sortDir: 'desc',
   folderSort: {},
-  autoAdvance: true,
+  // Both off: browsing a sample library is not listening to an album. Clicking a file to
+  // see what it is should not commit you to hearing it, and reaching the end of one should
+  // not start the next - the next file in a folder is rarely the next thing you wanted.
+  autoAdvance: false,
   auditionOnArrow: false,
-  playOnSelect: true,
-  columns: [],
+  playOnSelect: false,
+  // The columns worth having on screen, at widths that fit their content. Empty meant
+  // `lib/columns.ts` defaults, which showed everything and left the ones you read most -
+  // BPM and key - fighting for room with format and size. `normalizeColumns` still clamps
+  // each width to its minimum on load, so this is a starting layout, not a constraint.
+  columns: [
+    { id: 'name', width: 300, visible: true },
+    { id: 'rating', width: 97, visible: true },
+    { id: 'type', width: 113, visible: true },
+    { id: 'bpm', width: 76, visible: true },
+    { id: 'key', width: 71, visible: true },
+    { id: 'time', width: 111, visible: false },
+    { id: 'format', width: 127, visible: false },
+    { id: 'size', width: 88, visible: false },
+    { id: 'modified', width: 134, visible: true },
+    { id: 'waveform', width: 120, visible: false }
+  ],
   lastDir: '',
   lastViewMode: 'folder',
   windowBounds: null,
   windowMaximized: false,
-  sidebarWidth: 220,
-  panelWidth: 300,
-  playerHeight: 112,
-  playerSplit: 430,
-  playerDetails: [],
+  // Sized for the panes that earn the space: a sidebar wide enough for nested folder names
+  // without truncating them, and a now-playing panel wide enough for the visualizers to be
+  // readable rather than decorative.
+  sidebarWidth: 345,
+  panelWidth: 576,
+  playerHeight: 118,
+  playerSplit: 318,
+  // Empty means the built-in list in `lib/player-details.ts`. These are the fields that
+  // say what a file *is* when you are deciding whether to use it.
+  playerDetails: ['bpm', 'key', 'modified', 'extension', 'projectTime', 'size'],
   panelOpen: true,
-  visualizers: ['spectrogram', 'spectrum', 'wave', 'levels'],
+  visualizers: ['spectrogram', 'spectrum', 'wave', 'scope', 'levels', 'stereo'],
   themePrimary: null,
   themeBackground: null,
   visualizerStops: [],
@@ -457,16 +480,26 @@ export const DEFAULT_SETTINGS: Settings = {
   alwaysOnTop: false,
   analysisTag: null,
   detectKeyFromAudio: true,
-  // Built-in by default: measured, Essentia is not reliably better here, and it is the one
-  // part of umakbang that would put a licence on the whole app if it shipped.
-  keyEngine: 'builtin',
-  keyProfile: 'edma',
+  // Essentia by default. It was `builtin` for two reasons and neither holds any more: the
+  // licence one is gone, because `essentia.js` is AGPL-3.0 and umakbang now is too, and the
+  // measurement one was "not reliably *better*", which is not the same as "no better" - it
+  // was one pair's difference over 60 files, so it decided nothing either way.
+  //
+  // What is not ambiguous is the failure mode. `world seed.mp3` reads Fm on the built-in
+  // detector at confidence 0.130 - a hair over the runner-up - where two independent
+  // references say Db and Essentia says Db on all four profiles at both 60s and 120s. A
+  // detector that is unsure and shows its answer like any other is worse than one that is
+  // right, and the built-in one stays available for anyone who wants it.
+  keyEngine: 'essentia',
+  keyProfile: 'krumhansl',
   keyCommand: '',
-  analysisConcurrency: 2,
+  // Analysis is off the main thread in a worker, so the ceiling is cores rather than
+  // responsiveness, and 2 left a library crawling through its own backlog.
+  analysisConcurrency: 10,
   lalalKey: '',
   stemOutputDir: '',
   stemSplitter: 'lynx',
-  stemFormat: 'wav'
+  stemFormat: 'mp3'
 }
 
 /* ------------------------------------------------------------------ stems */
