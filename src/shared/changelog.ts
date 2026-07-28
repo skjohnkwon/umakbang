@@ -33,7 +33,8 @@ export const CHANGELOG: readonly ChangelogEntry[] = [
       'Rating with 1-5 now rates what is playing rather than what happens to be selected, and the random button leans towards beats you have not rated.',
       'Stats counts tracks rather than files, leaves out the folders you excluded from the random button, and reads tempo from your projects.',
       'Colour follows the visualizer ramp through the stats charts, the ratings, and the BPM, key and date columns.',
-      'A new folder button in the explorer, and clicking the row that is already playing restarts it instead of pausing.'
+      'A new folder button in the explorer, and clicking the row that is already playing restarts it instead of pausing.',
+      'The mark in the title bar opens an About box, and this changelog lives under Settings, Updates.'
     ]
   }
 ]

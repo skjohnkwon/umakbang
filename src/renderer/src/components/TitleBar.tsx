@@ -14,6 +14,7 @@ import {
 import { WindowActions } from '@/components/WindowActions'
 import { MiniPlayerExit } from '@/components/MiniPlayer'
 import { Logo } from '@/components/Logo'
+import { AboutDialog } from '@/components/AboutDialog'
 import { useLibrary } from '@/state/library'
 import { baseName } from '@/lib/format'
 import { samePath } from '@/lib/paths'
@@ -35,6 +36,7 @@ export function TitleBar(): React.JSX.Element {
 
   const isMac = platform?.isMac ?? false
   const [searchFocused, setSearchFocused] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
 
   // The mini player is 300px wide, most of which the native caption buttons would eat.
   // All it gets is the way back, on the side those buttons aren't.
@@ -77,24 +79,31 @@ export function TitleBar(): React.JSX.Element {
       // caption buttons over the right edge of the web contents.
       style={{ paddingLeft: isMac ? 78 : 10, paddingRight: isMac ? 10 : 144 }}
     >
-      {/* The app mark, where a windowed app's icon goes, with the running version beside it.
-          Deliberately not a button: every other thing in this bar does something, and a logo
-          that looked clickable and wasn't would be the odd one out. Being plain also leaves
-          it as drag surface.
+      {/* The app mark, where a windowed app's icon goes, with the running version beside it,
+          and the way into About. It carries `app-no-drag` because it is a button now - left
+          as drag surface, a press would start moving the window instead of opening anything.
 
           The version comes off the updater's status rather than a new IPC call - `latest` in
           `updater.ts` is seeded with `app.getVersion()` at module scope, so it is answered
           even when the updater itself is disabled, which is every dev run and every portable
           copy. It renders nothing until the first status arrives; an empty gap for a moment
           beats "v" with nothing after it. */}
-      <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        aria-label="About umakbang"
+        title="About umakbang"
+        onClick={() => setAboutOpen(true)}
+        className="app-no-drag flex items-center gap-1.5 rounded px-0.5 py-0.5 transition-colors hover:bg-accent/60"
+      >
         <Logo className="h-4 w-4 text-primary" />
         {version && (
           <span className="text-[10px] leading-none tabular-nums text-muted-foreground/70">
             {version}
           </span>
         )}
-      </div>
+      </button>
+
+      {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
