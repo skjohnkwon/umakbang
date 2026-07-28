@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,8 +11,10 @@ import {
   Dices,
   ExternalLink,
   FolderInput,
+  FolderPlus,
   Download,
   FilterX,
+  Layers,
   ListFilter,
   Loader2,
   MousePointerClick,
@@ -43,6 +45,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { ColumnMenu } from '@/components/ColumnMenu'
+import { NamePopover, type NamePrompt } from '@/components/NamePopover'
 import { useLibrary } from '@/state/library'
 import { usePlayer } from '@/state/player'
 import { useAvailableTypes, type Row } from '@/hooks/useLibraryView'
@@ -85,11 +88,18 @@ export function Toolbar({
   const parentDir = canGoUp && view.mode === 'folder' ? parentOf(view.dir) : ''
 
   // Dropping on the up button moves things one level out, which is the whole reason to
-  // reach for it mid-drag.
+  // reach for it mid-drag. Not when "up" is the virtual root, though - that isn't a
+  // folder on disk, and a drop into it can only fail.
   const upDrop = useFolderDrop(parentDir)
+  const canDropUp = canGoUp && parentDir !== ''
 
   return (
-    <div className="flex h-[30px] shrink-0 items-center gap-2 border-b px-2.5">
+    /* Two stages of giving way, in that order: the status texts below truncate (they carry
+       `shrink`, everything after them is `shrink-0`), and only if the buttons alone still
+       don't fit does the strip scroll. What it must never do is overflow silently, which
+       painted "checking for changes" across the visualizer panel beside it. The scrollbar
+       is hidden because there is no room for one in 30px - shift+wheel reaches the rest. */
+    <div className="scroll-none flex h-[30px] shrink-0 items-center gap-2 overflow-x-auto overflow-y-hidden border-b px-2.5">
       {/* Back and Forward retrace where you have been, which is not the same question as
           Up: Up is the tree, these are the route you took through it. */}
       <div className="flex shrink-0 items-center">
@@ -130,9 +140,9 @@ export function Toolbar({
             if (view.mode !== 'folder') return
             setView({ mode: 'folder', dir: parentOf(view.dir) })
           }}
-          {...(canGoUp ? upDrop.target : {})}
-          {...(canGoUp ? upDrop.handlers : {})}
-          className={cn(upDrop.over && canGoUp && 'bg-primary/25 text-foreground ring-1 ring-primary')}
+          {...(canDropUp ? upDrop.target : {})}
+          {...(canDropUp ? upDrop.handlers : {})}
+          className={cn(upDrop.over && canDropUp && 'bg-primary/25 text-foreground ring-1 ring-primary')}
         >
           <CornerLeftUp className="h-3.5 w-3.5" />
         </Button>
@@ -166,7 +176,10 @@ export function Toolbar({
         )}
       </div>
 
-      <span className="tnum shrink-0 text-[11.5px] text-muted-foreground">
+      {/* Truncates rather than holding its width: with the panel open there is not always
+          room for the count, the scan status and the buttons, and a row of counts pushed
+          out over the panel is worse than a row of counts cut short. */}
+      <span className="tnum min-w-0 shrink truncate text-[11.5px] text-muted-foreground">
         {[
           folderCount > 0 ? `${folderCount.toLocaleString()} ${folderCount === 1 ? 'folder' : 'folders'}` : '',
           `${fileCount.toLocaleString()} ${fileCount === 1 ? 'file' : 'files'}`
@@ -178,7 +191,7 @@ export function Toolbar({
       {/* Only worth saying once more than one row is in play - a single selection is
           already obvious from the highlight. */}
       {selectionCount > 1 && (
-        <span className="tnum shrink-0 text-[11.5px] font-medium text-primary">
+        <span className="tnum min-w-0 shrink truncate text-[11.5px] font-medium text-primary">
           {selectionCount.toLocaleString()} selected
         </span>
       )}
@@ -186,37 +199,99 @@ export function Toolbar({
       {/* Splitting runs in the background, so this is the only thing that says so. */}
       {stemJob && (
         <span
-          className="tnum flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted-foreground"
+          className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground"
           title={`Splitting ${baseName(stemJob.path)} - ${stemJob.phase}`}
         >
-          <Loader2 className="h-3 w-3 animate-spin" />
-          splitting
-          {stemJob.total > 1 ? ` ${stemJob.done + 1}/${stemJob.total}` : ''}
-          {stemJob.percent !== undefined ? ` · ${Math.round(stemJob.percent)}%` : ''}
+          {/* The spinner is the part that carries the message; the words can go. */}
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+          <span className="truncate">
+            splitting
+            {stemJob.total > 1 ? ` ${stemJob.done + 1}/${stemJob.total}` : ''}
+            {stemJob.percent !== undefined ? ` · ${Math.round(stemJob.percent)}%` : ''}
+          </span>
         </span>
       )}
 
       {scanning && progress && (
-        <span className="tnum flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {progress.phase === 'walking'
-            ? progress.revalidating
-              ? 'checking for changes'
-              : `indexing ${progress.found.toLocaleString()}`
-            : `reading ${progress.probed.toLocaleString()}/${progress.total.toLocaleString()}`}
+        <span className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+          <span className="truncate">
+            {progress.phase === 'walking'
+              ? progress.revalidating
+                ? 'checking for changes'
+                : `indexing ${progress.found.toLocaleString()}`
+              : `reading ${progress.probed.toLocaleString()}/${progress.total.toLocaleString()}`}
+          </span>
         </span>
       )}
 
       <PlaybackToggles />
       <ClearFiltersButton />
+      <NewFolderButton />
       <RefreshFolderButton />
       <RecalculateButton rows={rows} />
       <RandomBeatButton />
       <AudioOnlyToggle />
+      <CollapseRendersToggle />
       <TypeFilterMenu />
       <ColumnsButton />
 
     </div>
+  )
+}
+
+/**
+ * Makes a folder in the folder being browsed.
+ *
+ * The same action as the context menu's, put where it can be reached without hunting for a
+ * patch of empty table to right-click - which in a full folder there is none of. It carries
+ * its own `NamePopover` rather than reaching into the table's: the popover is self-contained
+ * and anchored to whatever asked for it, so a second one costs a few lines and saves
+ * threading a callback from here through `App` and into `FileTable`.
+ *
+ * Only a real folder can hold a new one. The saved views - Rated, Downloads, All files - are
+ * questions about the library rather than places in it, so there is nowhere to put it.
+ */
+function NewFolderButton(): React.JSX.Element {
+  const view = useLibrary((s) => s.view)
+  const [prompt, setPrompt] = useState<NamePrompt | null>(null)
+  const anchor = useRef<HTMLButtonElement>(null)
+
+  const here = view.mode === 'folder' ? view.dir : null
+
+  return (
+    <>
+      <Hint
+        label={here === null ? 'Open a folder to make one inside it' : 'New folder'}
+        side="bottom"
+      >
+        <Button
+          ref={anchor}
+          variant="ghost"
+          size="icon-sm"
+          aria-label="New folder"
+          disabled={here === null}
+          onClick={() => {
+            if (here === null) return
+            const rect = anchor.current?.getBoundingClientRect()
+            setPrompt({
+              title: `New folder in ${here ? baseName(here) : 'the library root'}`,
+              initial: 'New folder',
+              confirmLabel: 'Create',
+              busyLabel: 'Creating…',
+              selectStem: false,
+              skipIfUnchanged: false,
+              submit: (name) => useLibrary.getState().createFolder(here, name),
+              x: rect?.left ?? 200,
+              y: (rect?.bottom ?? 60) + 4
+            })
+          }}
+        >
+          <FolderPlus className="h-3.5 w-3.5" />
+        </Button>
+      </Hint>
+      {prompt && <NamePopover prompt={prompt} onClose={() => setPrompt(null)} />}
+    </>
   )
 }
 
@@ -234,7 +309,12 @@ function RecalculateButton({ rows }: { rows: Row[] }): React.JSX.Element {
   // Not disabled during a scan: analysis reads files that are already indexed and has
   // nothing to do with the walk, and on a library this size a scan is running often
   // enough that gating on it would mean the button was usually dead.
-  const files = rows.flatMap((row) => (row.type === 'file' && row.track.playable ? [row.track] : []))
+  // Memoised on the rows: the toolbar re-renders on every scan progress message and every
+  // selection change, and this walk is O(view size) - 300k in the all-files view.
+  const files = useMemo(
+    () => rows.flatMap((row) => (row.type === 'file' && row.track.playable ? [row.track] : [])),
+    [rows]
+  )
 
   return (
     <Hint
@@ -436,6 +516,45 @@ function AudioOnlyToggle(): React.JSX.Element {
 }
 
 /**
+ * Folds a track's renders into one row.
+ *
+ * A finished piece of music leaves several files behind - `REFLECT_Master.wav`,
+ * `REFLECT.mp3`, `REFLECT_notag.wav` - and in a folder of finished work that is the rule
+ * rather than the exception: 40 songs read as 120 files. The largest render stands for the
+ * rest and says how many it stands for.
+ *
+ * It sits here beside the other view toggles rather than only in Settings because it is a
+ * question about the folder you are looking at now: browsing your own bounces wants it on,
+ * and going to find the exact MP3 you sent somebody wants it off.
+ */
+function CollapseRendersToggle(): React.JSX.Element {
+  const active = useLibrary((s) => s.settings.collapseRenders)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+
+  return (
+    <Hint
+      label={
+        active
+          ? 'One row per track - the biggest render stands for the rest'
+          : "Fold a track's renders (Master, MP3, notag) into one row"
+      }
+      side="bottom"
+    >
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-pressed={active}
+        aria-label="Collapse renders"
+        onClick={() => patchSettings({ collapseRenders: !active })}
+        className={cn(active && 'bg-primary/15 text-primary')}
+      >
+        <Layers className="h-3.5 w-3.5" />
+      </Button>
+    </Hint>
+  )
+}
+
+/**
  * One-click filtering by file type: the broad audio / MIDI / project split, and every
  * extension actually present in the library. Faster than typing `ext:wav`, and it shows
  * you what's in there in the first place.
@@ -594,6 +713,9 @@ function Crumb({
 
   const absolute = roots.length > 0 ? absolutePath(roots, dir) : null
   const pinned = absolute !== null && isPinned(quickMove, absolute)
+  // '' is the virtual root above every library folder: there is no folder on disk behind
+  // it, so a drop or a paste aimed at it can only come back with an error.
+  const virtualRoot = dir === ''
 
   return (
     <ContextMenu>
@@ -602,8 +724,8 @@ function Crumb({
           type="button"
           onClick={onClick}
           title={label}
-          {...drop.target}
-          {...drop.handlers}
+          {...(virtualRoot ? {} : drop.target)}
+          {...(virtualRoot ? {} : drop.handlers)}
           className={cn(
             'truncate rounded px-1 py-0.5 transition-colors',
             active ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
@@ -625,7 +747,7 @@ function Crumb({
           Go here
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!clipboard || clipboard.paths.length === 0}
+          disabled={virtualRoot || !clipboard || clipboard.paths.length === 0}
           onSelect={() => void useLibrary.getState().pasteInto(dir)}
         >
           <ClipboardPaste className="h-3.5 w-3.5" />

@@ -21,13 +21,19 @@
  */
 
 import { app } from 'electron'
-import { accessSync, constants, mkdirSync } from 'node:fs'
+import { accessSync, constants, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /** The folder beside the executable that turns this on. */
 const MARKER = 'data'
 
+/** Where bundles are written: the Export button's default, and the daily backup's home. */
+const BACKUPS = 'backups'
+
 let portable = false
+
+/** Set once a read-only install folder has been reported, so it is said once and not hourly. */
+let backupsFallbackReported = false
 
 /**
  * Whether umakbang is running out of its own folder.
@@ -38,6 +44,54 @@ let portable = false
  */
 export function isPortable(): boolean {
   return portable
+}
+
+/**
+ * Creates a folder and proves it can be written to, or throws.
+ *
+ * Deliberately not `accessSync(W_OK)`: on Windows that only consults the read-only
+ * attribute, which means nothing for a directory, so a write-protected stick passed the
+ * check and every write after it failed silently. Writing a real file is the only honest
+ * probe there is.
+ */
+function makeWritable(dir: string): void {
+  mkdirSync(dir, { recursive: true })
+  const probe = join(dir, '.umakbang-write-probe')
+  writeFileSync(probe, '')
+  rmSync(probe, { force: true })
+}
+
+/**
+ * Where bundles go: a `backups` folder beside the executable.
+ *
+ * Beside the executable rather than under `userData` so a copy of the app carries its own
+ * backups, and so they can be found without knowing what `%APPDATA%` means.
+ *
+ * In development `process.execPath` is Electron's own binary under `node_modules`, and
+ * writing 22MB a day inside a dependency is nobody's intent - so an unpackaged run keeps
+ * them under `userData` instead. Same `app.isPackaged` guard, same reasoning, as the marker
+ * check above.
+ *
+ * An NSIS install lands under Program Files, which is read-only for a normal user. Falling
+ * back to `userData` beats not backing up at all, but as with the marker it is said out
+ * loud, because a backup folder that is not where the user was told to look is its own kind
+ * of failure. Said once rather than on every hourly check.
+ */
+export function backupsDir(): string {
+  const fallback = join(app.getPath('userData'), BACKUPS)
+  if (!app.isPackaged) return fallback
+
+  const beside = join(dirname(process.execPath), BACKUPS)
+  try {
+    makeWritable(beside)
+    return beside
+  } catch {
+    if (!backupsFallbackReported) {
+      backupsFallbackReported = true
+      console.log(`umakbang: ${beside} is not writable, backups go to ${fallback} instead`)
+    }
+    return fallback
+  }
 }
 
 /**
@@ -66,8 +120,7 @@ export function usePortableDataDir(): { portable: boolean; dir: string; reason?:
   // silently writing somewhere other than the folder the user pointed at is exactly the
   // confusion portable mode is meant to end.
   try {
-    mkdirSync(candidate, { recursive: true })
-    accessSync(candidate, constants.W_OK)
+    makeWritable(candidate)
   } catch {
     return {
       portable: false,

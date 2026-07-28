@@ -1,11 +1,13 @@
 import type React from 'react'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Clock,
   ListMusic,
   LocateFixed,
   Pause,
   Play,
+  Save,
+  Scissors,
   SkipBack,
   SkipForward,
   Volume2,
@@ -15,14 +17,17 @@ import { AnimatePresence, motion } from 'motion/react'
 import type { Track } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Waveform } from '@/components/Waveform'
+import { NamePopover, type NamePrompt } from '@/components/NamePopover'
 import { usePlayer } from '@/state/player'
 import { useLibrary } from '@/state/library'
 import { useProjectFor } from '@/hooks/useLibraryView'
+import { decodeTrack } from '@/lib/peaks'
+import { trimBuffer, trimName } from '@/lib/trim'
 import { QUICK } from '@/lib/motion'
 import { formatHours } from '@/lib/stats'
-import { formatTime } from '@/lib/format'
+import { baseName, formatDurationPrecise, formatTime } from '@/lib/format'
 import {
   DEFAULT_DETAIL_FIELDS,
   formatDetails,
@@ -58,7 +63,6 @@ export function NowPlayingBar(): React.JSX.Element {
   const playing = usePlayer((s) => s.playing)
   const time = usePlayer((s) => s.time)
   const duration = usePlayer((s) => s.duration)
-  const muted = usePlayer((s) => s.muted)
   const error = usePlayer((s) => s.error)
   const queue = usePlayer((s) => s.queue)
   const index = usePlayer((s) => s.index)
@@ -152,14 +156,55 @@ export function NowPlayingBar(): React.JSX.Element {
   const togglePlay = usePlayer((s) => s.togglePlay)
   const next = usePlayer((s) => s.next)
   const previous = usePlayer((s) => s.previous)
-  const toggleMute = usePlayer((s) => s.toggleMute)
   const revealTrack = useLibrary((s) => s.revealTrack)
 
-  const VolumeIcon = muted ? VolumeX : Volume2
+  const region = usePlayer((s) => s.region)
+  const setRegion = usePlayer((s) => s.setRegion)
+  /**
+   * Whether a drag on the waveform paints a region instead of scrubbing.
+   *
+   * Component state and not a setting: it is somewhere you step into to cut one piece out
+   * of one beat, and a waveform that had silently stopped scrubbing since the last session
+   * would read as the transport being broken.
+   */
+  const [trimming, setTrimming] = useState(false)
+  const [prompt, setPrompt] = useState<NamePrompt | null>(null)
+  const saveAnchor = useRef<HTMLButtonElement>(null)
+
+  /**
+   * Decode, cut, encode, write.
+   *
+   * Everything up to the write happens in the renderer because that is where the decoder
+   * is - `decodeAudioData` needs an AudioContext, which main has no equivalent of - and
+   * main is handed finished bytes and the one job it is actually needed for, which is
+   * refusing to land on top of an existing file.
+   *
+   * Reads the track and region from the store rather than closing over them: this is handed
+   * to the name popover once, and by the time it runs the user has typed a name and a
+   * couple of seconds have passed.
+   */
+  const saveTrim = useCallback(async (name: string): Promise<string | null> => {
+    const { current: track, region: area } = usePlayer.getState()
+    if (!track || !area) return 'There is no selection to save.'
+    try {
+      const buffer = await decodeTrack(track.path, track.size)
+      if (!buffer) return `Couldn't decode .${track.ext} to cut a piece out of it.`
+      const trimmed = await trimBuffer(buffer, track, area.start, area.end)
+      const written = await window.umakbang.saveTrim(track.path, name, trimmed.bytes)
+      if (written.error || !written.path) return written.error ?? 'Could not write the file.'
+      // The folder re-read is what puts the new file in the list; a rescan would rebuild the
+      // whole library to learn about one file that is already right there.
+      void window.umakbang.refreshFolder(track.dir)
+      useLibrary.getState().notify(`Saved ${baseName(written.path)}.`)
+      return null
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }, [])
 
   return (
     <section
-      className="relative flex shrink-0 items-center gap-3 border-t bg-card/50 px-3"
+      className="relative flex shrink-0 items-center gap-3 overflow-hidden border-t bg-card/50 px-3"
       style={{ height: effectiveHeight }}
       aria-label="Now playing"
     >
@@ -201,9 +246,12 @@ export function NowPlayingBar(): React.JSX.Element {
           read, the buttons are aimed at - and side by side each was squeezing the other.
           Sized by the boundary to its right rather than by its contents, so the waveform
           doesn't jump every time a longer file name loads. */}
+      {/* The split is a preferred width, not a floor: with the visualizer panel open the
+          explorer can be narrower than the split alone, and a half that refuses to give way
+          pushes the transport out over the panel beside it. */}
       <div
-        className="flex shrink-0 flex-col justify-center gap-2 overflow-hidden"
-        style={{ width: effectiveSplit }}
+        className="flex min-w-0 shrink flex-col justify-center gap-2 overflow-hidden"
+        style={{ width: effectiveSplit, maxWidth: '100%' }}
       >
         {current ? (
           <AnimatePresence mode="wait" initial={false}>
@@ -312,16 +360,7 @@ export function NowPlayingBar(): React.JSX.Element {
               </div>
             </PopoverContent>
           </Popover>
-          <Hint label={muted ? 'Unmute' : 'Mute'}>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={toggleMute}
-              className={cn(muted && 'text-destructive')}
-            >
-              <VolumeIcon className="h-3.5 w-3.5" />
-            </Button>
-          </Hint>
+          <VolumeControl />
 
           {/* Right after mute rather than pinned to the far end: the time belongs with the
               controls that act on what is playing, not stranded across the strip. */}
@@ -330,8 +369,75 @@ export function NowPlayingBar(): React.JSX.Element {
               {formatTime(time)} / {formatTime(duration || current.duration || 0)}
             </span>
           )}
+
+          {/* Trim. Nothing but the toggle shows until a region has been drawn - the strip is
+              thirty pixels of chrome and a length and a save button that mean nothing yet
+              would be two thirds of a control group nobody asked for. */}
+          <Hint label={trimming ? 'Stop selecting' : 'Select a region to loop and save'}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              disabled={!current?.playable}
+              onClick={() => {
+                const on = !trimming
+                setTrimming(on)
+                // Leaving the mode takes the loop with it. The region is only reachable from
+                // these controls, so one left running behind a switched-off toggle is a
+                // track that mysteriously refuses to play past a point.
+                if (!on) setRegion(null)
+              }}
+              className={cn(trimming && 'text-primary')}
+            >
+              <Scissors className="h-3.5 w-3.5" />
+            </Button>
+          </Hint>
+
+          {current && region && (
+            <>
+              <span className="tnum shrink-0 text-[11px] text-primary" title="Looping this much">
+                {formatDurationPrecise(region.end - region.start)}
+              </span>
+              <Hint label="Save selection…">
+                <Button
+                  ref={saveAnchor}
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => {
+                    const rect = saveAnchor.current?.getBoundingClientRect()
+                    setPrompt({
+                      title: `Save ${formatDurationPrecise(region.end - region.start)} beside ${current.name}`,
+                      // The extension follows what `trimBuffer` will actually produce: an
+                      // MP3 stays an MP3, everything else comes back as a WAV, and offering
+                      // a name the bytes are not would be a lie in the one field the user
+                      // is looking at.
+                      initial: trimName(
+                        current.name,
+                        region.start,
+                        region.end,
+                        current.ext === 'mp3' ? 'mp3' : 'wav'
+                      ),
+                      confirmLabel: 'Save',
+                      busyLabel: 'Saving…',
+                      selectStem: true,
+                      skipIfUnchanged: false,
+                      // NamePopover holds the button disabled for the whole of this promise,
+                      // which is what keeps a second decode-and-encode from starting on top
+                      // of the first.
+                      submit: saveTrim,
+                      x: rect?.left ?? 200,
+                      y: (rect?.top ?? 200) - 8
+                    })
+                  }}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                </Button>
+              </Hint>
+            </>
+          )}
         </div>
       </div>
+
+      {prompt && <NamePopover prompt={prompt} onClose={() => setPrompt(null)} />}
 
       {/* The boundary between the two halves. Drag it to trade control room for scrub
           precision; double-click puts it back. */}
@@ -371,6 +477,7 @@ export function NowPlayingBar(): React.JSX.Element {
         {current ? (
           <Waveform
             track={current}
+            selectable={trimming}
             className="min-w-0 flex-1"
             style={{ height: Math.max(24, effectiveHeight - 18) }}
           />
@@ -388,6 +495,117 @@ export function NowPlayingBar(): React.JSX.Element {
       )}
 
     </section>
+  )
+}
+
+/** How long the slider stays up after the pointer leaves it. */
+const VOLUME_LINGER = 200
+
+/**
+ * Mute on the button, level on hover.
+ *
+ * The speaker is the only place in the strip that is about how loud things are, so the
+ * slider hangs off it rather than taking a second slot in a row that is already full. The
+ * click has to keep working untouched, which is why the button is a `PopoverAnchor` and not
+ * a `PopoverTrigger`: a trigger would own the press and toggling mute would stop being one
+ * click.
+ *
+ * The panel is opened and closed by hand rather than by Radix, for the gap between the
+ * button and the panel: closing on `pointerleave` alone shuts the slider the instant the
+ * pointer crosses that gap, which makes it unreachable. A short grace period that
+ * re-entering either half cancels is the whole fix.
+ */
+function VolumeControl(): React.JSX.Element {
+  const muted = usePlayer((s) => s.muted)
+  const volume = usePlayer((s) => s.volume)
+  const setVolume = usePlayer((s) => s.setVolume)
+  const toggleMute = usePlayer((s) => s.toggleMute)
+  const [open, setOpen] = useState(false)
+  const closeTimer = useRef<number | null>(null)
+  const anchorRef = useRef<HTMLSpanElement>(null)
+
+  const hold = useCallback(() => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+    closeTimer.current = null
+    setOpen(true)
+  }, [])
+
+  const release = useCallback(() => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+    closeTimer.current = window.setTimeout(() => setOpen(false), VOLUME_LINGER)
+  }, [])
+
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+    },
+    []
+  )
+
+  const VolumeIcon = muted || volume === 0 ? VolumeX : Volume2
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverAnchor asChild>
+        <span ref={anchorRef} onPointerEnter={hold} onPointerLeave={release} className="inline-flex">
+          <Hint label={muted ? 'Unmute' : 'Mute'}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={toggleMute}
+              className={cn(muted && 'text-destructive')}
+            >
+              <VolumeIcon className="h-3.5 w-3.5" />
+            </Button>
+          </Hint>
+        </span>
+      </PopoverAnchor>
+      <PopoverContent
+        side="top"
+        align="center"
+        sideOffset={2}
+        onPointerEnter={hold}
+        onPointerLeave={release}
+        // A panel that arrived because the pointer passed over something must not take the
+        // keyboard away from whatever the user was actually doing.
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onInteractOutside={(event) => {
+          // Muting is the thing you do with this panel open, and the button counts as
+          // outside it because it is the anchor rather than the trigger. Without this the
+          // slider vanishes on the one click it is there to sit beside.
+          const target = event.detail.originalEvent.target
+          if (target instanceof Node && anchorRef.current?.contains(target)) {
+            event.preventDefault()
+          }
+        }}
+        className="flex w-auto flex-col items-center gap-1.5 p-2"
+      >
+        {/* Rotated rather than given a vertical writing mode: which end of a
+            `writing-mode: vertical-*` range is the maximum depends on the direction as well,
+            and a volume slider that turns out to be upside down is not a thing to find out
+            about later. A quarter turn anticlockwise puts the maximum at the top, always. */}
+        <div className="flex h-24 w-6 items-center justify-center">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.round(volume * 100)}
+            aria-label="Volume"
+            onChange={(event) => setVolume(Number(event.target.value) / 100)}
+            // An input is one of the targets App.tsx's global shortcuts already step around,
+            // so the arrow keys nudge the level here instead of seeking the track.
+            onKeyDown={(event) => event.stopPropagation()}
+            className="h-1 w-24 shrink-0 -rotate-90 cursor-pointer"
+            style={{ accentColor: 'var(--primary)' }}
+          />
+        </div>
+        <span className="tnum text-[10.5px] text-muted-foreground">
+          {muted ? 'muted' : `${Math.round(volume * 100)}%`}
+        </span>
+      </PopoverContent>
+    </Popover>
   )
 }
 

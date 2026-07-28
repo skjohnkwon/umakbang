@@ -29,6 +29,7 @@ import {
   resetAnalysis
 } from '@/lib/analysis'
 import { inAnalysisScope } from '@/lib/analysis-scope'
+import { plausibleBpm } from '@shared/tempo'
 import { absolutePath, baseName, parentPath, relativePath, samePath } from '@/lib/paths'
 
 export type ViewMode =
@@ -142,8 +143,12 @@ interface LibraryState {
   ratings: Record<string, number>
   /** Tempo recovered by analysing audio, for files whose headers don't carry one. */
   detectedBpm: Record<string, number>
+  /** Whatever the user wrote about a file, by absolute path. */
+  notes: Record<string, string>
   /** Musical key recovered the same way. */
   detectedKey: Record<string, string>
+  /** How well each of those keys fitted, 0 to 1. Absent for a key nothing measured. */
+  detectedKeyFit: Record<string, number>
   /** Contents of the Downloads folder, refreshed on demand rather than indexed. */
   downloads: Track[]
 
@@ -250,15 +255,22 @@ interface LibraryState {
   addTags: (paths: string[], tags: string[]) => void
   /** Removes a tag from every given file. */
   removeTag: (paths: string[], tag: string) => void
+  /**
+   * Renames a tag everywhere it appears, merging into the destination if that already
+   * exists. Returns an error message, or null when it worked.
+   */
+  renameTag: (from: string, to: string) => string | null
   setSort: (key: SortKey) => void
   patchSettings: (patch: Partial<Settings>) => void
 
   updateTags: (path: string, tags: string[]) => void
   setRating: (path: string, rating: number) => void
+  /** Writes a note against a file. An empty one removes it. */
+  setNote: (path: string, note: string) => void
   refreshDownloads: () => Promise<void>
   applyDetectedBpm: (path: string, bpm: number) => void
   /** Folds an analysed tempo and/or key into the index and the cache. */
-  applyAnalysis: (path: string, analysis: { bpm?: number; musicalKey?: string }) => void
+  applyAnalysis: (path: string, analysis: { bpm?: number; musicalKey?: string; keyFit?: number }) => void
   /** Throws away analysed tempo and key for these files and works them out again. */
   recalculateAnalysis: (tracks: Track[]) => void
   /**
@@ -308,7 +320,12 @@ interface LibraryState {
    * machine spends a minute rebuilding caches. A bundle is bigger and always the better
    * answer. `.json` files are still read on import, so nothing already written is orphaned.
    */
-  exportBundle: () => Promise<void>
+  /**
+   * `pick` opens the save dialog; without it the bundle goes straight to the folder set in
+   * Settings. Exporting is something done repeatedly to the same place, and asking for a
+   * name every time was a dialog whose answer never changed.
+   */
+  exportBundle: (pick?: boolean) => Promise<void>
   /** True while a bundle is being written or unpacked, since both take a moment. */
   bundleBusy: boolean
   /** A backup that has been read but not yet applied, driving the import wizard. */
@@ -327,6 +344,38 @@ interface LibraryState {
   adoptUserData: (data: UserData) => void
 }
 
+/**
+ * One string object per distinct directory, extension and kind across the whole index.
+ *
+ * The scanner already interns these when it reads the saved index, and **that does the
+ * renderer no good at all**: measured, structured clone does not preserve the sharing.
+ * Simulating the real 326,487-track library through the same batched serialise/deserialise
+ * the scanner posts across, the received rows plus their `byPath` map cost 280.1MB whether
+ * or not the sending side interned, and 187.1MB when the receiving side does it too. Both
+ * sides intern for that reason, not by duplication: one keeps the scanner process small
+ * while it holds the index for the whole scan, the other is where the library actually
+ * lives.
+ *
+ * There are 15,684 distinct `dir` values, as many `relDir`, 16 extensions and 3 kinds among
+ * those 326,487 tracks. `path`, `rel` and `name` are left alone - they are distinct per
+ * track, so pooling them is a Map that can never return a hit.
+ */
+const stringPool = new Map<string, string>()
+
+function interned(value: string): string {
+  const hit = stringPool.get(value)
+  if (hit !== undefined) return hit
+  stringPool.set(value, value)
+  return value
+}
+
+function shareStrings(track: Track): void {
+  if (typeof track.dir === 'string') track.dir = interned(track.dir)
+  if (typeof track.relDir === 'string') track.relDir = interned(track.relDir)
+  if (typeof track.ext === 'string') track.ext = interned(track.ext)
+  if (typeof track.kind === 'string') track.kind = interned(track.kind) as TrackKind
+}
+
 export const useLibrary = create<LibraryState>((set, get) => ({
   ready: false,
   platform: null,
@@ -343,8 +392,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   tags: {},
   ratings: {},
+  notes: {},
   detectedBpm: {},
   detectedKey: {},
+  detectedKeyFit: {},
   downloads: [],
 
   view: { mode: 'folder', dir: '' },
@@ -389,8 +440,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       roots: userData.settings.roots,
       tags: userData.tags,
       ratings: userData.ratings ?? {},
+      notes: userData.notes ?? {},
       detectedBpm: userData.detectedBpm ?? {},
       detectedKey: userData.detectedKey ?? {},
+      detectedKeyFit: userData.detectedKeyFit ?? {},
       typeFilter: userData.settings.typeFilter ?? { kinds: [], exts: [] },
       view,
       // The place the session opens in is the first thing Back can return to.
@@ -407,6 +460,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   resetLibrary: (roots) => {
     resetAnalysis()
+    // The index this pooled strings for is about to be thrown away. Kept across a reset it
+    // would grow by every folder any library ever opened had, and hold them alive for the
+    // life of the window.
+    stringPool.clear()
     // Rescanning the same folders shouldn't throw away where the user is standing; only a
     // change to which folders are open starts over at the top.
     const before = get().roots.map((root) => root.label).join('|')
@@ -430,8 +487,16 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   addTracks: (incoming) => {
     const { tracks, byPath, detectedBpm, detectedKey } = get()
+    let added = 0
     for (const track of incoming) {
       if (byPath.has(track.path)) continue
+      added++
+      shareStrings(track)
+      // The saved index holds tempos probed before `plausibleBpm` existed - a hi-hat at
+      // 346 BPM off its own loop chunk. Dropped here rather than waiting for a rescan to
+      // rewrite the index, and dropped before the fold below so a detected tempo can take
+      // its place.
+      if (track.bpm !== undefined && !plausibleBpm(track.bpm)) track.bpm = undefined
       // Fold in any previously analysed tempo and key so sorting and `bpm>` / `key:`
       // filters see them too, not just the displayed value.
       if (track.bpm === undefined && detectedBpm[track.path] !== undefined) {
@@ -443,7 +508,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       byPath.set(track.path, track)
       tracks.push(track)
     }
-    bumpRevision(true)
+    // Nothing arrived, so nothing has to be recomputed. This is the whole of a revalidation
+    // pass: the walk re-sends every row the index replay already put here, and a *structural*
+    // bump per batch is what makes `buildTree` fold in a tail and `useVisibleRows` re-derive
+    // - 1,300 times over, for a library that has not changed. The batch still costs an IPC
+    // hop and a Map lookup per row; only the scanner can stop that, which is what `onFresh`
+    // in scanner.ts is for.
+    if (added > 0) bumpRevision(true)
   },
 
   /**
@@ -496,11 +567,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       set((state) => {
         const detectedBpm = { ...state.detectedBpm }
         const detectedKey = { ...state.detectedKey }
+        const detectedKeyFit = { ...state.detectedKeyFit }
         for (const path of stale) {
           delete detectedBpm[path]
           delete detectedKey[path]
+          delete detectedKeyFit[path]
         }
-        return { detectedBpm, detectedKey }
+        return { detectedBpm, detectedKey, detectedKeyFit }
       })
     }
     if (arrived.length > 0) get().addTracks(arrived)
@@ -530,13 +603,20 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   applyMetadata: (patches) => {
     const { byPath } = get()
+    let touched = 0
     for (const patch of patches) {
       const track = byPath.get(patch.path)
       if (!track) continue
+      touched++
       Object.assign(track, patch.meta)
+      // Same as `addTracks`: the metadata cache is append-only and keyed by path, so an
+      // entry written by the old bounds is handed back verbatim until the file changes.
+      if (track.bpm !== undefined && !plausibleBpm(track.bpm)) track.bpm = undefined
       track.probed = true
     }
-    bumpRevision()
+    // A batch that named nothing this window holds - the tail of a superseded scan, most
+    // often - changed no row and is no reason to re-derive the visible ones.
+    if (touched > 0) bumpRevision()
   },
 
   setProgress: (progress) => {
@@ -718,6 +798,36 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ tags: next })
   },
 
+  renameTag: (from, to) => {
+    const next = to.trim()
+    if (!next) return 'A tag needs a name.'
+    if (next === from) return null
+
+    const tags = { ...get().tags }
+    let touched = 0
+    for (const [path, list] of Object.entries(tags)) {
+      if (!list.includes(from)) continue
+      // Deduped, because a file that already carries the destination tag must not end up
+      // with it twice - which is what makes this a merge as well as a rename.
+      const merged = [...new Set(list.map((tag) => (tag === from ? next : tag)))]
+      tags[path] = merged
+      void window.umakbang.setTags(path, merged)
+      touched++
+    }
+    if (touched === 0) return null
+
+    const state = get()
+    set({
+      tags,
+      // A filter naming the old tag would empty the library the moment the rename lands.
+      tagFilter: state.tagFilter.map((tag) => (tag === from ? next : tag))
+    })
+    // `Settings.analysisTag` names a folder tag, so renaming that one without following it
+    // here would silently take every folder out of the analysis scope.
+    if (state.settings.analysisTag === from) get().patchSettings({ analysisTag: next })
+    return null
+  },
+
   removeTag: (paths, tag) => {
     const next = { ...get().tags }
     for (const path of paths) {
@@ -787,11 +897,14 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   refreshDownloads: async () => {
     const downloads = await window.umakbang.listDownloads()
-    // Carry over any tempo already analysed for these files.
-    const { detectedBpm } = get()
+    // Carry over anything already analysed for these files, key as well as tempo.
+    const { detectedBpm, detectedKey } = get()
     for (const track of downloads) {
       if (track.bpm === undefined && detectedBpm[track.path] !== undefined) {
         track.bpm = detectedBpm[track.path]
+      }
+      if (track.musicalKey === undefined && detectedKey[track.path] !== undefined) {
+        track.musicalKey = detectedKey[track.path]
       }
     }
     set({ downloads })
@@ -799,7 +912,26 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   /* ---------------------------------------------------------------- file operations */
 
-  setClipboard: (paths, mode) => set({ clipboard: paths.length > 0 ? { paths, mode } : null }),
+  setClipboard: (paths, mode) => {
+    set({ clipboard: paths.length > 0 ? { paths, mode } : null })
+    /**
+     * Copying puts the files themselves on the system clipboard, so Ctrl+C here behaves the
+     * way it does in Explorer and a beat can be pasted straight into Discord.
+     *
+     * `copyFiles` sets the file list and the path text in one operation, which is the only
+     * way to have both: two separate writes race, and whichever lands last owns the
+     * clipboard. Where it isn't available - anywhere but Windows - it resolves false and the
+     * paths go on as text, which is what that handler's contract asks the caller to do.
+     *
+     * Not on a cut. Windows tells cut from copy with a drop-effect flag this cannot set, so
+     * a mirrored cut would paste as a copy and leave the original where it was.
+     */
+    if (mode === 'copy' && paths.length > 0) {
+      void window.umakbang.copyFiles(paths).then((ok) => {
+        if (!ok) void window.umakbang.copyText(paths.join('\n'))
+      })
+    }
+  },
   clearClipboard: () => set({ clipboard: null }),
 
   transferPaths: async (paths, destination, mode) => {
@@ -969,7 +1101,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     byPath.delete(path)
     byPath.set(track.path, track)
 
-    // Ratings and tags are keyed by path, so they have to follow the file.
+    // Ratings, tags and detected values are keyed by path, so they have to follow the
+    // file - a rename that dropped the detected tempo and key looked fine until the next
+    // launch, when both came back blank.
     const rating = ratings[path]
     if (rating !== undefined) {
       const nextRatings = { ...ratings }
@@ -987,6 +1121,35 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       set({ tags: next })
       void window.umakbang.setTags(path, [])
       void window.umakbang.setTags(track.path, moved)
+    }
+    const { notes } = get()
+    if (notes[path] !== undefined) {
+      const moved = notes[path]
+      const next = { ...notes }
+      delete next[path]
+      next[track.path] = moved
+      set({ notes: next })
+      void window.umakbang.setNote(path, '')
+      void window.umakbang.setNote(track.path, moved)
+    }
+    const { detectedBpm, detectedKey } = get()
+    if (detectedBpm[path] !== undefined || detectedKey[path] !== undefined) {
+      const nextBpm = { ...detectedBpm }
+      const nextKey = { ...detectedKey }
+      const bpm = nextBpm[path]
+      const musicalKey = nextKey[path]
+      delete nextBpm[path]
+      delete nextKey[path]
+      if (bpm !== undefined) {
+        nextBpm[track.path] = bpm
+        void window.umakbang.setDetectedBpm(track.path, bpm)
+      }
+      if (musicalKey !== undefined) {
+        nextKey[track.path] = musicalKey
+        void window.umakbang.setDetectedKey(track.path, musicalKey)
+      }
+      void window.umakbang.clearDetected([path])
+      set({ detectedBpm: nextBpm, detectedKey: nextKey })
     }
 
     set({ selectedPath: track.path, selection: new Set([track.path]) })
@@ -1008,13 +1171,16 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
   bundleBusy: false,
 
-  exportBundle: async () => {
+  exportBundle: async (pick) => {
     if (get().bundleBusy) return
-    const chosen = await window.umakbang.pickBundlePath()
+    const chosen = pick
+      ? await window.umakbang.pickBundlePath()
+      : await window.umakbang.defaultBundlePath()
     if (chosen.error) {
       get().notify(chosen.error, 'error')
       return
     }
+    // Only the dialog can come back empty, and only because it was cancelled.
     if (!chosen.path) return
 
     set({ bundleBusy: true })
@@ -1025,7 +1191,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     try {
       const result = await window.umakbang.writeBundle(chosen.path)
       if (result.error) get().notify(result.error, 'error')
-      else if (result.path) get().notify(`Bundle written to ${baseName(result.path)}.`)
+      // The whole path, not just the name. Without a dialog the user did not choose where
+      // this went, so the folder is the part of the answer they don't already have.
+      else if (result.path) get().notify(`Bundle written to ${result.path}.`)
     } finally {
       set({ bundleBusy: false })
     }
@@ -1153,6 +1321,25 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     else next[path] = clamped
     set({ ratings: next })
     void window.umakbang.setRating(path, clamped)
+  },
+
+  setNote: (path, note) => {
+    const next = { ...get().notes }
+    /**
+     * Stored exactly as typed, trailing space and all.
+     *
+     * The field is a controlled input reading straight off this map, so trimming here meant
+     * the space that ends a word was deleted the moment it was typed and the next word ran
+     * into the last one: "one two" came out "onetwo". Only whether the note is *empty* is a
+     * question about the trimmed value, so a note of nothing but spaces still removes itself.
+     * `store.ts` trims on the way to disk, which is where a tidy value actually matters.
+     */
+    if (note.trim()) next[path] = note
+    else delete next[path]
+    set({ notes: next })
+    // The main store debounces the write to disk; this is per keystroke by design, so the
+    // note on screen is never behind what was typed.
+    void window.umakbang.setNote(path, note)
   },
 
   stemJob: null,
@@ -1329,8 +1516,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     }
     if (analysis.musicalKey !== undefined && track.musicalKey === undefined) {
       track.musicalKey = analysis.musicalKey
-      set({ detectedKey: { ...get().detectedKey, [path]: analysis.musicalKey } })
-      void window.umakbang.setDetectedKey(path, analysis.musicalKey)
+      const fits = { ...get().detectedKeyFit }
+      // A key from the user's own tool arrives with no fit, and last run's number would be
+      // describing an answer this one has just replaced.
+      if (analysis.keyFit === undefined) delete fits[path]
+      else fits[path] = analysis.keyFit
+      set({ detectedKey: { ...get().detectedKey, [path]: analysis.musicalKey }, detectedKeyFit: fits })
+      void window.umakbang.setDetectedKey(path, analysis.musicalKey, analysis.keyFit)
       changed = true
     }
     if (changed) bumpRevision()
@@ -1377,6 +1569,7 @@ function applyTransfer(result: TransferResult, mode: TransferMode): void {
   const nextRatings = { ...store.ratings }
   const nextTags = { ...store.tags }
   const nextBpm = { ...store.detectedBpm }
+  const nextKey = { ...store.detectedKey }
   const moving = mode === 'move'
   let touched = false
 
@@ -1421,17 +1614,38 @@ function applyTransfer(result: TransferResult, mode: TransferMode): void {
       touched = true
     }
 
-    const detected = nextBpm[from]
-    if (detected !== undefined) {
-      if (moving) delete nextBpm[from]
-      nextBpm[track.path] = detected
-      void window.umakbang.setDetectedBpm(track.path, detected)
+    // Both detected values follow the file the same way - and on a move the old path's
+    // persisted entries are cleared too, or umakbang-data.json accumulates readings for
+    // paths that no longer exist while the moved file loses its own on the next launch.
+    const detectedTempo = nextBpm[from]
+    const detectedMusicalKey = nextKey[from]
+    if (detectedTempo !== undefined || detectedMusicalKey !== undefined) {
+      if (moving) {
+        delete nextBpm[from]
+        delete nextKey[from]
+        void window.umakbang.clearDetected([from])
+      }
+      if (detectedTempo !== undefined) {
+        nextBpm[track.path] = detectedTempo
+        void window.umakbang.setDetectedBpm(track.path, detectedTempo)
+      }
+      if (detectedMusicalKey !== undefined) {
+        nextKey[track.path] = detectedMusicalKey
+        void window.umakbang.setDetectedKey(track.path, detectedMusicalKey)
+      }
       touched = true
     }
   }
 
-  // Set before the tracks are added: addTracks reads detectedBpm to fill in a tempo.
-  if (touched) useLibrary.setState({ ratings: nextRatings, tags: nextTags, detectedBpm: nextBpm })
+  // Set before the tracks are added: addTracks reads the detected maps to fill in values.
+  if (touched) {
+    useLibrary.setState({
+      ratings: nextRatings,
+      tags: nextTags,
+      detectedBpm: nextBpm,
+      detectedKey: nextKey
+    })
+  }
 
   if (moving && result.removed.length > 0) {
     const gone = new Set(result.removed)
@@ -1634,7 +1848,11 @@ export function connectLibraryEvents(): () => void {
     window.umakbang.onTracks((tracks) => useLibrary.getState().addTracks(tracks)),
     window.umakbang.onRemoved((paths) => useLibrary.getState().removeTracks(paths)),
     window.umakbang.onMetadata((patches) => useLibrary.getState().applyMetadata(patches)),
-    window.umakbang.onProgress((progress) => useLibrary.getState().setProgress(progress))
+    window.umakbang.onProgress((progress) => useLibrary.getState().setProgress(progress)),
+    // Both channels existed for years with no listener: a scanner crash emptied the
+    // library in silence, and a declined folder pick closed its dialog and said nothing.
+    window.umakbang.onLibraryError(({ message }) => useLibrary.getState().notify(message, 'error')),
+    window.umakbang.onLibraryNotice(({ message }) => useLibrary.getState().notify(message))
   ]
   void store.hydrate()
   return () => unsubscribes.forEach((off) => off())

@@ -1,5 +1,6 @@
 import type React from 'react'
-import { Hash, X } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Hash, Search, X } from 'lucide-react'
 import { useLibrary } from '@/state/library'
 import { useAllTags } from '@/hooks/useLibraryView'
 import { cn } from '@/lib/utils'
@@ -15,11 +16,31 @@ import { cn } from '@/lib/utils'
  * you into a separate list: the folder you're browsing, minus everything not tagged that
  * way.
  */
+/**
+ * Above how many tags a search field is worth the two lines it costs.
+ *
+ * Below this the whole set is on screen already and a box to narrow seven chips is furniture.
+ * The strip caps at 92px, so past roughly this many the ones you want are behind a scroll.
+ */
+const SEARCH_FROM = 10
+
 export function TagBar(): React.JSX.Element {
   const tags = useAllTags()
   const tagFilter = useLibrary((s) => s.tagFilter)
   const toggleTagFilter = useLibrary((s) => s.toggleTagFilter)
   const clearTagFilter = useLibrary((s) => s.clearTagFilter)
+  const [query, setQuery] = useState('')
+
+  const searchable = tags.length >= SEARCH_FROM
+  const shown = useMemo(() => {
+    const typed = query.trim().toLowerCase()
+    if (!typed) return tags
+    // Anything already filtering the library stays on screen whether or not it matches, or
+    // narrowing the list would hide the chip you need in order to switch that filter off.
+    return tags.filter(
+      (entry) => entry.tag.toLowerCase().includes(typed) || tagFilter.includes(entry.tag)
+    )
+  }, [tags, query, tagFilter])
 
   return (
     <div className="shrink-0 px-2 pt-3">
@@ -39,6 +60,25 @@ export function TagBar(): React.JSX.Element {
         )}
       </div>
 
+      {searchable && (
+        <div className="relative mb-1">
+          <Search className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/50" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            // Escape clears rather than closing anything: the strip is always on screen, so
+            // there is nothing to dismiss and an empty box is the only "never mind" there is.
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Escape') setQuery('')
+            }}
+            placeholder={`Search ${tags.length} tags`}
+            spellCheck={false}
+            className="h-[22px] w-full rounded border border-border/60 bg-secondary/40 pl-6 pr-1.5 text-[11px] text-foreground outline-none placeholder:text-muted-foreground/50 focus-visible:border-primary/60"
+          />
+        </div>
+      )}
+
       {tags.length === 0 ? (
         <p className="px-1 pb-0.5 text-[11px] leading-snug text-muted-foreground/60">
           No tags yet - select files and press <kbd className="font-sans font-medium">T</kbd> to
@@ -48,7 +88,10 @@ export function TagBar(): React.JSX.Element {
         // Capped and scrollable: a library can accumulate a lot of tags, and this strip
         // must never grow enough to squeeze the transport off the bottom.
         <div className="scroll-thin flex max-h-[92px] flex-wrap gap-1 overflow-y-auto">
-          {tags.map(({ tag, count }) => {
+          {shown.length === 0 && (
+            <p className="px-1 text-[11px] text-muted-foreground/60">No tag matches that.</p>
+          )}
+          {shown.map(({ tag, count }) => {
             const active = tagFilter.includes(tag)
             return (
               <button

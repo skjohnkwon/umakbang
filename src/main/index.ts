@@ -14,8 +14,8 @@ import {
   screen,
   utilityProcess
 } from 'electron'
-import { join } from 'node:path'
-import { appendFileSync, existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -37,6 +37,7 @@ import {
 import {
   createFolder,
   describeDir,
+  nameError,
   renameEntry,
   transfer,
   trashEntries
@@ -55,11 +56,12 @@ import {
   clearDetected,
   setDetectedBpm,
   setDetectedKey,
+  setNote,
   setRating,
   setTags,
   updateSettings
 } from './store'
-import { appendIndexPatch, initIndexStore } from './index-store'
+import { appendIndexPatch, clearIndex, initIndexStore } from './index-store'
 import {
   fitFor,
   looksLikeBundle,
@@ -70,7 +72,8 @@ import {
 } from './bundle'
 import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
-import { usePortableDataDir } from './portable'
+import { backupsDir, usePortableDataDir } from './portable'
+import { initAutoBackup } from './auto-backup'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
 import { watch, type FSWatcher } from 'node:fs'
 import type { ScannerCommand, ScannerEvent } from './scanner-process'
@@ -106,7 +109,14 @@ let scannerReady = false
 let restoreBounds: Electron.Rectangle | null = null
 let boundsTimer: ReturnType<typeof setTimeout> | null = null
 /** A scan requested before the child reported ready, replayed once it does. */
-let pendingScanRoots: LibraryRoot[] | null = null
+let pendingScanRoots: { roots: LibraryRoot[]; full: boolean } | null = null
+/**
+ * True between a scan starting and its `done` progress report.
+ *
+ * Only the daily backup asks. It reads the index files the scanner rewrites, and the two
+ * must not overlap - see the `progress` case in `ensureScanner`.
+ */
+let scanning = false
 /** True while a native file drag is running, so a second one can't be started inside it. */
 let dragInFlight = false
 
@@ -121,6 +131,9 @@ let dragInFlight = false
 let folderWatcher: FSWatcher | null = null
 let watchedDir: string | null = null
 let watchTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Distinguishes overlapping clipboard list files; see `clipboard:writeFiles`. */
+let clipboardSerial = 0
 
 // The custom scheme has to be declared before the app becomes ready.
 registerFileSchemePrivileges()
@@ -246,6 +259,15 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // Resume the library automatically once the renderer is listening. On every load, not
+  // just the first: a reload throws away the renderer's index, and without this the
+  // window would come back to an empty library until the next manual rescan. Subscribed
+  // per window rather than once at startup, or a window recreated from the macOS dock
+  // (`activate`) opens onto an empty library.
+  mainWindow.webContents.on('did-finish-load', () => {
+    beginScan(getUserData().settings.roots)
+  })
+
   if (process.env['ELECTRON_RENDERER_URL']) {
     void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
     if (process.env['UMAKBANG_DEVTOOLS']) mainWindow.webContents.openDevTools({ mode: 'bottom' })
@@ -332,7 +354,15 @@ function ensureScanner(): Electron.UtilityProcess {
       // Run whatever was requested before the child finished initialising.
       const queued = pendingScanRoots
       pendingScanRoots = null
-      if (queued) send({ type: 'scan', roots: queued, replace: true })
+      if (queued) {
+        send({
+          type: 'scan',
+          roots: queued.roots,
+          replace: true,
+          firstDir: openingDir(),
+          full: queued.full
+        })
+      }
       return
     }
 
@@ -343,6 +373,12 @@ function ensureScanner(): Electron.UtilityProcess {
         target.webContents.send('library:tracks', event.tracks)
         break
       case 'progress':
+        // Also kept here, not only forwarded. The daily backup copies the index file
+        // straight through, and the scanner replaces that file with a rename when a scan
+        // ends - which on Windows fails outright against an open read handle, and
+        // `saveIndex` swallows the failure, so a whole scan's index would be lost to a
+        // backup that happened to overlap it.
+        scanning = event.progress.phase !== 'done'
         target.webContents.send('library:progress', event.progress)
         break
       case 'metadata':
@@ -362,6 +398,9 @@ function ensureScanner(): Electron.UtilityProcess {
   child.on('exit', (code) => {
     scanner = null
     scannerReady = false
+    // Cleared here too, or a scanner that died mid-scan leaves this latched and the daily
+    // backup defers for the rest of the session waiting for a `done` that cannot arrive.
+    scanning = false
     mainWindow?.webContents.send('library:error', {
       stage: 'scanner-exit',
       message: `The scanner stopped unexpectedly (code ${code}).`
@@ -383,7 +422,7 @@ function send(command: ScannerCommand): void {
  * One reset for the whole set rather than one per folder: the renderer's index is a single
  * list, and clearing it between folders would empty the library halfway through.
  */
-function beginScan(roots: LibraryRoot[]): void {
+function beginScan(roots: LibraryRoot[], full = false): void {
   const target = mainWindow
   if (!target) return
   if (roots.length === 0) {
@@ -393,10 +432,27 @@ function beginScan(roots: LibraryRoot[]): void {
 
   ensureScanner()
   target.webContents.send('library:reset', { roots })
+  // Set here rather than waiting for the first `progress`, so the gap between asking for a
+  // scan and hearing about it is not a window the daily backup can start in.
+  scanning = true
 
   // Starting before the cache is initialised would probe every file and cache nothing.
-  if (scannerReady) send({ type: 'scan', roots, replace: true })
-  else pendingScanRoots = roots
+  if (scannerReady) send({ type: 'scan', roots, replace: true, firstDir: openingDir(), full })
+  else pendingScanRoots = { roots, full }
+}
+
+/**
+ * The folder the window will be standing in once it has hydrated, so the scanner can send
+ * that folder's rows before it parses the rest of the index. The renderer restores
+ * `lastViewMode`, so this is the same answer it is about to reach on its own - main just
+ * knows it a second earlier, which is the whole point.
+ */
+function openingDir(): string {
+  const { lastViewMode, lastDir } = getUserData().settings
+  // Any other view - Stats, a rating filter - draws from the whole index rather than one
+  // folder, so there is no folder worth putting first and the early rows are just the
+  // cheapest ones to reach.
+  return lastViewMode === 'folder' ? lastDir : ''
 }
 
 /**
@@ -414,8 +470,9 @@ function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
   // The renderer needs the full list before any of the new folder's tracks arrive, or the
   // first row through resolves its label against a set that doesn't contain it yet.
   target.webContents.send('library:roots', { roots: all })
+  scanning = true
   if (scannerReady) send({ type: 'scan', roots: [added], replace: false })
-  else pendingScanRoots = all
+  else pendingScanRoots = { roots: all, full: false }
 }
 
 /**
@@ -483,6 +540,13 @@ function watchFolder(dir: string | null): void {
         watchTimer = null
         void refreshFolder(dir)
       }, 600)
+    })
+    // The try/catch only covers creation. A watcher whose folder is deleted under it, or
+    // whose network share drops, emits 'error' - and an unhandled 'error' event is an
+    // uncaught exception in the main process.
+    folderWatcher.on('error', () => {
+      folderWatcher?.close()
+      folderWatcher = null
     })
   } catch {
     // A folder that can't be watched - a disconnected network share, a permission - is
@@ -693,12 +757,40 @@ function registerIpc(): void {
    * `.part` file appearing beside the name they just typed. Picking first lets the renderer
    * say what is happening for the part that takes the time.
    */
+  /** `umakbang-2026-07-27.umak`, in local time - a backup is stamped with the user's day. */
+  const bundleName = (): string => {
+    const now = new Date()
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    return `umakbang-${stamp}.${BUNDLE_EXTENSION}`
+  }
+
+  /**
+   * Where Export writes without asking.
+   *
+   * The dialog is still there behind "Export to…", but it should not be the price of the
+   * ordinary case: the folder has been chosen once, in Settings, and every export after that
+   * is one button. The folder is created here rather than inside `writeBundle`, so a folder
+   * that cannot be made is reported before the renderer says it is writing anything.
+   */
+  ipcMain.handle('store:defaultBundlePath', (): { path?: string; error?: string } => {
+    const dir = getUserData().settings.bundleExportDir || backupsDir()
+    try {
+      mkdirSync(dir, { recursive: true })
+    } catch (error) {
+      return { error: `Could not create ${dir}: ${error instanceof Error ? error.message : error}` }
+    }
+    return { path: join(dir, bundleName()) }
+  })
+
   ipcMain.handle('store:pickBundlePath', async (): Promise<{ path?: string; error?: string }> => {
     if (!mainWindow) return { error: 'No window.' }
-    const stamp = new Date().toISOString().slice(0, 10)
+    const dir = getUserData().settings.bundleExportDir || backupsDir()
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export umakbang library bundle',
-      defaultPath: `umakbang-${stamp}.${BUNDLE_EXTENSION}`,
+      // Opened in the configured folder rather than wherever the last save dialog was, since
+      // that is where every other bundle on this machine already is.
+      defaultPath: join(dir, bundleName()),
       filters: [{ name: 'umakbang bundle', extensions: [BUNDLE_EXTENSION] }]
     })
     if (result.canceled || !result.filePath) return {}
@@ -754,6 +846,15 @@ function registerIpc(): void {
         // settings straight in, the way a restore onto the machine that wrote it should.
         if (backup && fit.missing.length === 0) {
           importBackup(backup)
+          // `roots` is LOCAL_ONLY, so the import above never opens the bundle's library
+          // folders - on a machine with fresh settings (a reinstall, the main reason
+          // bundles exist) that ended on the welcome screen with a fully restored index
+          // nothing was pointed at. Every folder is here at its own path, so the mapping
+          // the wizard would have asked for is the identity.
+          const identity: FolderMapping = {}
+          for (const root of backup.exportedRoots ?? []) identity[root.path] = root.path
+          if (backup.exportedRoot) identity[backup.exportedRoot] ??= backup.exportedRoot
+          adoptExportedRoots(backup, identity)
           void offerRestart(mainWindow)
           return {
             applied: true,
@@ -792,8 +893,12 @@ function registerIpc(): void {
   ipcMain.handle('store:setDetectedBpm', (_event, path: string, bpm: number) => {
     setDetectedBpm(path, bpm)
   })
-  ipcMain.handle('store:setDetectedKey', (_event, path: string, key: string) => {
-    setDetectedKey(path, key)
+  ipcMain.handle('store:setNote', (_event, path: string, note: string) => {
+    setNote(path, note)
+  })
+
+  ipcMain.handle('store:setDetectedKey', (_event, path: string, key: string, fit?: number) => {
+    setDetectedKey(path, key, fit)
   })
   ipcMain.handle('store:clearDetected', (_event, paths: string[]) => {
     clearDetected(paths)
@@ -869,7 +974,12 @@ function registerIpc(): void {
   })
   ipcMain.handle('library:addFolder', () => pickAndOpenFolder())
   ipcMain.handle('library:removeFolder', (_event, label: string) => {
+    const dropped = getUserData().settings.roots.find((root) => root.label === label)
     const settings = removeRoot(label)
+    // Removing the folder from the library is the moment its saved index stops being
+    // worth anything - left behind it is a 200MB file nothing will ever read again, or
+    // worse, replay stale rows if the same folder is re-added someday.
+    if (dropped) clearIndex(dropped.path)
     // A full reset: the renderer's index is one flat list with no idea which folder each
     // row came from, so the only way to drop one folder's rows is to rebuild from what's
     // left. The saved indexes make that a second, not a rescan.
@@ -929,7 +1039,10 @@ function registerIpc(): void {
 
   ipcMain.handle('library:rescan', () => {
     const roots = getUserData().settings.roots
-    beginScan(roots)
+    // The only pass that visits every folder for real. A launch replays the index and then
+    // skips folders whose mtime has not moved, which cannot see a file overwritten in place -
+    // and "rescan" is precisely the button for when you believe the library is wrong.
+    beginScan(roots, true)
     return roots
   })
 
@@ -1042,6 +1155,47 @@ function registerIpc(): void {
   ipcMain.handle('fs:createFolder', (_event, parent: string, name: string) =>
     createFolder(parent, name)
   )
+
+  /**
+   * Writes a piece the user cut out of a track, beside the track it came from.
+   *
+   * This is the second thing in the app that produces an audio file rather than moving one,
+   * so it is held to the same rule as the rest: it can only ever create. The `wx` flag is
+   * what actually enforces that - the `existsSync` above it is there to give a sentence the
+   * user can read, but it is a check with a gap after it, and a trim is minutes of decoding
+   * and encoding away from the moment that check ran. An exclusive create is the part that
+   * cannot lose a take.
+   *
+   * Nothing is written to the index journal. A new file moves its folder's mtime, which is
+   * precisely what the scan's revalidation skip looks at, so the next launch reads the
+   * folder for real; the renderer's own list is caught up by `library:refreshFolder`.
+   */
+  ipcMain.handle(
+    'fs:saveTrim',
+    async (
+      _event,
+      source: string,
+      name: string,
+      bytes: Uint8Array
+    ): Promise<{ path?: string; error?: string }> => {
+      const invalid = nameError(name)
+      if (invalid) return { error: invalid }
+      if (!bytes || bytes.byteLength === 0) return { error: 'There was nothing to write.' }
+      if (!existsSync(source)) return { error: 'The file this came from is no longer there.' }
+
+      const target = join(dirname(source), name.trim())
+      if (existsSync(target)) return { error: 'Something with that name is already there.' }
+      try {
+        await writeFile(target, bytes, { flag: 'wx' })
+        return { path: target }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'EEXIST') return { error: 'Something with that name is already there.' }
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
 
   /**
    * Picks a folder without opening it as a library - for choosing where things get filed.
@@ -1170,8 +1324,14 @@ function registerIpc(): void {
     if (!isWindows || !Array.isArray(paths) || paths.length === 0) return false
 
     // The list goes through a file: a command line is capped near 32k characters and a
-    // multi-select in a sample library runs past that easily.
-    const listFile = join(app.getPath('temp'), `umakbang-clipboard-${process.pid}.txt`)
+    // multi-select in a sample library runs past that easily. Serial-numbered as well as
+    // pid-keyed, because two copies in quick succession overlap - the PowerShell run takes
+    // up to 10s, and the second copy would otherwise overwrite the list the first one is
+    // about to read, then have its own list deleted by the first one's cleanup.
+    const listFile = join(
+      app.getPath('temp'),
+      `umakbang-clipboard-${process.pid}-${++clipboardSerial}.txt`
+    )
     try {
       await writeFile(listFile, paths.join('\n'), 'utf8')
     } catch {
@@ -1327,13 +1487,10 @@ if (!app.requestSingleInstanceLock()) {
     // Reads the release feed and stages anything newer; it installs on quit rather than
     // interrupting. Deliberately after the window exists, since it reports to it.
     initUpdater(() => mainWindow)
-
-    // Resume the last library automatically once the renderer is listening. On every
-    // load, not just the first: a reload throws away the renderer's index, and without
-    // this the window would come back to an empty library until the next manual rescan.
-    mainWindow?.webContents.on('did-finish-load', () => {
-      beginScan(getUserData().settings.roots)
-    })
+    // One bundle a day into `backups`, with no button to press and nothing to switch on.
+    // Its first check is minutes away, deliberately: the scan starting now is the busiest
+    // this process ever is, and it defers again if that scan is still going.
+    initAutoBackup(() => scanning)
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -45,7 +45,10 @@ macOS and Linux from the same source.
   taking you somewhere else.
 - **Carries its settings between machines** - Settings → Backup writes every preference,
   tag, rating and detected tempo to one file. Import it on the new machine and point it at
-  your library; nothing else needs setting up again.
+  your library; nothing else needs setting up again. **One is written on its own once a
+  day**, into a `backups` folder beside the app unless you point it somewhere else, so the
+  months of tagging behind a library survive whether or not anyone remembers to press
+  Export.
 - **Real-time visualizers** - spectrogram, spectrum, rolling waveform, scope, levels and a
   stereo/goniometer field - in a dockable panel, or filling the window on their own. They
   hold their last frame over a short pause and wipe themselves once silence has lasted five

@@ -140,8 +140,13 @@ export function ImportWizard({
         found[path] = true
       }
       setGuessed(found)
-      await settle(identity, [], {})
-      setSearching(false)
+      try {
+        await settle(identity, [], {})
+      } finally {
+        // Always cleared, or a rejected disk probe leaves every button disabled for the
+        // life of the dialog.
+        setSearching(false)
+      }
     })()
   }, [onDisk, paths, settle])
 
@@ -156,8 +161,10 @@ export function ImportWizard({
   // one can happen without the user pointing at anything.
   const opening = summary.folders.filter((folder) => folder.library && mapping[folder.path])
   const autoCount = summary.folders.filter((folder) => guessed[folder.path]).length
+  // A skipped folder was answered - the answer was "it isn't here" - so it neither counts
+  // as still-to-place nor keeps the locate-all button offering to find it.
   const unanswered = summary.folders.filter(
-    (folder) => !mapping[folder.path] && !coveredBy(folder.path, mapping)
+    (folder) => !mapping[folder.path] && !coveredBy(folder.path, mapping) && !refused[folder.path]
   ).length
   const total =
     preview.kept.tags + preview.kept.ratings + preview.kept.detectedBpm + preview.kept.detectedKey
@@ -180,8 +187,11 @@ export function ImportWizard({
     const blocked = { ...refused }
     delete blocked[folder]
     setRefused(blocked)
-    await settle({ ...mapping, [folder]: target }, [folder], blocked)
-    setSearching(false)
+    try {
+      await settle({ ...mapping, [folder]: target }, [folder], blocked)
+    } finally {
+      setSearching(false)
+    }
   }
 
   /** One pick for the whole list: everything that turns up inside it by name is placed. */
@@ -200,8 +210,11 @@ export function ImportWizard({
       found[path] = true
     }
     setGuessed((previous) => ({ ...previous, ...found }))
-    await settle(next, [], refused)
-    setSearching(false)
+    try {
+      await settle(next, [], refused)
+    } finally {
+      setSearching(false)
+    }
   }
 
   const skip = (folder: string): void => {
@@ -332,7 +345,15 @@ export function ImportWizard({
                       {settled ? 'Change' : 'Locate'}
                     </Button>
                     {target && (
-                      <Button variant="ghost" size="sm" onClick={() => skip(folder.path)}>
+                      // Disabled while a settle runs: it finishes by writing back the
+                      // mapping it started from, which would quietly restore the very
+                      // folder this button just removed.
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={searching}
+                        onClick={() => skip(folder.path)}
+                      >
                         Skip
                       </Button>
                     )}
@@ -406,7 +427,7 @@ export function ImportWizard({
           <Button variant="ghost" size="sm" disabled={busy} onClick={onClose}>
             Cancel
           </Button>
-          <Button size="sm" disabled={busy} onClick={() => void apply()}>
+          <Button size="sm" disabled={busy || searching} onClick={() => void apply()}>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {mapped === 0 && total === 0 ? 'Import preferences only' : 'Import'}
           </Button>

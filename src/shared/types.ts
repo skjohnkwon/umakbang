@@ -96,6 +96,7 @@ export type ColumnId =
   | 'format'
   | 'size'
   | 'modified'
+  | 'notes'
   | 'waveform'
 
 /** Persisted per-column layout. Array order is the on-screen order. */
@@ -149,9 +150,9 @@ export interface Settings {
   /**
    * Whether selecting an audio file with the mouse starts it playing.
    *
-   * On by default: picking a sample out of a folder is nearly always a request to hear it,
-   * and the alternative is two clicks for the one thing you came to do. Folders and files
-   * the player can't decode are unaffected - there is nothing to hear.
+   * Off by default - see DEFAULT_SETTINGS: clicking a file to see what it is should not
+   * commit you to hearing it. Folders and files the player can't decode are unaffected
+   * either way - there is nothing to hear.
    */
   playOnSelect: boolean
   /** Column order, widths and visibility. Empty means "use the defaults". */
@@ -190,6 +191,12 @@ export interface Settings {
   visualizerOnly: boolean
   /** Keep the window above other applications. */
   alwaysOnTop: boolean
+  /**
+   * Playback volume, 0 to 1. Separate from mute, which is its own state: unmuting has to
+   * return to the level that was set rather than to full, and a slider dragged up from zero
+   * while muted lifts the mute rather than leaving you dragging something inaudible.
+   */
+  volume: number
   /** User accent / background overrides; null means "use the stylesheet default". */
   themePrimary: string | null
   themeBackground: string | null
@@ -215,6 +222,20 @@ export interface Settings {
   /** Type filters survive restarts - "audio only" is a mode, not a momentary action. */
   typeFilter: { kinds: TrackKind[]; exts: string[] }
   /**
+   * Whether a track's renders are folded into one row in the explorer.
+   *
+   * `REFLECT_Master.wav`, `REFLECT.mp3` and `REFLECT_notag.wav` are one piece of music
+   * occupying three rows, and in a folder of finished work that is the dominant pattern:
+   * 40 songs read as 120 files. The fold is the stats page's `workOf` - the folder plus
+   * the file name with the render words off - so the explorer and the panels can never
+   * disagree about what counts as one track.
+   *
+   * Off by default. It changes what the library looks like rather than how it behaves, and
+   * a row count that silently differs from the file count on disk is not something to hand
+   * somebody without their asking for it.
+   */
+  collapseRenders: boolean
+  /**
    * The folders you keep coming back to.
    *
    * One list doing both jobs: they are listed under "Move to" in the row menu, and drawn
@@ -223,13 +244,29 @@ export interface Settings {
    */
   quickMove: QuickMoveTarget[]
   /**
-   * Folders the random beat button never draws from, as root-relative paths. A folder
+   * Folders that hold music the user did not write, as root-relative paths. A folder
    * excludes everything beneath it too. Sample packs and one-shot libraries outnumber
    * finished beats by a wide margin, and without this the dice lands on a kick sample
    * nine times out of ten. Root-relative rather than absolute so it survives moving the
    * library, and travels with an exported settings file.
+   *
+   * Named for the random button because that is what it was first for, and kept under that
+   * name because renaming a persisted key costs a migration this app deliberately doesn't
+   * have. The stats page's key and tempo panels read it for the same reason the dice does:
+   * 93% of this library's keyed audio is somebody else's loop pack, so without it "keys you
+   * write in" describes the packs rather than the user.
    */
   randomExcludeDirs: string[]
+  /**
+   * Whether the random button leans towards beats you have not rated yet.
+   *
+   * A lean, not a filter. Excluding rated files outright has a cliff in it: once most of the
+   * library is rated the dice would circle the same few leftovers, and at 100% there would be
+   * nothing to draw at all. Weighting the unrated ones higher (`UNRATED_WEIGHT` in
+   * `player.ts`) keeps the whole library in play and degrades to a plain uniform draw when
+   * everything has stars on it.
+   */
+  randomFavourUnrated: boolean
   /**
    * The folder tag that nominates which parts of the library get their tempo and key
    * analysed. Null means everything, which is what an install that has never tagged a
@@ -310,6 +347,18 @@ export interface Settings {
    * carry an account that bills by the minute.
    */
   lalalKey: string
+
+  /**
+   * Where the Export button writes bundles, so it does not have to ask every time.
+   *
+   * Seeded once, when empty, to the same `backups` folder the automatic daily backup uses,
+   * and left alone after that so choosing somewhere else sticks. Left out of a settings
+   * export: unlike a stem folder this is not a preference but where *this install* keeps its
+   * own files, derived from where the executable sits, and an imported value would aim at
+   * the exporting machine's install folder and then never be re-seeded.
+   */
+  bundleExportDir: string
+
   /** Where separated stems are written. */
   stemOutputDir: string
   /** Which separation model to ask for, and what container to get back. */
@@ -390,7 +439,24 @@ export interface UserData {
    * don't say. Kept beside the detected tempo and for the same reason: it comes from a
    * full decode, which only happens when a file is actually looked at.
    */
+  /**
+   * Whatever you want to remember about a file, by absolute path.
+   *
+   * User-authored and irreplaceable, so it travels in a settings export beside the tags and
+   * the ratings, follows a file when it is moved, and is dropped from the map entirely when
+   * it is emptied rather than being stored as "".
+   */
+  notes: Record<string, string>
   detectedKey: Record<string, string>
+  /**
+   * How well the detector's key fitted, for the keys in `detectedKey`, 0 to 1.
+   *
+   * Kept so the column can say when a reading is a close call rather than drawing it like a
+   * certainty. Deliberately absent from settings exports: it describes this machine's
+   * detector run, it is worthless without the key beside it, and a backup that carried it
+   * would need `remapBackup` taught about one more path-keyed map for a visual nicety.
+   */
+  detectedKeyFit: Record<string, number>
 }
 
 export interface PlatformInfo {
@@ -474,10 +540,13 @@ export const DEFAULT_SETTINGS: Settings = {
   visualizerStops: [],
   waveformTint: 'spectrum',
   typeFilter: { kinds: [], exts: [] },
+  collapseRenders: false,
   quickMove: [],
   randomExcludeDirs: [],
+  randomFavourUnrated: false,
   visualizerOnly: false,
   alwaysOnTop: false,
+  volume: 1,
   analysisTag: null,
   detectKeyFromAudio: true,
   // Essentia by default. It was `builtin` for two reasons and neither holds any more: the
@@ -497,6 +566,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // responsiveness, and 2 left a library crawling through its own backlog.
   analysisConcurrency: 10,
   lalalKey: '',
+  bundleExportDir: '',
   stemOutputDir: '',
   stemSplitter: 'lynx',
   stemFormat: 'mp3'

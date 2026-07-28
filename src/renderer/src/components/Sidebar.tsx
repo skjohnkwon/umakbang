@@ -29,13 +29,21 @@ import { TagBar } from '@/components/TagBar'
 import { useFolderTree, type FolderNode } from '@/hooks/useLibraryView'
 import { useFolderDrop, type FolderDrop } from '@/hooks/useFolderDrop'
 import { collapseVariants } from '@/lib/motion'
-import { relativePath, samePath } from '@/lib/paths'
+import { isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
 import { removePinned } from '@/lib/quick-access'
 import { maxPanelWidth, useWindowWidth } from '@/lib/layout'
+import { usePalette } from '@/components/visualizers/palette'
 import { cn } from '@/lib/utils'
 
 const MIN_WIDTH = 150
 const DEFAULT_WIDTH = 220
+
+/** One star to five, along the visualizer ramp. Matches the table's stars exactly. */
+function ratingColor(wave: readonly string[], stars: number): string | undefined {
+  if (wave.length === 0) return undefined
+  const step = wave[Math.round(((stars - 1) / 4) * (wave.length - 1))]
+  return `color-mix(in oklab, ${step} 85%, var(--foreground))`
+}
 
 export function Sidebar(): React.JSX.Element {
   const { root: tree } = useFolderTree()
@@ -47,6 +55,7 @@ export function Sidebar(): React.JSX.Element {
   const downloads = useLibrary((s) => s.downloads)
   const refreshDownloads = useLibrary((s) => s.refreshDownloads)
   const playing = usePlayer((s) => s.current)
+  const wave = usePalette().wave
 
   // Counts per star, so the sidebar shows how much sits at each level.
   const { ratingCounts, ratedTotal } = useMemo(() => {
@@ -58,6 +67,36 @@ export function Sidebar(): React.JSX.Element {
     }
     return { ratingCounts: counts, ratedTotal: total }
   }, [ratings])
+
+  /**
+   * How many files could be rated at all, which is what the percentage is out of.
+   *
+   * Playable only - a `.flp` cannot be auditioned, so counting projects would put a ceiling
+   * on the figure that no amount of listening could reach - and minus the folders excluded
+   * from the random button, which is where this user's sample packs are. Against the whole
+   * library the number is 212 of 273,694 and reads as 0%: true, useless, and not a fact
+   * about how far through your own music you are. Same list as the dice and the stats page,
+   * because it is the same question - what is yours.
+   *
+   * Memoised on the coalesced revision rather than recomputed per render: this walks the
+   * whole index, and the sidebar re-renders on every scan progress tick.
+   */
+  const revision = useLibrary((s) => s.revision)
+  const excludeDirs = useLibrary((s) => s.settings.randomExcludeDirs)
+  const { rateable, rateableRated } = useMemo(() => {
+    const tracks = useLibrary.getState().tracks
+    const rated = useLibrary.getState().ratings
+    let total = 0
+    let done = 0
+    for (const track of tracks) {
+      if (!track.playable || isUnderAnyDir(track.relDir, excludeDirs)) continue
+      total++
+      // Counted in the same pass and against the same pool: rating a sample pack file and
+      // then excluding that folder would otherwise push the percentage over 100.
+      if ((rated[track.path] ?? 0) > 0) done++
+    }
+    return { rateable: total, rateableRated: done }
+  }, [revision, excludeDirs, ratings])
   const savedWidth = useLibrary((s) => s.settings.sidebarWidth)
   const panelOpen = useLibrary((s) => s.settings.panelOpen)
   const panelWidth = useLibrary((s) => s.settings.panelWidth)
@@ -188,16 +227,32 @@ export function Sidebar(): React.JSX.Element {
       <SidebarRow
         icon={<Star className={cn('h-3.5 w-3.5', ratedTotal > 0 && 'fill-current')} />}
         label="Rated"
+        /**
+         * How far through your own music you are. Rounded up off zero, because one rated
+         * file showing "0%" reads as nothing having been saved.
+         */
+        suffix={
+          rateable > 0 && rateableRated > 0
+            ? `${Math.max(1, Math.round((rateableRated / rateable) * 100))}%`
+            : undefined
+        }
         count={ratedTotal}
         active={view.mode === 'rated' && view.min === 1 && view.max === 5}
         depth={0}
         onClick={() => setView({ mode: 'rated', min: 1, max: 5 })}
       />
-      {/* One row per star, so a single rating is one click; the toolbar covers ranges. */}
+      {/* One row per star, so a single rating is one click; the toolbar covers ranges. Each
+          takes its own place on the visualizer ramp, the same colour the table's stars draw
+          that rating in - five rows of one amber said nothing about which was which. */}
       {[5, 4, 3, 2, 1].map((stars) => (
         <SidebarRow
           key={stars}
-          icon={<Star className="h-3.5 w-3.5 fill-current text-amber-400" />}
+          icon={
+            <Star
+              className="h-3.5 w-3.5 fill-current"
+              style={{ color: ratingColor(wave, stars) }}
+            />
+          }
           label={'\u2605'.repeat(stars)}
           count={ratingCounts[stars] ?? 0}
           active={view.mode === 'rated' && view.min === stars && view.max === stars}
@@ -400,7 +455,9 @@ function FolderRows({
     <>
       <MaybeMenu label={isLibraryFolder ? node.name : null}>
       <SidebarRow
-        drop={drop}
+        // The virtual root has no folder on disk behind it, so offering it as a drop
+        // target lit up a place every drop would then fail into.
+        drop={node.path === '' ? undefined : drop}
         icon={
           isOpen ? <FolderOpen className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />
         }
@@ -561,6 +618,7 @@ function SidebarRow({
   icon,
   label,
   count,
+  suffix,
   active,
   depth,
   chevron,
@@ -571,6 +629,8 @@ function SidebarRow({
   icon: React.ReactNode
   label: string
   count: number
+  /** A second figure before the count, for a row that reports a proportion as well. */
+  suffix?: string
   active?: boolean
   depth: number
   chevron?: React.ReactNode
@@ -612,7 +672,17 @@ function SidebarRow({
         {icon}
       </span>
       <span className="truncate">{label}</span>
-      <span className="tnum ml-auto shrink-0 pl-1 text-[10.5px] text-muted-foreground/60">
+      {/* Sits between the label and the count, in the accent rather than the count's grey:
+          it is the figure being reported, and the count beside it is the detail. */}
+      {suffix && (
+        <span className="tnum ml-auto shrink-0 pl-1 text-[10.5px] text-primary/70">{suffix}</span>
+      )}
+      <span
+        className={cn(
+          'tnum shrink-0 pl-1 text-[10.5px] text-muted-foreground/60',
+          suffix ? '' : 'ml-auto'
+        )}
+      >
         {count > 0 ? count : ''}
       </span>
     </button>

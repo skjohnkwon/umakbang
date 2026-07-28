@@ -15,7 +15,7 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { extname } from 'node:path'
-import { aiffToWav } from './aiff'
+import { aiffToWav, type RewrapResult } from './aiff'
 import { UMAKBANG_FILE_SCHEME, fromUmakbangFileUrl } from '../shared/url'
 
 /** Must run before the app 'ready' event. */
@@ -41,6 +41,30 @@ export function registerFileSchemePrivileges(): void {
 
 const AIFF_EXTENSIONS = new Set(['.aif', '.aiff', '.aifc'])
 
+/**
+ * The last rewrapped AIFF, keyed by path + mtime + size.
+ *
+ * One entry is enough: a media element issues several range requests per playback and one
+ * per seek, all against the currently playing file, and each used to re-read and
+ * re-byte-swap the whole AIFF on the thread that serves every other request too.
+ */
+let aiffCache: { path: string; mtimeMs: number; size: number; wav: RewrapResult } | null = null
+
+async function rewrapAiff(filePath: string): Promise<RewrapResult | null> {
+  const info = await stat(filePath)
+  if (
+    aiffCache &&
+    aiffCache.path === filePath &&
+    aiffCache.mtimeMs === info.mtimeMs &&
+    aiffCache.size === info.size
+  ) {
+    return aiffCache.wav
+  }
+  const wav = await aiffToWav(filePath)
+  if (wav) aiffCache = { path: filePath, mtimeMs: info.mtimeMs, size: info.size, wav }
+  return wav
+}
+
 const MIME_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
   '.wave': 'audio/wav',
@@ -65,7 +89,7 @@ export function registerFileProtocol(): void {
     // Chromium has no AIFF decoder, so serve a WAV-wrapped copy from memory instead.
     if (AIFF_EXTENSIONS.has(ext)) {
       try {
-        const rewrapped = await aiffToWav(filePath)
+        const rewrapped = await rewrapAiff(filePath)
         if (rewrapped) return serveBuffer(rewrapped.buffer, rewrapped.mimeType, request)
       } catch {
         // Fall through; the renderer will surface the file as unplayable.

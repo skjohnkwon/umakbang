@@ -1,8 +1,10 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
+  ChevronRight,
   Download,
   FolderMinus,
+  FolderOutput,
   FolderPlus,
   Loader2,
   Package,
@@ -11,6 +13,7 @@ import {
   X
 } from 'lucide-react'
 import { DEFAULT_VISUALIZER_STOPS, type QuickMoveTarget, type Settings } from '@shared/types'
+import { CHANGELOG } from '@shared/changelog'
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
@@ -209,7 +212,12 @@ export function SettingsPage(): React.JSX.Element {
               <div className="flex flex-wrap items-center gap-1">
                 {stops.map((colour, index) => (
                   <ColorPicker
-                    key={index}
+                    // The count is in the key because removing a middle stop re-numbers
+                    // everything to its right: keyed by index alone, React reused the
+                    // picker instances - open popover, draft hex and all - for what are
+                    // now different colours. The colour itself stays out of the key so a
+                    // live edit doesn't remount the picker under the pointer.
+                    key={`${stops.length}-${index}`}
                     label={`Stop ${index + 1}`}
                     presets={ACCENT_PRESETS}
                     value={colour}
@@ -377,6 +385,20 @@ export function SettingsPage(): React.JSX.Element {
             title="Backup"
             hint="Everything umakbang remembers, in one .umak file: preferences, tags, ratings and detected tempo, plus the file index, probe results and cached waveforms."
           >
+            <Row label="Write bundles to" hint={settings.bundleExportDir || 'Not set yet.'}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  void window.umakbang
+                    .pickDirectory('Where bundles are written', settings.bundleExportDir || undefined)
+                    .then((dir) => dir && patchSettings({ bundleExportDir: dir }))
+                }}
+              >
+                Choose…
+              </Button>
+            </Row>
+
             <div className="flex items-center gap-1.5">
               <Button
                 variant="outline"
@@ -390,7 +412,17 @@ export function SettingsPage(): React.JSX.Element {
                 ) : (
                   <Package className="h-3.5 w-3.5" />
                 )}
-                Export…
+                Export
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={bundleBusy}
+                onClick={() => void exportBundle(true)}
+                className="gap-1.5"
+              >
+                <FolderOutput className="h-3.5 w-3.5" />
+                Export to…
               </Button>
               <Button
                 variant="outline"
@@ -408,11 +440,16 @@ export function SettingsPage(): React.JSX.Element {
               knows, so it is what a restore or a stick wants. Writing one takes a few
               seconds and leaves a <code className="rounded bg-secondary px-1 py-px">.part</code>{' '}
               file beside it until it is finished. Where the window sits stays with the
-              machine. Importing asks where each folder lives here, opens the ones that were
-              libraries, and brings the rest across; the index comes back only for folders
-              still at the same path, and anything that moved is rebuilt by a scan. Older
-              <code className="rounded bg-secondary px-1 py-px">.json</code> settings files
-              still import.
+              machine. <strong className="font-medium text-muted-foreground/80">
+                One is written on its own once a day
+              </strong>{' '}
+              into the same folder, as{' '}
+              <code className="rounded bg-secondary px-1 py-px">umakbang-auto.umak</code>,
+              replacing the day before's. Importing asks where each folder lives here, opens
+              the ones that were libraries, and brings the rest across; the index comes back
+              only for folders still at the same path, and anything that moved is rebuilt by a
+              scan. Older <code className="rounded bg-secondary px-1 py-px">.json</code>{' '}
+              settings files still import.
             </p>
           </Section>
         </div>
@@ -503,7 +540,72 @@ function UpdateSection(): React.JSX.Element {
           </Button>
         </div>
       </Row>
+
+      <ChangelogList running={status.version} />
     </Section>
+  )
+}
+
+/**
+ * What changed, under the version that changed it.
+ *
+ * In the Updates section rather than a page of its own, because "what version am I on" and
+ * "what did that get me" are one question asked twice. The entry matching the running build
+ * is open; older ones are a line each until asked for, so the section stays a section.
+ */
+function ChangelogList({ running }: { running: string }): React.JSX.Element | null {
+  const [open, setOpen] = useState<string | null>(CHANGELOG[0]?.version ?? null)
+  if (CHANGELOG.length === 0) return null
+
+  return (
+    <div className="mt-1 space-y-1">
+      {CHANGELOG.map((entry) => {
+        const expanded = open === entry.version
+        return (
+          <div key={entry.version} className="rounded-md border bg-card/40">
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => setOpen(expanded ? null : entry.version)}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+            >
+              <ChevronRight
+                className={cn(
+                  'h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform',
+                  expanded && 'rotate-90'
+                )}
+              />
+              <span className="tnum text-[12.5px] font-medium">{entry.version}</span>
+              {/* Says which one you are actually running, since the list outlives any build. */}
+              {entry.version === running && (
+                <span className="rounded bg-primary/15 px-1 py-px text-[10px] text-primary">
+                  installed
+                </span>
+              )}
+              <span className="ml-auto shrink-0 text-[11px] text-muted-foreground/60">
+                {new Date(entry.date).toLocaleDateString(undefined, {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric'
+                })}
+              </span>
+            </button>
+            {expanded && (
+              <ul className="space-y-1 px-2.5 pb-2 pl-7">
+                {entry.changes.map((change) => (
+                  <li
+                    key={change}
+                    className="relative text-[11.5px] leading-relaxed text-muted-foreground before:absolute before:-left-2.5 before:text-muted-foreground/40 before:content-['\\2022']"
+                  >
+                    {change}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -951,13 +1053,14 @@ function RandomExcludeSection({
 
   return (
     <Section
-      title="Random beat"
-      hint="Folders the random beat button skips, subfolders included."
+      title="Not your own work"
+      hint="Folders the random beat button skips and the stats page leaves out, subfolders included."
     >
       {dirs.length === 0 && (
         <p className="text-[11.5px] text-muted-foreground/70">
-          Nothing excluded, so every playable file in the library can come up. Add your
-          sample packs to keep the dice on your own work.
+          Nothing excluded, so every playable file in the library can come up, and every one
+          of them counts towards the keys and tempos on the stats page. Add your sample packs
+          to keep both about your own music.
         </p>
       )}
 
@@ -985,7 +1088,28 @@ function RandomExcludeSection({
           Exclude folder…
         </Button>
       </div>
+
+      {/* Not a folder, but the same question: what the dice should lean away from. */}
+      <FavourUnratedToggle />
     </Section>
+  )
+}
+
+/** Leans the random button towards the beats you have not judged yet. */
+function FavourUnratedToggle(): React.JSX.Element {
+  const favour = useLibrary((s) => s.settings.randomFavourUnrated)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+
+  return (
+    <Row
+      label="Lean towards unrated"
+      hint="Unrated beats come up four times as often. Rated ones still come up, so the dice never run dry once most of the library has stars on it."
+    >
+      <Switch
+        checked={favour}
+        onChange={(randomFavourUnrated) => patchSettings({ randomFavourUnrated })}
+      />
+    </Row>
   )
 }
 

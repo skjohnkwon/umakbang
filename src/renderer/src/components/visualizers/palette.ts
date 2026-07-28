@@ -80,6 +80,11 @@ function readPalette(): Palette {
   const stops = declared
     ? declared.split(',').map((stop) => stop.trim()).filter(Boolean)
     : [...DEFAULT_VISUALIZER_STOPS]
+  // The settings UI enforces two stops, but the value also arrives from hand-edited and
+  // imported settings files, and every ramp builder below divides by `length - 1` - one
+  // malformed array must not white-screen the renderer on every launch.
+  if (stops.length === 0) stops.push(...DEFAULT_VISUALIZER_STOPS)
+  if (stops.length === 1) stops.push(stops[0])
   const primary = stops[0]
   const hot = stops[stops.length - 1]
 

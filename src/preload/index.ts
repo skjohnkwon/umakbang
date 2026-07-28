@@ -53,8 +53,11 @@ const api = {
     ipcRenderer.invoke('store:setRating', path, rating),
   setDetectedBpm: (path: string, bpm: number): Promise<void> =>
     ipcRenderer.invoke('store:setDetectedBpm', path, bpm),
-  setDetectedKey: (path: string, key: string): Promise<void> =>
-    ipcRenderer.invoke('store:setDetectedKey', path, key),
+  setDetectedKey: (path: string, key: string, fit?: number): Promise<void> =>
+    ipcRenderer.invoke('store:setDetectedKey', path, key, fit),
+  /** Whatever the user wrote about a file. An empty note removes it. */
+  setNote: (path: string, note: string): Promise<void> =>
+    ipcRenderer.invoke('store:setNote', path, note),
   /** Forgets analysed tempo and key for these files, so they are worked out again. */
   clearDetected: (paths: string[]): Promise<void> =>
     ipcRenderer.invoke('store:clearDetected', paths),
@@ -66,6 +69,9 @@ const api = {
    * Split in two so the renderer can tell choosing a name from writing to it: the write is
    * tens of seconds on a large library and needs saying out loud.
    */
+  /** Where Export writes without asking: the configured folder, with today's file name. */
+  defaultBundlePath: (): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('store:defaultBundlePath'),
   pickBundlePath: (): Promise<{ path?: string; error?: string }> =>
     ipcRenderer.invoke('store:pickBundlePath'),
   writeBundle: (file: string): Promise<{ path?: string; error?: string }> =>
@@ -184,6 +190,13 @@ const api = {
     subscribe('library:metadata', handler),
   onRemoved: (handler: (paths: string[]) => void): (() => void) =>
     subscribe('library:removed', handler),
+  /** Something went wrong scanning - a root that couldn't be walked, a scanner crash. */
+  onLibraryError: (
+    handler: (payload: { stage: string; message: string }) => void
+  ): (() => void) => subscribe('library:error', handler),
+  /** Something main wants said in-app, like a folder pick that was declined. */
+  onLibraryNotice: (handler: (payload: { message: string }) => void): (() => void) =>
+    subscribe('library:notice', handler),
 
   /** Lists indexable files sitting in the OS Downloads folder, newest first. */
   listDownloads: (): Promise<Track[]> => ipcRenderer.invoke('fs:listDownloads'),
@@ -213,6 +226,19 @@ const api = {
   /** Renames a file or folder in place. */
   renameEntry: (path: string, newName: string): Promise<TransferResult> =>
     ipcRenderer.invoke('fs:rename', path, newName),
+  /**
+   * Writes a region cut out of a track as a new file beside it.
+   *
+   * Refuses to overwrite anything and says so instead: this is the one path that makes
+   * audio rather than moving it, and a name that collides has to cost a retype, never a
+   * take. Resolves with where it landed so the caller can re-read that folder.
+   */
+  saveTrim: (
+    source: string,
+    name: string,
+    bytes: Uint8Array
+  ): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('fs:saveTrim', source, name, bytes),
 
   /**
    * The path behind a dropped File. Chromium stopped exposing `File.path` in Electron 32,

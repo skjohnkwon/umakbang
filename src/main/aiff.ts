@@ -53,8 +53,10 @@ export async function aiffToWav(path: string): Promise<RewrapResult | null> {
       if (start < end) soundData = input.subarray(start, end)
     }
 
+    // A zero-size chunk (an empty ANNO or APPL, say) still advances `off` by its 8-byte
+    // header, so the loop makes progress; breaking on it would abandon a COMM or SSND
+    // sitting right behind it.
     off = body + chunkSize + (chunkSize % 2)
-    if (chunkSize === 0) break
   }
 
   if (!soundData || !channels || !sampleRate || !bitDepth) return null

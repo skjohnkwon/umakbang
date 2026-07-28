@@ -30,6 +30,8 @@ export interface SettingsBackup {
   settings: Partial<Settings>
   tags: Record<string, string[]>
   ratings: Record<string, number>
+  /** Absent in files exported before notes existed. */
+  notes?: Record<string, string>
   detectedBpm: Record<string, number>
   detectedKey: Record<string, string>
 }
@@ -284,6 +286,7 @@ export function summariseBackup(backup: SettingsBackup): BackupSummary {
   const keyed = [
     ...Object.keys(backup.tags ?? {}),
     ...Object.keys(backup.ratings ?? {}),
+    ...Object.keys(backup.notes ?? {}),
     ...Object.keys(backup.detectedBpm ?? {}),
     ...Object.keys(backup.detectedKey ?? {})
   ]
@@ -361,10 +364,19 @@ export function remapPath(path: string, mapping: FolderMapping): string | null {
   return rewrite(path, prepare(mapping))
 }
 
+export interface RemapCounts {
+  tags: number
+  ratings: number
+  notes: number
+  detectedBpm: number
+  detectedKey: number
+  quickMove: number
+}
+
 export interface RemapResult {
   backup: SettingsBackup
-  kept: { tags: number; ratings: number; detectedBpm: number; detectedKey: number; quickMove: number }
-  dropped: { tags: number; ratings: number; detectedBpm: number; detectedKey: number; quickMove: number }
+  kept: RemapCounts
+  dropped: RemapCounts
 }
 
 /**
@@ -374,15 +386,15 @@ export interface RemapResult {
  * out. The result is a backup that only refers to places that exist here.
  */
 export function remapBackup(backup: SettingsBackup, mapping: FolderMapping): RemapResult {
-  const kept = { tags: 0, ratings: 0, detectedBpm: 0, detectedKey: 0, quickMove: 0 }
-  const dropped = { tags: 0, ratings: 0, detectedBpm: 0, detectedKey: 0, quickMove: 0 }
+  const kept: RemapCounts = { tags: 0, ratings: 0, notes: 0, detectedBpm: 0, detectedKey: 0, quickMove: 0 }
+  const dropped: RemapCounts = { tags: 0, ratings: 0, notes: 0, detectedBpm: 0, detectedKey: 0, quickMove: 0 }
   // Ordered once rather than per path: the wizard runs this over every key in the backup
   // on each answer, to show what the answer would bring across.
   const ordered = prepare(mapping)
 
   const translate = <T>(
     source: Record<string, T> | undefined,
-    counter: 'tags' | 'ratings' | 'detectedBpm' | 'detectedKey'
+    counter: 'tags' | 'ratings' | 'notes' | 'detectedBpm' | 'detectedKey'
   ): Record<string, T> => {
     const out: Record<string, T> = {}
     for (const [path, value] of Object.entries(source ?? {})) {
@@ -425,6 +437,7 @@ export function remapBackup(backup: SettingsBackup, mapping: FolderMapping): Rem
       settings,
       tags: translate(backup.tags, 'tags'),
       ratings: translate(backup.ratings, 'ratings'),
+      notes: translate(backup.notes, 'notes'),
       detectedBpm: translate(backup.detectedBpm, 'detectedBpm'),
       detectedKey: translate(backup.detectedKey, 'detectedKey')
     },

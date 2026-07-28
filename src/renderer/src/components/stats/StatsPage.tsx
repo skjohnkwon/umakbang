@@ -19,7 +19,7 @@ import {
   startOfDayMs,
   WEEKDAY_NAMES
 } from '@/lib/stats'
-import { BarChart, Heatmap, Panel, RankedBars, StatTile, TimelineChart } from './Charts'
+import { BarChart, Heatmap, Panel, StatTile, TimelineChart } from './Charts'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -62,10 +62,28 @@ function ToggleButton({
   )
 }
 
+/** Holds a panel's shape while its window happens to be empty. */
+function EmptyRange({
+  what,
+  range,
+  noun = 'tracks'
+}: {
+  what: string
+  range: string
+  noun?: string
+}): React.JSX.Element {
+  return (
+    <div className="flex h-[170px] items-center justify-center text-[11.5px] text-muted-foreground/60">
+      No {noun} with a {what} in {range}.
+    </div>
+  )
+}
+
 export function StatsPage(): React.JSX.Element {
   const tracks = useLibrary((s) => s.tracks)
   const revision = useLibrary((s) => s.revision)
   const scanning = useLibrary((s) => s.scanning)
+  const excludeDirs = useLibrary((s) => s.settings.randomExcludeDirs)
   const [timelineMetric, setTimelineMetric] = useState<'hours' | 'count'>('hours')
   const [activityMetric, setActivityMetric] = useState<'count' | 'hours'>('count')
   // All time by default: the point of the page is seeing every year at once.
@@ -83,12 +101,14 @@ export function StatsPage(): React.JSX.Element {
     [tracks, revision, bounds]
   )
 
-  // Key and tempo come off the audio files rather than the projects, and answer to the
-  // same window.
+  // Key and tempo come off the audio rather than the projects, and answer to the same
+  // window. The excluded folders are the ones the random button already skips: they are
+  // where the sample packs live, and counting other people's loop kits as "keys you write
+  // in" was the whole of what made that panel wrong.
   const music = useMemo(
-    () => computeMusicStats(tracks, bounds),
+    () => computeMusicStats(tracks, bounds, excludeDirs),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tracks, revision, bounds]
+    [tracks, revision, bounds, excludeDirs]
   )
 
   const range = STAT_RANGES.find((option) => option.id === rangeId) ?? STAT_RANGES[0]
@@ -130,6 +150,16 @@ export function StatsPage(): React.JSX.Element {
   )
   const peakHour = stats.hour.indexOf(Math.max(...stats.hour))
   const peakDay = stats.weekday.indexOf(Math.max(...stats.weekday))
+
+  // The two rankings that used to be panels of their own, folded into the captions of the
+  // charts that already show the same thing as a shape.
+  const topTempos = music.tempos.length
+    ? `${music.tempos
+        .slice(0, 3)
+        .map((tempo) => tempo.bpm)
+        .join(', ')} BPM`
+    : ''
+  const topKey = music.keys[0]?.label ?? ''
 
   // A bounded range spans exactly its own days; all time spans what actually happened.
   const dayBounds =
@@ -269,11 +299,6 @@ export function StatsPage(): React.JSX.Element {
                 hint={`mean ${formatMinutes(stats.meanMinutes)}`}
               />
               <StatTile
-                label="Longest project"
-                value={formatHours(stats.longestHours)}
-                hint={stats.longestName}
-              />
-              <StatTile
                 label={rangeId === 'all' ? 'Started' : 'First in range'}
                 value={
                   firstDate
@@ -372,6 +397,8 @@ export function StatsPage(): React.JSX.Element {
                         squareCells
                         sizeColumns={calendarColumns}
                         scaleMax={activityMax}
+                        // A day with one project in it against a best day of thirteen.
+                        curve="sqrt"
                         legend={index === 0}
                         columnLabelAlign="left"
                         cellTitle={(row, column) => {
@@ -403,7 +430,13 @@ export function StatsPage(): React.JSX.Element {
 
             <Panel
               title="When you start projects"
-              subtitle={`Peak: ${WEEKDAY_NAMES[peakDay]} around ${HOUR_LABELS[peakHour]}`}
+              subtitle={
+                // With no dated project in range every bucket is zero and indexOf(max)
+                // lands on Monday 12a - a confident peak asserted from no data at all.
+                stats.dated > 0
+                  ? `Peak: ${WEEKDAY_NAMES[peakDay]} around ${HOUR_LABELS[peakHour]}`
+                  : 'No dated projects in this range'
+              }
             >
               <Heatmap
                 rows={stats.heat}
@@ -413,82 +446,96 @@ export function StatsPage(): React.JSX.Element {
               />
             </Panel>
 
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
-              <Panel
-                title="Time per project"
-                subtitle="How long a single project stays open, in total"
-              >
-                <BarChart
-                  bars={stats.histogram.map((bucket) => ({
-                    label: bucket.label.replace('–', '-'),
-                    caption: bucket.label,
-                    value: bucket.count
-                  }))}
-                  format={(value) => `${Math.round(value)} projects`}
-                  height={150}
-                />
-              </Panel>
-
-              <Panel title="Where the time goes" subtitle="Top-level folders by hours">
-                <RankedBars
-                  items={stats.categories.map((category) => ({
-                    label: category.category,
-                    value: category.hours,
-                    caption: `${category.count}`
-                  }))}
-                  format={(value) => formatHours(value)}
-                />
-              </Panel>
-            </div>
+            <Panel
+              title="Time per project"
+              subtitle="How long a single project stays open, in total"
+            >
+              <BarChart
+                bars={stats.histogram.map((bucket) => ({
+                  label: bucket.label.replace('–', '-'),
+                  caption: bucket.label,
+                  value: bucket.count
+                }))}
+                format={(value) => `${Math.round(value)} projects`}
+                height={150}
+              />
+            </Panel>
           </>
         )}
 
         {/* What you write, rather than how long you spend writing it. Audio files dated by
-            their own timestamp, so the range control above governs this too. */}
-        {music.withKey + music.withTempo > 0 && (
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
-            <Panel
-              title="Keys you write in"
-              subtitle={`${music.withKey.toLocaleString()} of ${music.audio.toLocaleString()} files, counted as relative pairs`}
-            >
-              <RankedBars
-                items={music.keys.map((key) => ({ label: key.label, value: key.count }))}
-                format={(value) => `${Math.round(value)} ${value === 1 ? 'file' : 'files'}`}
-              />
-            </Panel>
-
+            their own timestamp, so the range control above governs this too - and the panels
+            stay put through a window that holds nothing, since a section that disappears
+            when you narrow the range reads as the range control having broken it. */}
+        {music.libraryWithKey + music.libraryWithTempo > 0 && (
+          <>
             <Panel
               title="Tempos you write at"
               subtitle={
-                music.medianBpm !== null
-                  ? `${music.withTempo.toLocaleString()} files · median ${Math.round(music.medianBpm)} BPM`
-                  : `${music.withTempo.toLocaleString()} files`
+                music.withTempo > 0
+                  ? `${music.withTempo.toLocaleString()} projects across ${range.title}${
+                      music.medianBpm !== null ? ` · median ${Math.round(music.medianBpm)} BPM` : ''
+                    }${topTempos ? ` · most often ${topTempos}` : ''}`
+                  : `Projects per BPM, across ${range.title}`
               }
             >
-              <RankedBars
-                items={music.tempos.map((tempo) => ({
-                  label: `${tempo.bpm} BPM`,
-                  value: tempo.count
-                }))}
-                format={(value) => `${Math.round(value)} ${value === 1 ? 'file' : 'files'}`}
-                max={8}
-              />
-            </Panel>
-
-            {music.histogram.length > 1 && (
-              <Panel title="Tempo spread" subtitle="Files per ten BPM">
+              {music.histogram.length > 1 ? (
                 <BarChart
                   bars={music.histogram.map((bin) => ({
-                    label: bin.label,
-                    caption: `${bin.label}–${Number(bin.label) + 9} BPM`,
+                    label: String(bin.bpm),
+                    caption: `${bin.bpm} BPM`,
                     value: bin.count
                   }))}
-                  format={(value) => `${Math.round(value)} files`}
-                  height={150}
+                  format={(value) => `${Math.round(value)} ${value === 1 ? 'file' : 'files'}`}
+                  height={170}
+                  // The bins start on a ten, so every tenth bar is the labelled one.
+                  labelEvery={10}
                 />
-              </Panel>
-            )}
-          </div>
+              ) : (
+                <EmptyRange what="tempo" range={range.title} noun="projects" />
+              )}
+            </Panel>
+
+            <Panel
+              title="Keys you write in"
+              subtitle={
+                music.withKey > 0
+                  ? `${music.withKey.toLocaleString()} of ${music.audio.toLocaleString()} tracks across ${
+                      range.title
+                    }, counted as relative pairs${topKey ? ` · most often ${topKey}` : ''}`
+                  : `Counted as relative pairs, across ${range.title}`
+              }
+            >
+              {music.withKey > 0 ? (
+                // Fifths order rather than commonest-first: neighbouring bars are
+                // neighbouring keys, so a run of them is a habit rather than a coincidence.
+                <BarChart
+                  bars={music.keyWheel.map((key) => ({
+                    label: key.label,
+                    caption: key.label,
+                    value: key.count
+                  }))}
+                  format={(value) => `${Math.round(value)} ${value === 1 ? 'file' : 'files'}`}
+                  height={170}
+                />
+              ) : (
+                <EmptyRange what="key" range={range.title} />
+              )}
+            </Panel>
+
+            <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground/60">
+              <Info className="mt-0.5 h-3 w-3 shrink-0" />
+              <span>
+                Tempo is read from the FL Studio projects themselves, one entry per project,
+                where an <code className="rounded bg-secondary px-1 py-px">.flp</code> states
+                the number exactly and a detector only estimates it. Keys come from the audio,
+                counted per track rather than per file, so a piece exported as a master and an
+                MP3 votes once. Both leave out the folders excluded from the random button
+                (Settings → Not your own work), since a sample pack's file names would
+                otherwise decide what you write.
+              </span>
+            </p>
+          </>
         )}
 
         <p className="flex items-start gap-1.5 pb-2 text-[11px] leading-relaxed text-muted-foreground/60">
@@ -498,7 +545,9 @@ export function StatsPage(): React.JSX.Element {
             running overnight inflates its total. Outliers are normalised the way the original
             script did it - an IQR fence - capping anything over{' '}
             {stats.capHours ? formatHours(stats.capHours) : 'the threshold'} ({stats.cappedCount} of{' '}
-            {stats.counted} projects); the uncapped figure sits under the headline. Backups are
+            {stats.counted} projects); the uncapped figure sits under the headline. Every
+            per-project figure here is the capped one, so a window left open for days lands in
+            the same bucket as a long session rather than setting a record. Backups are
             excluded so nothing is counted twice, and creation dates before {ANALYSIS_START_YEAR}{' '}
             are treated as unreliable.{' '}
             {rangeId === 'all'

@@ -11,6 +11,7 @@ import {
   FileSliders,
   Folder,
   Loader2,
+  PencilLine,
   Plus,
   type LucideIcon
 } from 'lucide-react'
@@ -22,10 +23,13 @@ import { Badge } from '@/components/ui/badge'
 import {
   ContextMenu,
   ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { TagPopover } from '@/components/TagPopover'
 import { NamePopover, type NamePrompt } from '@/components/NamePopover'
+import { NotePopover, type NoteTarget } from '@/components/NotePopover'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
   FolderMenuItems,
@@ -38,7 +42,7 @@ import { useFolderDrop } from '@/hooks/useFolderDrop'
 import { beginRowDrag, consumeDragClick } from '@/lib/drag'
 import { absolutePath, baseName, relativePath } from '@/lib/paths'
 import { anchorOfRow, resolveSelection, rowId, selectionLabel } from '@/lib/selection'
-import { relativeKeyPair } from '@shared/keys'
+import { fifthsPosition, relativeKeyPair } from '@shared/keys'
 import { isRandomExcluded, toggleRandomExcluded } from '@/lib/random-scope'
 import { addPinned, isPinned, removePinned } from '@/lib/quick-access'
 import { fileIcon, requestFileIcon, useFileIcons } from '@/lib/file-icons'
@@ -72,6 +76,17 @@ import { cn } from '@/lib/utils'
 const ROW_HEIGHT = 26
 
 /**
+ * Below this the key is drawn as a guess rather than as an answer.
+ *
+ * `analysis.ts` already refuses anything under 0.4, so this only separates the readings that
+ * scraped past that gate from the ones the detector was actually sure of. Measured across
+ * this library, full productions fit at 0.68 to 0.87 and drum loops - which have no key at
+ * all - land between 0.36 and 0.46, so the band just above the gate is where the answers
+ * nobody should rely on live.
+ */
+const UNSURE_KEY_FIT = 0.55
+
+/**
  * One glyph per kind, matching what the Type column says rather than guessing at the
  * file's purpose - a sliders page for a DAW session, a note for MIDI, a waveform for
  * audio. Extensions don't get their own icons: forty of them would be forty shapes to
@@ -94,6 +109,41 @@ const KIND_ICONS: Record<TrackKind, LucideIcon> = {
  */
 function metaSignature(track: Track): string {
   return `${track.probed ? 1 : 0}|${track.duration ?? ''}|${track.sampleRate ?? ''}|${track.bitDepth ?? ''}|${track.channels ?? ''}|${track.bitrate ?? ''}|${track.bpm ?? ''}|${track.musicalKey ?? ''}`
+}
+
+/* ------------------------------------------------------- colour in the columns */
+
+/**
+ * A value's place on the visualizer ramp, as a text colour.
+ *
+ * The ramp is the same one the meters and the stats charts use, so a table column agrees
+ * with the panel beside it. Mixed with a fifth of the foreground on the way out: the low end
+ * of a ramp the user owns can be very dark, and a date is still text that has to be read -
+ * this keeps the hue and puts a floor under the contrast.
+ */
+function rampText(wave: readonly string[], t: number): string | undefined {
+  if (wave.length === 0) return undefined
+  const step = wave[Math.round(Math.max(0, Math.min(1, t)) * (wave.length - 1))]
+  return `color-mix(in oklab, ${step} 80%, var(--foreground))`
+}
+
+/**
+ * How far through the day a timestamp is, as a hill peaking at noon.
+ *
+ * Not a straight 0-24 sweep, which would put 23:59 and 00:01 at opposite ends of the ramp
+ * for two minutes apart. Folded, it reads as daylight: the small hours and the late evening
+ * are the ramp's quiet end, the middle of the day is its hot one - so a folder of things
+ * bounced at 3am looks different at a glance from one bounced over a working afternoon.
+ */
+function dayPosition(ms: number): number {
+  const date = new Date(ms)
+  const hours = date.getHours() + date.getMinutes() / 60
+  return 1 - Math.abs(12 - hours) / 12
+}
+
+/** Where a tempo sits between the slowest and fastest a detector will report. */
+function tempoPosition(bpm: number): number {
+  return (bpm - 60) / 140
 }
 
 /** A file name without its extension - what the track is actually called. */
@@ -129,13 +179,46 @@ async function moveAndFollow(paths: string[], destination: string): Promise<void
 }
 
 /**
+ * How many characters of tag a row will give up to keep for its own name, and the hard cap
+ * on chips whatever their length.
+ *
+ * A budget rather than a count, because "three tags" is the wrong unit: three of `bounce`,
+ * `keep` and `wip` is a third of the room that three of `needs another vocal pass` would
+ * take. Measured in characters so it costs nothing - the honest version is "as many as fit",
+ * and finding that out means reading layout per row, which in a virtualised list is a read
+ * per row per scroll frame to decide how many chips to draw.
+ */
+const ROW_TAG_BUDGET = 30
+const ROW_TAG_MAX = 8
+
+/**
+ * The tags a row shows, most recently added first to be dropped last.
+ *
+ * Everything past the budget becomes the `+N`, which is a button into the full editor, so
+ * nothing is unreachable - only unshown.
+ */
+function visibleRowTags(tags: string[] | undefined): string[] {
+  if (!tags || tags.length === 0) return []
+  const taken: string[] = []
+  let spent = 0
+  for (let i = tags.length - 1; i >= 0 && taken.length < ROW_TAG_MAX; i--) {
+    // The first one always goes on: a single long tag showing as `+1` would be a row that
+    // says it is tagged without saying what with.
+    if (taken.length > 0 && spent + tags[i].length > ROW_TAG_BUDGET) break
+    taken.unshift(tags[i])
+    spent += tags[i].length
+  }
+  return taken
+}
+
+/**
  * The tags on a row, and the way to add one.
  *
- * Three at most, the most recently added: there is only ever a sliver between a file name
- * and the next column, and a row that has collected eight tags would otherwise push its
- * own name out of sight. Clicking one filters the library by it; the plus opens the full
- * editor. Both are buttons, so `isRowControl` keeps the press off the row - tagging a file
- * shouldn't select it, let alone start playing it.
+ * As many as fit inside `ROW_TAG_BUDGET`, the most recently added kept: there is only ever a
+ * sliver between a file name and the next column, and a row that has collected eight long
+ * tags would otherwise push its own name out of sight. Clicking one filters the library by
+ * it; the plus opens the full editor. Both are buttons, so `isRowControl` keeps the press
+ * off the row - tagging a file shouldn't select it, let alone start playing it.
  */
 function RowTags({
   tags,
@@ -148,28 +231,53 @@ function RowTags({
   label: string
   handlers: RowHandlers
 }): React.JSX.Element | null {
-  const shown = tags && tags.length > 0 ? tags.slice(-3) : []
+  const shown = useMemo(() => visibleRowTags(tags), [tags])
   const hidden = tags ? tags.length - shown.length : 0
 
   return (
     <span className="flex min-w-0 shrink-0 items-center gap-0.5">
       {shown.map((tag) => (
-        <button
-          key={tag}
-          type="button"
-          title={`Show only ${tag}`}
-          onClick={(event) => {
-            event.stopPropagation()
-            handlers.toggleTagFilter(tag)
-          }}
-        >
-          <Badge className="shrink-0 border-border/60 bg-secondary text-secondary-foreground hover:border-primary/60 hover:text-foreground">
-            {tag}
-          </Badge>
-        </button>
+        /* The chip carries its own menu, because a right-click on a tag is a question about
+           the tag rather than about the row it happens to be sitting on - and the row's menu
+           has no idea which chip was hit. `stopPropagation` keeps the row's menu shut. */
+        <ContextMenu key={tag}>
+          <ContextMenuTrigger asChild onContextMenu={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              title={`Show only ${tag}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                handlers.toggleTagFilter(tag)
+              }}
+            >
+              <Badge className="shrink-0 border-border/60 bg-secondary text-secondary-foreground hover:border-primary/60 hover:text-foreground">
+                {tag}
+              </Badge>
+            </button>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuLabel>{tag}</ContextMenuLabel>
+            <ContextMenuItem onSelect={() => handlers.renameTag(tag)}>
+              <PencilLine className="h-3.5 w-3.5" />
+              Rename tag…
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
       ))}
       {hidden > 0 && (
-        <span className="shrink-0 text-[10.5px] text-muted-foreground/60">+{hidden}</span>
+        // A button rather than a label: it is the only way to reach the tags it stands for
+        // without opening the row's menu, and it opens the same editor the plus does.
+        <button
+          type="button"
+          title={tags ? `Also tagged ${tags.slice(0, hidden).join(', ')}` : undefined}
+          onClick={(event) => {
+            event.stopPropagation()
+            handlers.editTags(paths, label, event.clientX, event.clientY)
+          }}
+          className="shrink-0 text-[10.5px] text-muted-foreground/60 hover:text-foreground"
+        >
+          +{hidden}
+        </button>
       )}
       {/* Quiet until the row is under the pointer: a column of plus signs down an
           untagged library is noise, and this is only ever wanted on the row you're on. */}
@@ -190,10 +298,70 @@ function RowTags({
 }
 
 /**
+ * A note, written where it is read.
+ *
+ * The field is the cell: no double-click to edit, no pencil to find, because the whole point
+ * of a note column is that writing in it costs nothing. Saving is per keystroke into the
+ * store, which debounces the write to disk - there is nothing to confirm and no way to lose
+ * a sentence by clicking away.
+ *
+ * The `…` opens the full text in a popover. It is revealed on hover rather than only when the
+ * text overflows: knowing whether it overflows means reading `scrollWidth` for every visible
+ * row, and in a virtualised list that is a layout read per row per scroll frame, to decide
+ * whether to draw three dots.
+ */
+function NoteCell({
+  path,
+  label,
+  note,
+  onOpen
+}: {
+  path: string
+  label: string
+  note: string
+  onOpen: (path: string, label: string, initial: string, x: number, y: number) => void
+}): React.JSX.Element {
+  const setNote = useLibrary((s) => s.setNote)
+  const button = useRef<HTMLButtonElement>(null)
+
+  return (
+    <span className="flex h-full min-w-0 items-center gap-0.5 pr-1">
+      <input
+        value={note}
+        spellCheck={false}
+        placeholder="…"
+        onChange={(event) => setNote(path, event.target.value)}
+        // The table's shortcuts live on the scroll container above this. Without stopping
+        // the key here, typing "3" rates the file, Delete trashes it and Space plays it.
+        onKeyDown={(event) => {
+          event.stopPropagation()
+          if (event.key === 'Enter' || event.key === 'Escape') event.currentTarget.blur()
+        }}
+        className="min-w-0 flex-1 truncate border-0 bg-transparent p-0 text-[12px] text-muted-foreground outline-none placeholder:text-muted-foreground/25 focus:text-foreground"
+      />
+      <button
+        ref={button}
+        type="button"
+        aria-label={`Edit the note on ${label}`}
+        title="Open the full note"
+        onClick={(event) => {
+          event.stopPropagation()
+          const rect = button.current?.getBoundingClientRect()
+          onOpen(path, label, note, rect?.right ?? 0, (rect?.bottom ?? 0) + 4)
+        }}
+        className="shrink-0 px-0.5 text-[12px] leading-none text-muted-foreground/50 opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        …
+      </button>
+    </span>
+  )
+}
+
+/**
  * Whether an event landed on something inside a row that handles its own clicks.
  *
- * The rating stars are the only ones today, but anything interactive dropped into a cell
- * needs the row to keep its hands off the press.
+ * The rating stars and the note field are the ones today, but anything interactive dropped
+ * into a cell needs the row to keep its hands off the press.
  */
 function isRowControl(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('button, input, [role="button"]'))
@@ -210,6 +378,10 @@ interface RowHandlers {
   toggleTagFilter: (tag: string) => void
   /** Opens the tag editor over a row, anchored where the plus was clicked. */
   editTags: (paths: string[], label: string, x: number, y: number) => void
+  /** Opens the whole of a note, anchored where the ellipsis was clicked. */
+  editNote: (path: string, label: string, initial: string, x: number, y: number) => void
+  /** Renames a tag everywhere it is used, from its own chip. */
+  renameTag: (tag: string) => void
   openExternally: (path: string) => void
   setRating: (path: string, rating: number) => void
 }
@@ -250,6 +422,11 @@ export function FileTable({
   const ratings = useLibrary((s) => s.ratings)
   // Which keys were guessed rather than read, so the cell can show the relative pair.
   const detectedKey = useLibrary((s) => s.detectedKey)
+  // And how well each of those fitted, so a close call can say so. Subscribed once here like
+  // every other shared value; rows are handed a boolean.
+  const detectedKeyFit = useLibrary((s) => s.detectedKeyFit)
+  // One subscription for the notes column, resolved per row into a plain string.
+  const notes = useLibrary((s) => s.notes)
   const stemJob = useLibrary((s) => s.stemJob)
   const waveformTint = useLibrary((s) => s.settings.waveformTint)
   // One subscription for the whole table, so a changed ramp repaints every row waveform.
@@ -269,6 +446,7 @@ export function FileTable({
     x: number
     y: number
   } | null>(null)
+  const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null)
   const [prompt, setPrompt] = useState<NamePrompt | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<{ paths: string[]; label: string } | null>(
     null
@@ -446,19 +624,24 @@ export function FileTable({
    * Called after the selection has settled, so dragging a row that is part of a
    * multi-selection takes the whole selection with it.
    */
-  const armRowDrag = useCallback((event: React.PointerEvent, index: number) => {
-    const row = rowsRef.current[index]
-    if (!row) return
-    const id = rowId(row)
-    const { selection, roots } = useLibrary.getState()
-    const own =
-      row.type === 'file'
-        ? row.track.path
-        : roots.length > 0
-          ? absolutePath(roots, row.node.path)
-          : row.node.path
-    beginRowDrag(event, selection.has(id) ? selectedRef.current.paths : [own])
-  }, [])
+  const armRowDrag = useCallback(
+    (event: React.PointerEvent, index: number, wasSelected: boolean) => {
+      const row = rowsRef.current[index]
+      if (!row) return
+      const { roots } = useLibrary.getState()
+      const own =
+        row.type === 'file'
+          ? row.track.path
+          : roots.length > 0
+            ? absolutePath(roots, row.node.path)
+            : row.node.path
+      // `wasSelected` is the state *before* this press: the press has already selected
+      // the row in the store, but `selectedRef` is only refreshed on render, so asking
+      // the store here made a fresh press drag whatever was selected previously.
+      beginRowDrag(event, wasSelected ? selectedRef.current.paths : [own])
+    },
+    []
+  )
 
   const handlers: RowHandlers = useMemo(
     () => ({
@@ -496,14 +679,15 @@ export function FileTable({
         // Pressing on a row that's already part of a multi-selection must not collapse it
         // yet - that would make the selection undraggable. The click handler collapses it
         // instead, and a drag suppresses the click.
-        if (!store.selection.has(id)) {
+        const wasSelected = store.selection.has(id)
+        if (!wasSelected) {
           store.setSelected(id)
           cursorRef.current = index
         }
 
-        // Arm the drag with whatever is selected now. It stays a click until the pointer
-        // has moved far enough to mean otherwise.
-        armRowDrag(event, index)
+        // Arm the drag. It stays a click until the pointer has moved far enough to mean
+        // otherwise.
+        armRowDrag(event, index, wasSelected)
       },
 
       /**
@@ -560,6 +744,22 @@ export function FileTable({
       goToFolder: (dir) => useLibrary.getState().setView({ mode: 'folder', dir }),
       toggleTagFilter: (tag) => useLibrary.getState().toggleTagFilter(tag),
       editTags: (paths, label, x, y) => setTagTarget({ paths, label, x, y }),
+      editNote: (path, label, initial, x, y) => setNoteTarget({ path, label, initial, x, y }),
+      renameTag: (tag) => {
+        const rect = scrollRef.current?.getBoundingClientRect()
+        setPrompt({
+          title: `Rename "${tag}" everywhere it is used`,
+          initial: tag,
+          confirmLabel: 'Rename',
+          busyLabel: 'Renaming…',
+          selectStem: false,
+          // The tag's own name is the suggestion, so leaving it alone means "never mind".
+          skipIfUnchanged: true,
+          submit: async (name) => useLibrary.getState().renameTag(tag, name),
+          x: (rect?.left ?? 200) + 16,
+          y: (rect?.top ?? 120) + 28
+        })
+      },
       openExternally: (path) => void window.umakbang.openExternally(path),
       setRating: (path, rating) => useLibrary.getState().setRating(path, rating)
     }),
@@ -625,10 +825,15 @@ export function FileTable({
         const { paths } = selectedRef.current
         if (paths.length === 0) return
         const store = useLibrary.getState()
+        // `setClipboard` puts the files themselves on the system clipboard, so this pastes
+        // into Discord or a folder the way a copy from Explorer does.
+        //
+        // It used to write the paths here as *text* instead, and the two cannot both be
+        // true: whichever call lands last owns the clipboard, and one of them spawns a
+        // process. The text form is not lost - Ctrl+Shift+C is `copyPath`, and the menu has
+        // "Copy full path" - so the ambiguous one gives way to the shortcut that says which
+        // it means.
         store.setClipboard(paths, 'copy')
-        // The paths go to the system clipboard too, so a Ctrl+V lands somewhere useful
-        // outside umakbang - a DAW's file dialog, a terminal, a message.
-        void window.umakbang.copyText(paths.join('\n'))
         store.notify(`Copied ${items(paths.length)}.`)
       },
       paste: (relDir) => void useLibrary.getState().pasteInto(relDir),
@@ -844,26 +1049,57 @@ export function FileTable({
           default:
             break
         }
+        // Any other combination with the modifier down is not one of ours - falling
+        // through handed Ctrl+T the tag editor, Ctrl+Enter the open action and
+        // Ctrl+Delete a delete. Navigation keys still pass, Ctrl+Home being an ordinary
+        // way to jump to the top.
+        if (!['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(key)) {
+          return
+        }
       }
 
-      // Rating from the number row: 1-5 stars, 0 to clear. Digging through a folder and
-      // marking the keepers as you go is the whole point of the ratings, and reaching for
-      // the mouse for each one breaks the rhythm.
+      /**
+       * Rating from the number row: 1-5 stars, 0 to clear.
+       *
+       * It rates **what is playing**, not what is selected. Rating is a judgement about a
+       * sound, and by the time you have one the selection has usually moved on - the random
+       * button lands you somewhere new, arrowing through a folder walks past the thing you
+       * were still listening to, and a click to look at something else takes the selection
+       * with it. Rating the row your eyes are on meant the stars landed on a file you had
+       * not heard.
+       *
+       * The selection is the fallback, and only when nothing is playing at all: the keys
+       * would otherwise be dead in a fresh window, and marking up a folder you already know
+       * without auditioning it is a real thing to want.
+       *
+       * Either way it says what it rated. The target is no longer necessarily on screen, so
+       * a silent star is a star you cannot check.
+       */
       if (!mod && !event.altKey && key >= '0' && key <= '5') {
+        const rating = Number(key)
+        const store = useLibrary.getState()
+        const playing = usePlayer.getState().current
+
+        if (playing) {
+          event.preventDefault()
+          store.setRating(playing.path, rating)
+          store.notify(
+            rating === 0
+              ? `Cleared the rating on ${playing.name}.`
+              : `${playing.name} ${'★'.repeat(rating)}`
+          )
+          return
+        }
+
         const { tracks } = selectedRef.current
         if (tracks.length === 0) return
         event.preventDefault()
-        const rating = Number(key)
-        const store = useLibrary.getState()
         for (const track of tracks) store.setRating(track.path, rating)
-        // One row shows its own stars; a batch may be half off-screen, so it gets a word.
-        if (tracks.length > 1) {
-          store.notify(
-            rating === 0
-              ? `Cleared the rating on ${items(tracks.length)}.`
-              : `Rated ${items(tracks.length)} ${'★'.repeat(rating)}`
-          )
-        }
+        store.notify(
+          rating === 0
+            ? `Cleared the rating on ${items(tracks.length)}.`
+            : `Rated ${items(tracks.length)} ${'★'.repeat(rating)}`
+        )
         return
       }
 
@@ -1100,6 +1336,7 @@ export function FileTable({
                         cut={cutPaths?.has(absolute) ?? false}
                         index={item.index}
                         top={item.start}
+                        wave={wave}
                         handlers={handlers}
                         pendingMenu={pendingMenu}
                       />
@@ -1114,12 +1351,15 @@ export function FileTable({
                       analysing={analysing.has(row.track.path)}
                       splitting={stemJob?.path === row.track.path}
                       keyDetected={detectedKey[row.track.path] !== undefined}
+                      keyUnsure={(detectedKeyFit[row.track.path] ?? 1) < UNSURE_KEY_FIT}
+                      note={notes[row.track.path] ?? ''}
                       waveformTint={waveformTint}
                       wave={wave}
                       columns={visible}
                       template={template}
                       spacer={spacer}
                       icon={fileIcon(row.track.ext) ?? null}
+                      renders={row.renders}
                       selected={selection.has(row.track.path)}
                       cut={cutPaths?.has(row.track.path) ?? false}
                       tags={tags[row.track.path]}
@@ -1169,6 +1409,14 @@ export function FileTable({
           x={tagTarget.x}
           y={tagTarget.y}
           onClose={() => setTagTarget(null)}
+        />
+      )}
+
+      {noteTarget && (
+        <NotePopover
+          target={noteTarget}
+          onChange={(note) => useLibrary.getState().setNote(noteTarget.path, note)}
+          onClose={() => setNoteTarget(null)}
         />
       )}
 
@@ -1314,8 +1562,17 @@ interface FileCellContext {
   splitting: boolean
   /** The key was worked out from the audio rather than read off the file. */
   keyDetected: boolean
+  /** That reading was a close call. Resolved by the table so a row holds a boolean. */
+  keyUnsure: boolean
+  /** Whatever the user wrote about this file, resolved by the table. '' when there is none. */
+  note: string
   /** The OS's icon for this file type, once it has arrived. */
   icon: string | null
+  /**
+   * How many renders this row stands for, itself included, or undefined when it stands for
+   * one file. Only ever set while `Settings.collapseRenders` is on.
+   */
+  renders: number | undefined
   /** How waveforms are coloured. Subscribed to once by the table, never by a row. */
   waveformTint: Settings['waveformTint']
   /** The ramp they are coloured with, likewise. */
@@ -1351,6 +1608,7 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
         <StarRating
           value={ctx.rating}
           onChange={(rating) => ctx.handlers.setRating(track.path, rating)}
+          wave={ctx.wave}
           className="pr-1"
         />
       )
@@ -1391,6 +1649,18 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
           <span className={cn('truncate', ctx.isCurrent && 'font-medium text-foreground')}>
             {track.name}
           </span>
+          {/* The renders this row is standing in for, in the folder count's muted style: it
+              is a footnote about the row, not a value to compare rows by, so it stays out
+              of the columns. */}
+          {ctx.renders !== undefined && (
+            <span
+              className="tnum shrink-0 text-[11px] text-muted-foreground/60"
+              title={`${ctx.renders} renders of this track, folded into one row`}
+            >
+              {'×'}
+              {ctx.renders}
+            </span>
+          )}
           <RowTags
             tags={ctx.tags}
             paths={[track.path]}
@@ -1421,14 +1691,32 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
         </span>
       )
     case 'bpm':
+      // Slow at the quiet end of the ramp, fast at the hot one - the column reads as a
+      // tempo before it is read as a number.
       return (
-        <span className="tnum flex items-center justify-end truncate pr-1 text-right text-muted-foreground">
+        <span
+          className="tnum flex items-center justify-end truncate pr-1 text-right text-muted-foreground"
+          style={track.bpm ? { color: rampText(ctx.wave, tempoPosition(track.bpm)) } : undefined}
+        >
           {track.bpm ? Math.round(track.bpm) : ctx.analysing ? <Working /> : ''}
         </span>
       )
-    case 'key':
+    case 'key': {
+      // Around the circle of fifths, so keys that sound related look related and a library
+      // that lives in one corner of the circle comes out in one part of the ramp.
+      const position = track.musicalKey ? fifthsPosition(track.musicalKey) : null
       return (
-        <span className="flex items-center truncate text-muted-foreground">
+        <span
+          className={cn(
+            'flex items-center truncate text-muted-foreground',
+            // A reading the detector barely believes should not look like one it is sure of.
+            // Dimmed and italic rather than hidden: it is still the best answer there is, and
+            // the threshold is a judgement call, not a line between right and wrong.
+            ctx.keyUnsure && 'italic opacity-55'
+          )}
+          title={ctx.keyUnsure ? 'The detector was not confident about this key' : undefined}
+          style={position === null ? undefined : { color: rampText(ctx.wave, position) }}
+        >
           {track.musicalKey
             ? ctx.keyDetected
               ? relativeKeyPair(track.musicalKey)
@@ -1438,6 +1726,7 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
               : ''}
         </span>
       )
+    }
     case 'time':
       return (
         <span className="tnum block truncate pr-1 text-right text-muted-foreground">
@@ -1458,9 +1747,21 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
       )
     case 'modified':
       return (
-        <span className="tnum block truncate pr-1 text-right text-muted-foreground/80">
+        <span
+          className="tnum block truncate pr-1 text-right text-muted-foreground/80"
+          style={{ color: rampText(ctx.wave, dayPosition(track.mtimeMs)) }}
+        >
           {formatDateTime(track.mtimeMs)}
         </span>
+      )
+    case 'notes':
+      return (
+        <NoteCell
+          path={track.path}
+          label={track.name}
+          note={ctx.note}
+          onOpen={ctx.handlers.editNote}
+        />
       )
     default:
       return <span />
@@ -1475,6 +1776,8 @@ function folderCell(
     latestMtime: number
     tags: string[] | undefined
     absolute: string
+    /** The same ramp the file rows use, so one column doesn't disagree with itself. */
+    wave: readonly string[]
     handlers: RowHandlers
   }
 ): React.ReactNode {
@@ -1506,7 +1809,10 @@ function folderCell(
       )
     case 'modified':
       return (
-        <span className="tnum block truncate pr-1 text-right text-muted-foreground/80">
+        <span
+          className="tnum block truncate pr-1 text-right text-muted-foreground/80"
+          style={{ color: rampText(folder.wave, dayPosition(folder.latestMtime)) }}
+        >
           {formatDate(folder.latestMtime)}
         </span>
       )
@@ -1531,6 +1837,7 @@ const FolderRow = memo(function FolderRow({
   cut,
   index,
   top,
+  wave,
   handlers,
   pendingMenu
 }: {
@@ -1549,10 +1856,12 @@ const FolderRow = memo(function FolderRow({
   cut: boolean
   index: number
   top: number
+  /** The visualizer ramp, subscribed to once by the table like every other shared value. */
+  wave: readonly string[]
   handlers: RowHandlers
   pendingMenu: React.MutableRefObject<MenuTarget | null>
 }): React.JSX.Element {
-  const folder = { name, totalCount, latestMtime, tags, absolute, handlers }
+  const folder = { name, totalCount, latestMtime, tags, absolute, wave, handlers }
   const drop = useFolderDrop(path)
 
   return (
@@ -1604,12 +1913,15 @@ const FileRow = memo(function FileRow({
   analysing,
   splitting,
   keyDetected,
+  keyUnsure,
+  note,
   waveformTint,
   wave,
   columns,
   template,
   spacer,
   icon,
+  renders,
   selected,
   cut,
   tags,
@@ -1634,12 +1946,19 @@ const FileRow = memo(function FileRow({
   splitting: boolean
   /** The key was worked out from the audio rather than read off the file. */
   keyDetected: boolean
+  /** That reading was a close call. Resolved by the table so a row holds a boolean. */
+  keyUnsure: boolean
+  /** Whatever the user wrote about this file, resolved by the table. '' when there is none. */
+  note: string
   waveformTint: Settings['waveformTint']
   wave: readonly string[]
   columns: ColumnState[]
   template: string
   spacer: boolean
   icon: string | null
+  /** How many renders this row stands for, when they were folded. A primitive, so memo
+      compares it the same way it compares everything else the row draws. */
+  renders: number | undefined
   selected: boolean
   cut: boolean
   tags: string[] | undefined
@@ -1662,7 +1981,10 @@ const FileRow = memo(function FileRow({
     analysing,
     splitting,
     keyDetected,
+    keyUnsure,
+    note,
     icon,
+    renders,
     waveformTint,
     wave,
     handlers

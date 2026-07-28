@@ -1,21 +1,68 @@
 import type React from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { motion } from 'motion/react'
 import { staggerItem } from '@/lib/motion'
+import { usePalette } from '@/components/visualizers/palette'
 import { cn } from '@/lib/utils'
 
 /**
  * Hand-rolled SVG charts, sized to their container.
  *
- * Every chart here plots a single series, so colour never carries identity - one
- * sequential hue taken from the app's own `--primary` token is the whole palette, and no
- * legend is needed. Grid and axes stay recessive; hover carries the exact values so the
- * marks don't need a number on every point.
+ * Every chart here plots a single series, so colour never carries identity - it carries
+ * *magnitude*, off the same ramp the level meter and the spectrogram use. Quiet → loud
+ * becomes few → many, and a tall bar ends in the same colour a loud signal does, so the
+ * page reads as part of the app rather than as a report printed beside it.
+ *
+ * The ramp is taken from `palette.heat`, the rasterised strip the visualizers index per
+ * pixel, so these are the same bytes rather than a second interpretation of the user's
+ * stops. Grid and axes stay recessive; hover carries the exact values so the marks don't
+ * need a number on every point.
  */
 
-const SERIES = 'var(--primary)'
 const GRID = 'color-mix(in oklab, var(--muted-foreground) 18%, transparent)'
 const INK_MUTED = 'var(--muted-foreground)'
+
+/** How many stops an SVG gradient gets. Enough that the ramp reads as continuous. */
+const RAMP_STOPS = 12
+
+/** The ramp at `t`, 0 → 1, as the visualizers' own bytes. */
+function rampColor(heat: Uint8ClampedArray, t: number, fallback: string): string {
+  const at = Math.round(Math.max(0, Math.min(1, t)) * 255) * 4
+  // A canvas-less environment leaves the strip empty; better the accent than black.
+  if (heat.length <= at || heat[3] === 0) return fallback
+  return `rgb(${heat[at]}, ${heat[at + 1]}, ${heat[at + 2]})`
+}
+
+/**
+ * The ramp as gradient stops, in *user* space rather than per-element - so a bar is
+ * coloured by where its top reaches on the plot, not by its own height. Scaled to the
+ * element, every bar would end in the same hot colour and the ramp would say nothing.
+ */
+function RampStops({
+  heat,
+  fallback,
+  opacityAt
+}: {
+  heat: Uint8ClampedArray
+  fallback: string
+  opacityAt?: (t: number) => number
+}): React.JSX.Element {
+  return (
+    <>
+      {Array.from({ length: RAMP_STOPS }, (_, i) => {
+        const t = i / (RAMP_STOPS - 1)
+        return (
+          <stop
+            key={i}
+            offset={t}
+            stopColor={rampColor(heat, t, fallback)}
+            stopOpacity={opacityAt ? opacityAt(t) : 1}
+          />
+        )
+      })}
+    </>
+  )
+}
 
 function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
   const ref = useRef<T>(null)
@@ -142,6 +189,8 @@ export function TimelineChart({
 }): React.JSX.Element {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [tip, setTip] = useState<Tip | null>(null)
+  const palette = usePalette()
+  const gradientId = useId()
 
   const padLeft = 34
   const padRight = 8
@@ -214,14 +263,44 @@ export function TimelineChart({
           ))}
 
           <defs>
-            <linearGradient id="umakbang-area" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={SERIES} stopOpacity={0.28} />
-              <stop offset="100%" stopColor={SERIES} stopOpacity={0.02} />
+            {/* Both run baseline → top of the plot, in user space, so a month's colour is
+                how big that month was. `useId` rather than a fixed name: two charts on one
+                page sharing a gradient id is one chart drawn with the other's colours. */}
+            <linearGradient
+              id={`${gradientId}-line`}
+              gradientUnits="userSpaceOnUse"
+              x1={0}
+              y1={padTop + plotHeight}
+              x2={0}
+              y2={padTop}
+            >
+              <RampStops heat={palette.heat} fallback={palette.primary} />
+            </linearGradient>
+            <linearGradient
+              id={`${gradientId}-area`}
+              gradientUnits="userSpaceOnUse"
+              x1={0}
+              y1={padTop + plotHeight}
+              x2={0}
+              y2={padTop}
+            >
+              {/* Fades out downwards so the fill never competes with the line on top of it. */}
+              <RampStops
+                heat={palette.heat}
+                fallback={palette.primary}
+                opacityAt={(t) => 0.04 + t * 0.3}
+              />
             </linearGradient>
           </defs>
 
-          {area && <path d={area} fill="url(#umakbang-area)" />}
-          <path d={line} fill="none" stroke={SERIES} strokeWidth={2} strokeLinejoin="round" />
+          {area && <path d={area} fill={`url(#${gradientId}-area)`} />}
+          <path
+            d={line}
+            fill="none"
+            stroke={`url(#${gradientId}-line)`}
+            strokeWidth={2}
+            strokeLinejoin="round"
+          />
 
           {points.map((point, i) =>
             i % labelStep === 0 ? (
@@ -246,12 +325,20 @@ export function TimelineChart({
                 x2={tip.x}
                 y1={padTop}
                 y2={padTop + plotHeight}
-                stroke={SERIES}
+                stroke={palette.hot}
                 strokeWidth={1}
                 opacity={0.5}
               />
-              {/* 2px surface ring keeps the marker legible over the area fill. */}
-              <circle cx={tip.x} cy={tip.y} r={4} fill={SERIES} stroke="var(--card)" strokeWidth={2} />
+              {/* Marked in the colour the ramp gives that value, so the dot agrees with the
+                  line it sits on. 2px surface ring keeps it legible over the area fill. */}
+              <circle
+                cx={tip.x}
+                cy={tip.y}
+                r={4}
+                fill={rampColor(palette.heat, 1 - (tip.y - padTop) / plotHeight, palette.primary)}
+                stroke="var(--card)"
+                strokeWidth={2}
+              />
             </>
           )}
         </svg>
@@ -267,7 +354,11 @@ export function BarChart({
   bars,
   format,
   height = 140,
-  /** Show every Nth tick label - daily bars run far past what the axis can letter. */
+  /**
+   * Smallest label spacing the caller will accept - BPM bins start on a ten, so labelling
+   * every tenth bar is what keeps the axis reading 120, 130, 140 rather than 123, 133.
+   * Widened below when the measured width can't letter that many.
+   */
   labelEvery = 1
 }: {
   bars: Array<{ label: string; value: number; caption?: string }>
@@ -277,6 +368,8 @@ export function BarChart({
 }): React.JSX.Element {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [tip, setTip] = useState<Tip | null>(null)
+  const palette = usePalette()
+  const gradientId = useId()
 
   const padBottom = 18
   const padTop = 6
@@ -286,10 +379,38 @@ export function BarChart({
   // 2px of surface between adjacent fills.
   const barWidth = Math.max(3, Math.min(38, slot - 4))
 
+  // A caller cannot know how much room its chart got: the same panel is 1000px wide with
+  // the visualizers closed and 250px with them open, and a fixed step that reads cleanly at
+  // one width prints the axis over itself at the other. Measured here instead, and always
+  // as a multiple of what the caller asked for, so the labelled bars stay the meaningful
+  // ones. 5.6px per character at fontSize 9, plus a gap so neighbours don't touch.
+  const longestLabel = bars.reduce((longest, bar) => Math.max(longest, bar.label.length), 0)
+  const labelFit = Math.max(1, Math.floor(width / (longestLabel * 5.6 + 10)))
+  const labelStep =
+    bars.length > 0 && width > 0
+      ? Math.max(labelEvery, Math.ceil(bars.length / labelFit / labelEvery) * labelEvery)
+      : labelEvery
+
   return (
     <div ref={ref} className="relative w-full" style={{ height }}>
       {width > 0 && (
         <svg width={width} height={height} onMouseLeave={() => setTip(null)} role="img">
+          <defs>
+            {/* One ramp across the whole plot, in user space: a bar reaches as far up the
+                ramp as its value reaches up the axis, which is the level meter's reading
+                turned on its side. Per-element units would give every bar the full ramp and
+                make them all the same. */}
+            <linearGradient
+              id={gradientId}
+              gradientUnits="userSpaceOnUse"
+              x1={0}
+              y1={padTop + plotHeight}
+              x2={0}
+              y2={padTop}
+            >
+              <RampStops heat={palette.heat} fallback={palette.primary} />
+            </linearGradient>
+          </defs>
           <line
             x1={0}
             x2={width}
@@ -304,7 +425,11 @@ export function BarChart({
             const y = padTop + plotHeight - barHeight
             return (
               <g key={i}>
-                <path d={topRoundedPath(x, y, barWidth, barHeight, 4)} fill={SERIES} opacity={0.85} />
+                <path
+                  d={topRoundedPath(x, y, barWidth, barHeight, 4)}
+                  fill={`url(#${gradientId})`}
+                  opacity={0.92}
+                />
                 {/* Hit target spans the whole slot, not just the bar. */}
                 <rect
                   x={i * slot}
@@ -321,18 +446,28 @@ export function BarChart({
                     })
                   }
                 />
-                {i % labelEvery === 0 && (
-                  <text
-                    x={i * slot + slot / 2}
-                    y={height - 5}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fill={INK_MUTED}
-                    opacity={0.7}
-                  >
-                    {bar.label}
-                  </text>
-                )}
+                {i % labelStep === 0 &&
+                  (() => {
+                    // The end labels are anchored to the edge rather than to their own bar:
+                    // centred on a 3px bar at x=0 they hang half outside the svg and the
+                    // first tick renders as its own second digit.
+                    const centre = i * slot + slot / 2
+                    const half = (bar.label.length * 5.6) / 2
+                    const anchor =
+                      centre - half < 0 ? 'start' : centre + half > width ? 'end' : 'middle'
+                    return (
+                      <text
+                        x={anchor === 'start' ? 0 : anchor === 'end' ? width : centre}
+                        y={height - 5}
+                        textAnchor={anchor}
+                        fontSize={9}
+                        fill={INK_MUTED}
+                        opacity={0.7}
+                      >
+                        {bar.label}
+                      </text>
+                    )
+                  })()}
               </g>
             )
           })}
@@ -353,6 +488,7 @@ export function RankedBars({
   format: (value: number) => string
   max?: number
 }): React.JSX.Element {
+  const palette = usePalette()
   const shown = items.slice(0, maxItems)
   const max = Math.max(1, ...shown.map((i) => i.value))
 
@@ -364,12 +500,15 @@ export function RankedBars({
             {item.label}
           </span>
           <div className="relative h-[14px] flex-1 overflow-hidden rounded-sm bg-muted/50">
+            {/* The ramp runs the full track, and the bar reveals as much of it as its
+                value earns - the level meter's own trick. */}
             <div
               className="h-full rounded-sm"
               style={{
                 width: `${Math.max(1.5, (item.value / max) * 100)}%`,
-                background: SERIES,
-                opacity: 0.85
+                backgroundImage: `linear-gradient(to right, ${rampColor(palette.heat, 0, palette.primary)}, ${rampColor(palette.heat, 1, palette.hot)})`,
+                backgroundSize: `${Math.max(1, (max / Math.max(item.value, 1)) * 100)}% 100%`,
+                opacity: 0.92
               }}
             />
           </div>
@@ -409,6 +548,13 @@ export function Heatmap({
   sizeColumns,
   /** Pins the colour scale, so stacked grids stay comparable instead of each self-scaling. */
   scaleMax,
+  /**
+   * How a value maps onto the ramp. `sqrt` for a long thin tail: the calendar's busiest day
+   * holds thirteen projects and a typical one holds a single project, so linearly that day
+   * is 0.08 of the way up the ramp and a whole year is painted in the one colour that sits
+   * there. The hour grid is spread evenly enough to want the plain scale.
+   */
+  curve = 'linear',
   legend = true
 }: {
   /** `null` marks a cell outside the data's range: rendered blank, not as a zero. */
@@ -425,11 +571,31 @@ export function Heatmap({
   squareCells?: boolean
   sizeColumns?: number
   scaleMax?: number
+  curve?: 'linear' | 'sqrt'
   legend?: boolean
 }): React.JSX.Element {
   const [tip, setTip] = useState<Tip | null>(null)
   const [ref, width] = useWidth<HTMLDivElement>()
+  const palette = usePalette()
   const max = Math.max(1, scaleMax ?? Math.max(0, ...rows.flat().map((value) => value ?? 0)))
+
+  /**
+   * A cell is the ramp read at its own intensity, which is what the spectrogram does per
+   * pixel. It used to be one hue at varying alpha, so a busy day and a quiet one differed
+   * only in how much of the panel showed through - the ramp gives them different colours,
+   * which is the difference the grid exists to show.
+   */
+  const shaped = (intensity: number): number =>
+    curve === 'sqrt' ? Math.sqrt(Math.max(0, intensity)) : intensity
+  const cellColor = (intensity: number): string => {
+    const t = shaped(intensity)
+    // Alpha still climbs with the value, but from a floor: the ramp's quiet end is a dark
+    // colour on a dark panel, and one project has to be visibly more than none.
+    return `color-mix(in oklab, ${rampColor(palette.heat, t, palette.primary)} ${Math.round(
+      38 + t * 62
+    )}%, transparent)`
+  }
+  const EMPTY = 'color-mix(in oklab, var(--muted-foreground) 8%, transparent)'
 
   // Each column costs its own width plus the 2px gap that precedes it; the label gutter is
   // charged once. Before the first measurement, fall back to the caller's fixed height.
@@ -464,12 +630,7 @@ export function Heatmap({
                   style={{
                     ...cellStyle,
                     height: size,
-                    // Single hue, transparent -> full: more ink means more activity in
-                    // either theme, because --primary is already theme-aware.
-                    background:
-                      value === 0
-                        ? 'color-mix(in oklab, var(--muted-foreground) 8%, transparent)'
-                        : `color-mix(in oklab, ${SERIES} ${Math.round(12 + intensity * 88)}%, transparent)`
+                    background: value === 0 ? EMPTY : cellColor(intensity)
                   }}
                   onMouseEnter={(event) => {
                     const rect = event.currentTarget.getBoundingClientRect()
@@ -514,12 +675,7 @@ export function Heatmap({
             <span
               key={step}
               className="h-[9px] w-[14px] rounded-[2px]"
-              style={{
-                background:
-                  step === 0
-                    ? 'color-mix(in oklab, var(--muted-foreground) 8%, transparent)'
-                    : `color-mix(in oklab, ${SERIES} ${Math.round(12 + step * 88)}%, transparent)`
-              }}
+              style={{ background: step === 0 ? EMPTY : cellColor(step) }}
             />
           ))}
           <span>more</span>

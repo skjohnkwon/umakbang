@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { MotionConfig } from 'motion/react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SEARCH_INPUT_ID, TitleBar } from '@/components/TitleBar'
@@ -45,7 +45,12 @@ export default function App(): React.JSX.Element {
   // `Sidebar`'s total count already rides on.
   const trackCount = useLibrary((s) => s.tracks.length)
   const rows = useVisibleRows()
-  const folderCount = rows.reduce((total, row) => total + (row.type === 'folder' ? 1 : 0), 0)
+  // Memoised on the rows themselves: App re-renders on every scan progress tick, and a
+  // 300k-row reduce per tick is real work for a number that only changes with the rows.
+  const folderCount = useMemo(
+    () => rows.reduce((total, row) => total + (row.type === 'folder' ? 1 : 0), 0),
+    [rows]
+  )
 
   /**
    * Whether the visualizers actually have the window.
@@ -140,7 +145,6 @@ export default function App(): React.JSX.Element {
     window.addEventListener('dragover', swallow)
     window.addEventListener('drop', swallow)
     return () => {
-        window.removeEventListener('dragend', endRowDrag, true)
       window.removeEventListener('dragover', swallow)
       window.removeEventListener('drop', swallow)
     }

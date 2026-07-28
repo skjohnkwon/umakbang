@@ -132,6 +132,22 @@ export function useVisualizerCanvas(
     const observer = new ResizeObserver(measure)
     observer.observe(container)
 
+    // The ResizeObserver reports CSS-box changes only. Dragging the window to a monitor
+    // with a different scale factor changes devicePixelRatio without touching the box, so
+    // every canvas kept the old backing-store scale and went soft until some unrelated
+    // resize. The media query names the current ratio, so it is re-armed on each change.
+    let dprQuery: MediaQueryList | null = null
+    const onDprChange = (): void => {
+      measure()
+      armDpr()
+    }
+    const armDpr = (): void => {
+      dprQuery?.removeEventListener('change', onDprChange)
+      dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      dprQuery.addEventListener('change', onDprChange)
+    }
+    armDpr()
+
     repaintRef.current = () => {
       if (surface.width > 0) drawRef.current(surface, false)
     }
@@ -148,6 +164,7 @@ export function useVisualizerCanvas(
 
     return () => {
       observer.disconnect()
+      dprQuery?.removeEventListener('change', onDprChange)
       unsubscribe()
       repaintRef.current = null
     }

@@ -13,7 +13,24 @@ interface PlayerState {
   time: number
   duration: number
   muted: boolean
+  /**
+   * Output level, 0..1, kept separate from `muted` on purpose: muting is a thing you undo,
+   * and undoing it has to give back the level that was set rather than full volume.
+   *
+   * Mirrored into `Settings.volume`, which is where it survives a restart. This copy exists
+   * because the audio element needs it on every change and the transport reads it on every
+   * render, and neither wants to wait on the settings round trip.
+   */
+  volume: number
   error: string | null
+  /**
+   * The stretch of the current track playback is being held inside, in seconds.
+   *
+   * Belongs to the track it was drawn on and to nothing else, so `load` clears it: a region
+   * carried onto the next file would name seconds that mean something entirely different
+   * there, and the playhead would appear to be stuck for no reason anybody could see.
+   */
+  region: { start: number; end: number } | null
 
   play: (track: Track, context: Track[]) => void
   /**
@@ -29,6 +46,10 @@ interface PlayerState {
   /** Nudges playback by a relative amount, clamped to the track. */
   seekBy: (delta: number) => void
   toggleMute: () => void
+  /** Sets the output level, 0..1. Anything above zero also lifts a mute. */
+  setVolume: (volume: number) => void
+  /** Sets the loop region, or clears it with null. */
+  setRegion: (region: { start: number; end: number } | null) => void
   stop: () => void
 }
 
@@ -47,6 +68,41 @@ const RANDOM_HISTORY = 100
  * has since moved underneath it.
  */
 const recentRandom: string[] = []
+
+/**
+ * How much more often an unrated beat comes up than a rated one, when the setting is on.
+ *
+ * A *weight* rather than a filter, and that is the whole design. Excluding rated files
+ * outright has a cliff in it: at 95% rated the dice would be picking from the same handful
+ * of leftovers over and over, which is worse than the problem it set out to solve, and at
+ * 100% there would be nothing to pick at all. Weighting has no cliff - the unrated ones come
+ * up four times as often while there are unrated ones, the library stays whole underneath,
+ * and a fully rated library degrades to exactly the uniform draw it had before.
+ */
+const UNRATED_WEIGHT = 4
+
+/** Draws one track, favouring the unrated ones when asked to. */
+function weightedPick(
+  tracks: Track[],
+  favourUnrated: boolean,
+  ratings: Record<string, number>
+): Track {
+  if (!favourUnrated) return tracks[Math.floor(Math.random() * tracks.length)]
+
+  const weightOf = (track: Track): number =>
+    (ratings[track.path] ?? 0) === 0 ? UNRATED_WEIGHT : 1
+
+  let total = 0
+  for (const track of tracks) total += weightOf(track)
+
+  let ticket = Math.random() * total
+  for (const track of tracks) {
+    ticket -= weightOf(track)
+    if (ticket <= 0) return track
+  }
+  // Only reachable through floating-point drift on the last ticket.
+  return tracks[tracks.length - 1]
+}
 
 let audio: HTMLAudioElement | null = null
 
@@ -74,6 +130,7 @@ export function getAudioElement(): HTMLAudioElement {
 
   element.addEventListener('timeupdate', () => {
     usePlayer.setState({ time: element.currentTime })
+    enforceRegion()
   })
   element.addEventListener('durationchange', () => {
     if (Number.isFinite(element.duration)) usePlayer.setState({ duration: element.duration })
@@ -98,6 +155,34 @@ export function getAudioElement(): HTMLAudioElement {
 }
 
 /**
+ * Keeps playback inside the loop region, wrapping to its start when it runs off the end.
+ *
+ * Called from two places deliberately. `timeupdate` fires about four times a second, so on
+ * its own the loop can run a quarter of a second past the end before it comes back, which
+ * over a two-bar loop is plainly audible. The waveform's animation frame calls this as
+ * well, and while the waveform is on screen that lands the wrap within a frame.
+ *
+ * The `timeupdate` call is not redundant, it is the floor: the waveform is unmounted in the
+ * mini player and in visualizers-only mode, and a loop that quietly stopped looping when a
+ * panel was closed would be far worse than a loose one.
+ */
+export function enforceRegion(): void {
+  const region = usePlayer.getState().region
+  if (!region) return
+  const element = getAudioElement()
+  /**
+   * Only while it is actually moving. Scrubbing a paused track outside the region is how
+   * you look at the rest of the file before deciding where the region should have been, and
+   * snapping the playhead back would make one impossible to see past without clearing it.
+   */
+  if (element.paused) return
+  if (element.currentTime >= region.end) {
+    element.currentTime = region.start
+    usePlayer.setState({ time: region.start })
+  }
+}
+
+/**
  * Builds the up-next list around a track. "folder" - the default - queues everything in
  * the same directory, which is how stems and takes are actually organised. "view"
  * queues whatever the current filter is showing, so a search doubles as a playlist.
@@ -114,11 +199,26 @@ function buildQueue(track: Track, context: Track[]): Track[] {
 
 function load(track: Track, autoplay: boolean): void {
   const element = getAudioElement()
+  /**
+   * The saved level, applied here rather than at launch.
+   *
+   * `hydrate` would be the obvious place, but it lives in `library.ts` and this module
+   * already imports that one - the reverse import would close a cycle for one number. Every
+   * track goes through here, and the element is a singleton, so reading the setting on load
+   * is both the single choke point and always current. `setVolume` handles live changes.
+   */
+  const saved = useLibrary.getState().settings.volume
+  const volume = Math.max(0, Math.min(1, Number.isFinite(saved) ? saved : 1))
+  element.volume = volume
+  if (usePlayer.getState().volume !== volume) usePlayer.setState({ volume })
+
   element.src = window.umakbang.fileUrl(track.path)
   element.currentTime = 0
   usePlayer.setState({
     current: track,
     time: 0,
+    // The region was drawn on the outgoing track's waveform and means nothing on this one.
+    region: null,
     // Fall back to the probed duration until the element reports its own.
     duration: track.duration ?? 0,
     error: track.playable ? null : `.${track.ext} files can't be previewed in Umakbang.`
@@ -138,16 +238,36 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   time: 0,
   duration: 0,
   muted: false,
+  volume: 1,
   error: null,
+  region: null,
 
   play: (track, context) => {
     const queue = buildQueue(track, context)
     const index = queue.findIndex((t) => t.path === track.path)
     set({ queue, index })
 
-    // Clicking the already-loaded track toggles rather than restarting it.
+    /**
+     * Clicking the track that is already playing starts it again rather than pausing it.
+     *
+     * It used to toggle, and pausing is the one thing a click on a row should never do:
+     * every other click in the explorer selects or auditions, so a click that stops the
+     * music reads as having hit the wrong thing. Space is the pause, in one place, and the
+     * transport has a button. Re-clicking a beat in a sample browser means "again".
+     *
+     * Playing but paused is the exception - there the click resumes, since the alternative
+     * is a row you can click twice with nothing to show for it.
+     */
     if (get().current?.path === track.path) {
-      get().togglePlay()
+      const element = getAudioElement()
+      if (!get().playing) {
+        void element.play().catch(() => {
+          /* The 'error' listener reports this to the user. */
+        })
+        return
+      }
+      element.currentTime = get().region?.start ?? 0
+      set({ time: element.currentTime })
       return
     }
     load(track, true)
@@ -186,7 +306,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     // Only reachable when the library holds a single playable file, which the seek below
     // then handles: everything else leaves at least one candidate outside the window.
     const draw = pool.length > 0 ? pool : candidates
-    const pick = draw[Math.floor(Math.random() * draw.length)]
+    const pick = weightedPick(draw, library.settings.randomFavourUnrated, library.ratings)
 
     recentRandom.push(pick.path)
     if (recentRandom.length > RANDOM_HISTORY) recentRandom.shift()
@@ -208,9 +328,16 @@ export const usePlayer = create<PlayerState>((set, get) => ({
 
   togglePlay: () => {
     const element = getAudioElement()
-    const { current } = get()
+    const { current, region } = get()
     if (!current) return
     if (element.paused) {
+      // Starting from outside the loop starts it at the beginning instead. Playing a
+      // stretch that is not the thing being looped, and only arriving in the region a
+      // minute later, is not what pressing play on a region means.
+      if (region && (element.currentTime < region.start || element.currentTime >= region.end)) {
+        element.currentTime = region.start
+        set({ time: region.start })
+      }
       void element.play().catch(() => undefined)
     } else {
       element.pause()
@@ -221,6 +348,9 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     const { queue, index } = get()
     const nextIndex = index + 1
     if (nextIndex >= queue.length) {
+      // The element has to stop too: setting the flag alone showed the play icon while
+      // the audio carried on underneath it.
+      getAudioElement().pause()
       set({ playing: false })
       return
     }
@@ -271,7 +401,30 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   toggleMute: () => {
     const muted = !get().muted
     getAudioElement().muted = muted
+    // Deliberately leaves `volume` where it is, so unmuting comes back to the level that
+    // was set rather than to whatever the element happens to hold.
     set({ muted })
+  },
+
+  setVolume: (value) => {
+    const volume = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 1))
+    const element = getAudioElement()
+    element.volume = volume
+    // Touching the level at all lifts a mute, as long as it lands somewhere audible.
+    // Otherwise the user drags a slider that visibly does nothing, which reads as a broken
+    // control rather than as a mute they had forgotten about.
+    const muted = volume > 0 ? false : get().muted
+    element.muted = muted
+    set({ volume, muted })
+    // Persisted, so the level survives a restart. The store debounces its own write, which
+    // is what makes it safe to call on every frame of a slider drag.
+    useLibrary.getState().patchSettings({ volume })
+  },
+
+  setRegion: (region) => {
+    // A press that never became a drag is a click, and a click clears the region rather
+    // than leaving a loop of no length behind, which would pin the playhead on one sample.
+    set({ region: region && region.end > region.start ? region : null })
   },
 
   stop: () => {
@@ -279,6 +432,15 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     element.pause()
     element.removeAttribute('src')
     element.load()
-    set({ current: null, queue: [], index: -1, playing: false, time: 0, duration: 0, error: null })
+    set({
+      current: null,
+      queue: [],
+      index: -1,
+      playing: false,
+      time: 0,
+      duration: 0,
+      error: null,
+      region: null
+    })
   }
 }))

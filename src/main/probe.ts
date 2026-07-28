@@ -12,6 +12,7 @@ import { open } from 'node:fs/promises'
 import type { TrackMetadata } from '../shared/types'
 import { readFlpProjectTime } from './flp'
 import { normaliseKey } from '../shared/keys'
+import { plausibleBpm } from '../shared/tempo'
 
 const HEAD_BYTES = 256 * 1024
 const TAIL_BYTES = 64 * 1024
@@ -57,6 +58,14 @@ export async function probeFile(path: string, ext: string): Promise<TrackMetadat
         break
       case 'mp3':
         meta = parseMp3(windows)
+        // Cover art bigger than the head window pushes the first audio frame past
+        // everything that was read, so the tag text survived but duration, bitrate and
+        // sample rate did not. One extra bounded read at the end of the tag closes the
+        // gap without giving up the fixed-window design.
+        if (meta.sampleRate === undefined) {
+          const audio = await readPastId3(path, windows)
+          if (audio) meta = parseMp3(windows, audio)
+        }
         break
       case 'm4a':
       case 'mp4':
@@ -93,9 +102,13 @@ async function readWindows(path: string): Promise<Windows | null> {
     const size = stat.size
     if (size === 0) return null
 
+    // The buffers are trimmed to what was actually read: read() may return short on a
+    // network filesystem, and allocUnsafe means the untouched remainder is recycled heap
+    // memory that the parsers would otherwise happily treat as file content.
     const headLen = Math.min(HEAD_BYTES, size)
-    const head = Buffer.allocUnsafe(headLen)
-    await handle.read(head, 0, headLen, 0)
+    let head = Buffer.allocUnsafe(headLen)
+    const headRead = await handle.read(head, 0, headLen, 0)
+    if (headRead.bytesRead < headLen) head = head.subarray(0, headRead.bytesRead)
 
     // When the file fits entirely in the head window there is nothing extra to read.
     let tail = head
@@ -104,12 +117,36 @@ async function readWindows(path: string): Promise<Windows | null> {
       const tailLen = Math.min(TAIL_BYTES, size)
       tailOffset = size - tailLen
       tail = Buffer.allocUnsafe(tailLen)
-      await handle.read(tail, 0, tailLen, tailOffset)
+      const tailRead = await handle.read(tail, 0, tailLen, tailOffset)
+      if (tailRead.bytesRead < tailLen) tail = tail.subarray(0, tailRead.bytesRead)
     }
 
     return { head, tail, tailOffset, size }
   } finally {
     await handle.close()
+  }
+}
+
+/** The first stretch of audio after an ID3 tag too large for the head window. */
+async function readPastId3(
+  path: string,
+  { head, size }: Windows
+): Promise<{ buf: Buffer; fileOffset: number } | null> {
+  if (head.length < 10 || head.toString('ascii', 0, 3) !== 'ID3') return null
+  const audioStart = 10 + readSynchsafe(head, 6)
+  if (audioStart < head.length || audioStart >= size) return null
+  try {
+    const handle = await open(path, 'r')
+    try {
+      const len = Math.min(TAIL_BYTES, size - audioStart)
+      const buf = Buffer.allocUnsafe(len)
+      const { bytesRead } = await handle.read(buf, 0, len, audioStart)
+      return bytesRead > 0 ? { buf: buf.subarray(0, bytesRead), fileOffset: audioStart } : null
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
   }
 }
 
@@ -153,11 +190,14 @@ function parseWav({ head, size }: Windows): TrackMetadata {
       sampleFrames = head.readUInt32LE(body)
     } else if (id === 'acid' && body + 24 <= head.length) {
       // ACID loop chunk: tempo lives at a fixed offset and is the most reliable BPM
-      // source in any loop library.
-      const tempo = head.readFloatLE(body + 20)
-      if (Number.isFinite(tempo) && tempo > 20 && tempo < 400) meta.bpm = round2(tempo)
-      const rootNote = head.readUInt16LE(body + 4)
+      // source in any loop library - for a loop. The chunk's own one-shot flag was already
+      // being read to keep a root note off a hi-hat; the tempo needs it just as much and
+      // wasn't asking. A pack tool writes a beat count and a length into every file it
+      // touches, so a third of a second of open hat comes out as 346 BPM.
       const isOneShot = (head.readUInt32LE(body) & 0x01) !== 0
+      const tempo = head.readFloatLE(body + 20)
+      if (!isOneShot && plausibleBpm(round2(tempo))) meta.bpm = round2(tempo)
+      const rootNote = head.readUInt16LE(body + 4)
       if (!isOneShot && rootNote >= 0 && rootNote <= 127) {
         meta.musicalKey = midiNoteToKey(rootNote)
       }
@@ -329,7 +369,7 @@ const MPEG_SAMPLE_RATES: Record<number, number[]> = {
   0: [11025, 12000, 8000, 0] // MPEG 2.5
 }
 
-function parseMp3(windows: Windows): TrackMetadata {
+function parseMp3(windows: Windows, audio?: { buf: Buffer; fileOffset: number }): TrackMetadata {
   const { head, size } = windows
   const meta: TrackMetadata = {}
 
@@ -340,10 +380,16 @@ function parseMp3(windows: Windows): TrackMetadata {
     audioStart = 10 + tagSize
   }
 
-  const frameOffset = findFrameSync(head, audioStart)
+  // When the tag outgrew the head window the frames live in the second window
+  // `readPastId3` fetched, and every offset below is relative to that buffer instead.
+  const frames = audio ? audio.buf : head
+  const searchFrom = audio ? 0 : audioStart
+  const audioFileStart = audio ? audio.fileOffset : audioStart
+
+  const frameOffset = findFrameSync(frames, searchFrom)
   if (frameOffset === -1) return meta
 
-  const header = parseFrameHeader(head, frameOffset)
+  const header = parseFrameHeader(frames, frameOffset)
   if (!header) return meta
 
   meta.sampleRate = header.sampleRate
@@ -354,25 +400,25 @@ function parseMp3(windows: Windows): TrackMetadata {
   const xingOffset = frameOffset + header.sideInfoSize + 4
   let frameCount = 0
   let streamBytes = 0
-  if (xingOffset + 16 <= head.length) {
-    const tag = head.toString('ascii', xingOffset, xingOffset + 4)
+  if (xingOffset + 16 <= frames.length) {
+    const tag = frames.toString('ascii', xingOffset, xingOffset + 4)
     if (tag === 'Xing' || tag === 'Info') {
-      const flags = head.readUInt32BE(xingOffset + 4)
+      const flags = frames.readUInt32BE(xingOffset + 4)
       let cursor = xingOffset + 8
       if (flags & 0x0001) {
-        frameCount = head.readUInt32BE(cursor)
+        frameCount = frames.readUInt32BE(cursor)
         cursor += 4
       }
       if (flags & 0x0002) {
-        streamBytes = head.readUInt32BE(cursor)
+        streamBytes = frames.readUInt32BE(cursor)
       }
     }
   }
   const vbriOffset = frameOffset + 36
-  if (!frameCount && vbriOffset + 26 <= head.length) {
-    if (head.toString('ascii', vbriOffset, vbriOffset + 4) === 'VBRI') {
-      streamBytes = head.readUInt32BE(vbriOffset + 10)
-      frameCount = head.readUInt32BE(vbriOffset + 14)
+  if (!frameCount && vbriOffset + 26 <= frames.length) {
+    if (frames.toString('ascii', vbriOffset, vbriOffset + 4) === 'VBRI') {
+      streamBytes = frames.readUInt32BE(vbriOffset + 10)
+      frameCount = frames.readUInt32BE(vbriOffset + 14)
     }
   }
 
@@ -385,7 +431,7 @@ function parseMp3(windows: Windows): TrackMetadata {
     }
   } else {
     // Constant bitrate: derive from the audio payload size.
-    const audioBytes = size - audioStart - trailingId3v1Size(windows)
+    const audioBytes = size - audioFileStart - trailingId3v1Size(windows)
     meta.bitrate = header.bitrate
     if (header.bitrate > 0 && audioBytes > 0) {
       meta.duration = round3((audioBytes * 8) / header.bitrate)
@@ -458,49 +504,109 @@ function parseFrameHeader(buf: Buffer, off: number): FrameHeader | null {
 
 /* ------------------------------------------------------------------ MP4 / M4A */
 
-function parseMp4({ head }: Windows): TrackMetadata {
+function parseMp4(windows: Windows): TrackMetadata {
+  const { head } = windows
   const meta: TrackMetadata = {}
-  const moov = findAtom(head, 0, head.length, 'moov')
+  // Without `+faststart`, ffmpeg writes moov *after* the multi-MB mdat - a very common
+  // layout - so when the head window has no moov, follow the top-level atom sizes to
+  // wherever it is and read it out of the tail window instead.
+  let buf = head
+  let moov = findAtom(head, 0, head.length, 'moov')
+  if (!moov) {
+    const located = locateTailAtom(windows, 'moov')
+    if (located) {
+      buf = windows.tail
+      moov = located
+    }
+  }
   if (!moov) return meta
 
-  const mvhd = findAtom(head, moov.body, moov.end, 'mvhd')
+  const mvhd = findAtom(buf, moov.body, moov.end, 'mvhd')
   if (mvhd) {
-    const version = head[mvhd.body]
-    if (version === 1 && mvhd.body + 28 <= head.length) {
-      const timescale = head.readUInt32BE(mvhd.body + 20)
+    const version = buf[mvhd.body]
+    if (version === 1 && mvhd.body + 28 <= buf.length) {
+      const timescale = buf.readUInt32BE(mvhd.body + 20)
       // 64-bit duration; the high word is effectively always 0 for real audio files.
-      const durHi = head.readUInt32BE(mvhd.body + 24)
-      const durLo = head.readUInt32BE(mvhd.body + 28)
+      const durHi = buf.readUInt32BE(mvhd.body + 24)
+      const durLo = buf.readUInt32BE(mvhd.body + 28)
       const duration = durHi * 2 ** 32 + durLo
       if (timescale > 0) meta.duration = round3(duration / timescale)
-    } else if (mvhd.body + 20 <= head.length) {
-      const timescale = head.readUInt32BE(mvhd.body + 12)
-      const duration = head.readUInt32BE(mvhd.body + 16)
+    } else if (mvhd.body + 20 <= buf.length) {
+      const timescale = buf.readUInt32BE(mvhd.body + 12)
+      const duration = buf.readUInt32BE(mvhd.body + 16)
       if (timescale > 0) meta.duration = round3(duration / timescale)
     }
   }
 
   // Sample rate and channels live in the audio sample description.
-  const trak = findAtom(head, moov.body, moov.end, 'trak')
+  const trak = findAtom(buf, moov.body, moov.end, 'trak')
   if (trak) {
-    const stsd = findPath(head, trak.body, trak.end, ['mdia', 'minf', 'stbl', 'stsd'])
-    if (stsd && stsd.body + 8 <= head.length) {
+    const stsd = findPath(buf, trak.body, trak.end, ['mdia', 'minf', 'stbl', 'stsd'])
+    if (stsd && stsd.body + 8 <= buf.length) {
       // stsd: version+flags (4), entry count (4), then the first entry.
       const entry = stsd.body + 8
-      if (entry + 36 <= head.length) {
-        meta.channels = head.readUInt16BE(entry + 24)
-        const bits = head.readUInt16BE(entry + 26)
+      if (entry + 36 <= buf.length) {
+        meta.channels = buf.readUInt16BE(entry + 24)
+        const bits = buf.readUInt16BE(entry + 26)
         if (bits > 0 && bits <= 32) meta.bitDepth = bits
         // 16.16 fixed-point sample rate.
-        meta.sampleRate = head.readUInt32BE(entry + 32) >>> 16
+        meta.sampleRate = buf.readUInt32BE(entry + 32) >>> 16
       }
     }
   }
 
-  const ilst = findPath(head, moov.body, moov.end, ['udta', 'meta', 'ilst'])
-  if (ilst) applyIlst(head, ilst.body, ilst.end, meta)
+  const ilst = findPath(buf, moov.body, moov.end, ['udta', 'meta', 'ilst'])
+  if (ilst) applyIlst(buf, ilst.body, ilst.end, meta)
 
   return meta
+}
+
+/**
+ * Finds a top-level atom that lies beyond the head window, by hopping atom to atom on
+ * their declared sizes - each header names where the next atom starts, so mdat's header
+ * (which is in the head) points straight at whatever follows it near the end of the file.
+ * Only usable when the found atom sits wholly inside the tail window; the returned
+ * offsets are relative to `tail`.
+ */
+function locateTailAtom(windows: Windows, type: string): Atom | null {
+  const { head, tail, tailOffset, size } = windows
+  let off = 0
+  while (off + 8 <= size) {
+    let container: Buffer
+    let local: number
+    if (off + 8 <= head.length) {
+      container = head
+      local = off
+    } else if (off >= tailOffset && off - tailOffset + 8 <= tail.length) {
+      container = tail
+      local = off - tailOffset
+    } else {
+      // The next header falls in the unread middle of the file.
+      return null
+    }
+
+    let atomSize = container.readUInt32BE(local)
+    const atomType = container.toString('ascii', local + 4, local + 8)
+    let body = off + 8
+    if (atomSize === 1) {
+      if (local + 16 > container.length) return null
+      atomSize = container.readUInt32BE(local + 8) * 2 ** 32 + container.readUInt32BE(local + 12)
+      body = off + 16
+    } else if (atomSize === 0) {
+      atomSize = size - off
+    }
+    if (atomSize < 8) return null
+
+    if (atomType === type) {
+      if (off < tailOffset) return null
+      return {
+        body: body - tailOffset,
+        end: Math.min(off + atomSize, size) - tailOffset
+      }
+    }
+    off += atomSize
+  }
+  return null
 }
 
 interface Atom {
@@ -557,7 +663,7 @@ function applyIlst(buf: Buffer, from: number, to: number, meta: TrackMetadata): 
       const payload = buf.subarray(data.body + 8, data.end)
       if (name === 'tmpo' && payload.length >= 2) {
         const bpm = payload.readUInt16BE(0)
-        if (bpm > 20 && bpm < 400) meta.bpm = bpm
+        if (plausibleBpm(bpm)) meta.bpm = bpm
       } else if (name === '©key' || name === 'keyy') {
         applyTag('KEY', payload.toString('utf8'), meta)
       }
@@ -632,7 +738,12 @@ function findLastGranulePosition(tail: Buffer): number {
       tail[i] === 0x4f &&
       tail[i + 1] === 0x67 &&
       tail[i + 2] === 0x67 &&
-      tail[i + 3] === 0x53
+      tail[i + 3] === 0x53 &&
+      // The four bytes also occur inside compressed payload; a real page header follows
+      // them with stream structure version 0 and a header-type byte using only the low
+      // three flag bits.
+      tail[i + 4] === 0 &&
+      (tail[i + 5] & 0xf8) === 0
     ) {
       const lo = tail.readUInt32LE(i + 6)
       const hi = tail.readUInt32LE(i + 10)
@@ -696,6 +807,12 @@ function applyId3(buf: Buffer, meta: TrackMetadata): void {
   }
 }
 
+/** swap16 throws on an odd length, and a malformed frame can end mid-pair. */
+function utf16beToString(body: Buffer): string {
+  const even = body.length % 2 ? body.subarray(0, body.length - 1) : body
+  return Buffer.from(even).swap16().toString('utf16le')
+}
+
 function decodeId3Text(buf: Buffer): string {
   if (buf.length === 0) return ''
   const encoding = buf[0]
@@ -703,11 +820,16 @@ function decodeId3Text(buf: Buffer): string {
   let text: string
   switch (encoding) {
     case 1:
-      text = body.toString('utf16le').replace(/^﻿/, '')
+      // Encoding 1 is UTF-16 with a BOM, and the BOM is allowed to be big-endian.
+      if (body.length >= 2 && body[0] === 0xfe && body[1] === 0xff) {
+        text = utf16beToString(body.subarray(2))
+      } else {
+        text = body.toString('utf16le').replace(/^﻿/, '')
+      }
       break
     case 2:
       // UTF-16BE: swap byte pairs into LE before decoding.
-      text = Buffer.from(body).swap16().toString('utf16le')
+      text = utf16beToString(body)
       break
     case 3:
       text = body.toString('utf8')
@@ -725,8 +847,8 @@ function applyTag(name: string, rawValue: string, meta: TrackMetadata): void {
   if (!value) return
 
   if (name === 'BPM' || name === 'TEMPO') {
-    const bpm = Number.parseFloat(value)
-    if (Number.isFinite(bpm) && bpm > 20 && bpm < 400) meta.bpm = round2(bpm)
+    const bpm = round2(Number.parseFloat(value))
+    if (plausibleBpm(bpm)) meta.bpm = bpm
     return
   }
   if (name === 'KEY' || name === 'INITIALKEY' || name === 'INITIAL KEY') {
@@ -763,8 +885,8 @@ export function parseNameHints(filePath: string): { bpm?: number; musicalKey?: s
 
   const explicit = BPM_EXPLICIT.exec(stem) ?? BPM_PREFIXED.exec(stem)
   if (explicit) {
-    const bpm = Number.parseFloat(explicit[1])
-    if (bpm > 20 && bpm < 400) result.bpm = round2(bpm)
+    const bpm = round2(Number.parseFloat(explicit[1]))
+    if (plausibleBpm(bpm)) result.bpm = bpm
   } else {
     for (const token of stem.split(/[\s_\-()[\]]+/)) {
       if (!/^\d{2,3}$/.test(token)) continue

@@ -342,8 +342,11 @@ export async function renameEntry(
   const directory = info.isDirectory()
 
   // Changing only the case of a name is a real rename on NTFS but reads as a collision to
-  // existsSync, which is case-insensitive there.
-  const caseOnly = target.toLowerCase() === path.toLowerCase()
+  // existsSync, which is case-insensitive there. Only there, though: on a case-sensitive
+  // filesystem `kick.wav` and `Kick.wav` are two different files, and skipping the
+  // collision check would let the rename silently replace the other one.
+  const caseInsensitiveFs = process.platform === 'win32' || process.platform === 'darwin'
+  const caseOnly = caseInsensitiveFs && target.toLowerCase() === path.toLowerCase()
   if (!caseOnly && existsSync(target)) {
     return { ...EMPTY, error: 'Something with that name is already there.' }
   }

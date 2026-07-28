@@ -8,7 +8,14 @@
  */
 
 import { app, BrowserWindow, dialog } from 'electron'
-import { createReadStream, createWriteStream, existsSync, renameSync, statSync } from 'node:fs'
+import {
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  renameSync,
+  statSync,
+  unlinkSync
+} from 'node:fs'
 import { appendFile, open, type FileHandle } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { createGunzip, createGzip } from 'node:zlib'
@@ -59,7 +66,30 @@ function sizeOf(file: string): number {
   }
 }
 
+/**
+ * Whether a bundle is being written right now.
+ *
+ * There are two callers - the Export button and the daily backup - and they would be reading
+ * the same index and writing the same 300MB through the same gzip. The daily one checks this
+ * and waits for its next hour rather than doubling the work.
+ */
+let writing = false
+
+export function isWritingBundle(): boolean {
+  return writing
+}
+
 export async function writeBundle(file: string): Promise<void> {
+  if (writing) throw new Error('A bundle is already being written.')
+  writing = true
+  try {
+    await writeBundleInner(file)
+  } finally {
+    writing = false
+  }
+}
+
+async function writeBundleInner(file: string): Promise<void> {
   const settings = getUserData().settings
   const roots = settings.roots
   const dataDir = getDataDir()
@@ -92,30 +122,43 @@ export async function writeBundle(file: string): Promise<void> {
   // never sits on disk looking like a complete one.
   const tmp = `${file}.part`
   const done = pipeline(gzip, createWriteStream(tmp))
+  // Observed here as well as awaited below: a write that throws mid-loop exits this
+  // function before the `await done`, and an unobserved rejection takes the process down.
+  done.catch(() => {})
 
-  await writeLine(gzip, header)
+  try {
+    await writeLine(gzip, header)
 
-  await writeLine(gzip, { section: 'settings' } satisfies SectionMarker)
-  await writeLine(gzip, backup)
+    await writeLine(gzip, { section: 'settings' } satisfies SectionMarker)
+    await writeLine(gzip, backup)
 
-  for (const root of roots) {
-    await writeLine(gzip, { section: 'index', root: root.path } satisfies SectionMarker)
-    await copyLines(gzip, indexFileFor(root.path))
-    // The journal goes too. Without it a move made since the last full scan comes back at
-    // its old path on the machine this is restored onto, which is the bug the journal
-    // exists to prevent in the first place.
-    await writeLine(gzip, { section: 'indexPatch', root: root.path } satisfies SectionMarker)
-    await copyLines(gzip, patchFileFor(root.path))
+    for (const root of roots) {
+      await writeLine(gzip, { section: 'index', root: root.path } satisfies SectionMarker)
+      await copyLines(gzip, indexFileFor(root.path))
+      // The journal goes too. Without it a move made since the last full scan comes back at
+      // its old path on the machine this is restored onto, which is the bug the journal
+      // exists to prevent in the first place.
+      await writeLine(gzip, { section: 'indexPatch', root: root.path } satisfies SectionMarker)
+      await copyLines(gzip, patchFileFor(root.path))
+    }
+
+    await writeLine(gzip, { section: 'metadata' } satisfies SectionMarker)
+    await copyLines(gzip, join(dataDir, METADATA_CACHE))
+
+    await writeLine(gzip, { section: 'peaks' } satisfies SectionMarker)
+    for (const entry of peaks) await writeLine(gzip, entry)
+
+    gzip.end()
+    await done
+  } catch (error) {
+    gzip.destroy()
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // The stream may still hold the file open; a stray .part is cosmetic.
+    }
+    throw error
   }
-
-  await writeLine(gzip, { section: 'metadata' } satisfies SectionMarker)
-  await copyLines(gzip, join(dataDir, METADATA_CACHE))
-
-  await writeLine(gzip, { section: 'peaks' } satisfies SectionMarker)
-  for (const entry of peaks) await writeLine(gzip, entry)
-
-  gzip.end()
-  await done
   renameSync(tmp, file)
 }
 
@@ -208,13 +251,23 @@ export async function restoreBundle(file: string): Promise<RestoreResult> {
   let metadata: string[] = []
   let peaks: Array<{ p: string; d: string }> = []
 
-  const closeSink = async (): Promise<void> => {
+  const closeSink = async (commit: boolean): Promise<void> => {
     if (!sink) return
     const { stream, tmp, final } = sink
     sink = null
     stream.end()
     await once(stream, 'close')
-    renameSync(tmp, final)
+    // Only a section that ran to its closing marker replaces the machine's own file. A
+    // sink still open when the stream gave out is a truncated bundle, and renaming its
+    // half-written index over a complete one would trade a good file for a partial one.
+    if (commit) renameSync(tmp, final)
+    else {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        // A stray .part is cosmetic; the real file was never touched.
+      }
+    }
   }
 
   const flushMetadata = async (): Promise<void> => {
@@ -230,7 +283,17 @@ export async function restoreBundle(file: string): Promise<RestoreResult> {
   }
 
   const source = createReadStream(file)
-  const lines = createInterface({ input: source.pipe(createGunzip()), crlfDelay: Infinity })
+  const gunzip = createGunzip()
+  // readline's iterator does not surface input-stream errors - it just stops - so a
+  // truncated bundle would otherwise sail through the loop and be reported as a
+  // successful restore. The flag turns that silence back into a failure.
+  let failure: Error | null = null
+  const noteFailure = (error: unknown): void => {
+    failure ??= error instanceof Error ? error : new Error(String(error))
+  }
+  gunzip.on('error', noteFailure)
+  source.on('error', noteFailure)
+  const lines = createInterface({ input: source.pipe(gunzip), crlfDelay: Infinity })
 
   let first = true
   try {
@@ -251,7 +314,7 @@ export async function restoreBundle(file: string): Promise<RestoreResult> {
       }
 
       if (isSectionMarker(parsed)) {
-        await closeSink()
+        await closeSink(true)
         await flushMetadata()
         section = parsed
 
@@ -290,10 +353,13 @@ export async function restoreBundle(file: string): Promise<RestoreResult> {
   } finally {
     lines.close()
     source.destroy()
-    await closeSink()
+    // A complete bundle always closes its last index sink at the metadata marker, so a
+    // sink still open here means the stream ended mid-section: discard, never commit.
+    await closeSink(false)
     await flushMetadata()
   }
 
+  if (failure) throw failure
   if (peaks.length > 0) result.peaks += mergePeaks(peaks)
   return result
 }

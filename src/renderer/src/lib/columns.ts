@@ -83,6 +83,12 @@ export const COLUMN_DEFS: readonly ColumnDef[] = [
     minWidth: 134,
     hiddenByDefault: true
   },
+  /**
+   * Not sortable: it is prose, and ordering a folder by the alphabet of what you happened to
+   * write about it answers nothing. Wide by default because a note that shows four words is
+   * a note you stop writing.
+   */
+  { id: 'notes', label: 'Notes', defaultWidth: 200, minWidth: 90 },
   // Not sortable - it's a picture of the audio, not a value.
   { id: 'waveform', label: 'Waveform', defaultWidth: 120, minWidth: 60 }
 ] as const

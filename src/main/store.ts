@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
 import { labelForRoot } from '../shared/roots'
 import type { SettingsBackup } from '../shared/backup'
-import { isPortable } from './portable'
+import { backupsDir, isPortable } from './portable'
 export type { SettingsBackup }
 
 interface PeaksEntry {
@@ -32,8 +32,10 @@ let userData: UserData = {
   settings: { ...DEFAULT_SETTINGS },
   tags: {},
   ratings: {},
+  notes: {},
   detectedBpm: {},
-  detectedKey: {}
+  detectedKey: {},
+  detectedKeyFit: {}
 }
 let peaksCache: Record<string, PeaksEntry> = {}
 
@@ -76,16 +78,40 @@ export function initStore(): void {
   if (!userData.settings.stemOutputDir) {
     userData.settings.stemOutputDir = isPortable()
       ? join(dataDir, 'stems')
-      : join(app.getPath('music'), 'umakbang stems')
+      : join(musicDir(), 'umakbang stems')
+  }
+
+  // Where the Export button writes, seeded to the same folder the daily backup uses so the
+  // two land together and there is one place to look. Only when empty, so choosing another
+  // folder sticks - and it is `LOCAL_ONLY`, so an import can never fill it in and leave this
+  // branch permanently unreachable with another machine's install path in it.
+  if (!userData.settings.bundleExportDir) {
+    userData.settings.bundleExportDir = backupsDir()
   }
 
   userData.settings.quickMove ??= []
   userData.tags ??= {}
   userData.ratings ??= {}
+  userData.notes ??= {}
   userData.detectedBpm ??= {}
   userData.detectedKey ??= {}
+  // Absent from every file written before the column started saying how sure it is.
+  userData.detectedKeyFit ??= {}
 
   peaksCache = readJson(peaksFile, {})
+}
+
+/**
+ * Not every Linux setup defines a music directory, and `getPath` throws when one doesn't.
+ * Thrown here it would take `initStore` - and with it the whole first launch - down, so
+ * fall back to the conventional place instead.
+ */
+function musicDir(): string {
+  try {
+    return app.getPath('music')
+  } catch {
+    return join(app.getPath('home'), 'Music')
+  }
 }
 
 function readJson<T>(file: string, fallback: T): T {
@@ -222,10 +248,14 @@ export function setDetectedBpm(path: string, bpm: number): void {
 }
 
 /** Musical key recovered by analysing the audio. Same debounce as the tempo, and why. */
-export function setDetectedKey(path: string, key: string): void {
+export function setDetectedKey(path: string, key: string, fit?: number): void {
   const trimmed = key.trim()
   if (!trimmed) return
   userData.detectedKey[path] = trimmed
+  // A key that arrived from the user's own tool has no fit of its own, and last run's number
+  // would describe a different answer entirely.
+  if (fit !== undefined && Number.isFinite(fit)) userData.detectedKeyFit[path] = fit
+  else delete userData.detectedKeyFit[path]
   scheduleWrite(userDataFile, () => userData, 3000)
 }
 
@@ -239,8 +269,22 @@ export function clearDetected(paths: string[]): void {
   for (const path of paths) {
     delete userData.detectedBpm[path]
     delete userData.detectedKey[path]
+    delete userData.detectedKeyFit[path]
   }
   scheduleWrite(userDataFile, () => userData)
+}
+
+/**
+ * Whatever the user wrote about a file. Emptied means removed, so the map holds notes and
+ * not a trail of blank strings for every file that was ever clicked into.
+ */
+export function setNote(path: string, note: string): void {
+  const trimmed = note.trim()
+  if (trimmed) userData.notes[path] = trimmed
+  else delete userData.notes[path]
+  // Short debounce, unlike the analysis maps: this is typing, and a note lost to a crash is
+  // a sentence the user has to remember writing.
+  scheduleWrite(userDataFile, () => userData, 800)
 }
 
 export function setTags(path: string, tags: string[]): Record<string, string[]> {
@@ -283,7 +327,12 @@ const LOCAL_ONLY = [
   'keyCommand',
   // An account credential. Nothing that bills by the minute travels in a file people send
   // each other.
-  'lalalKey'
+  'lalalKey',
+  // Where *this install* keeps its own files, derived from where the executable sits, rather
+  // than a preference about how you like to work. It is seeded only when empty, so an
+  // imported value would not just point at the exporting machine's install folder - it would
+  // stop the seeding from ever running again and leave it pointing there for good.
+  'bundleExportDir'
 ] as const
 
 export function exportBackup(): SettingsBackup {
@@ -300,6 +349,7 @@ export function exportBackup(): SettingsBackup {
     settings,
     tags: userData.tags,
     ratings: userData.ratings,
+    notes: userData.notes,
     detectedBpm: userData.detectedBpm,
     detectedKey: userData.detectedKey
   }
@@ -316,6 +366,7 @@ export function importBackup(backup: SettingsBackup): UserData {
   userData.settings = { ...userData.settings, ...incoming }
   userData.tags = { ...userData.tags, ...(backup.tags ?? {}) }
   userData.ratings = { ...userData.ratings, ...(backup.ratings ?? {}) }
+  userData.notes = { ...userData.notes, ...(backup.notes ?? {}) }
   userData.detectedBpm = { ...userData.detectedBpm, ...(backup.detectedBpm ?? {}) }
   userData.detectedKey = { ...userData.detectedKey, ...(backup.detectedKey ?? {}) }
 
@@ -328,8 +379,11 @@ export function importBackup(backup: SettingsBackup): UserData {
 export function getPeaks(path: string): string | null {
   const entry = peaksCache[path]
   if (!entry) return null
+  // The stamp is recorded in memory only. Scheduling a write here meant browsing rows
+  // (pure cache hits) re-serialised an up-to-11MB JSON document on the same thread that
+  // streams audio; the stamps ride along with the next real write instead, and an LRU
+  // that is a session behind is still an LRU.
   entry.usedAt = Date.now()
-  scheduleWrite(peaksFile, () => peaksCache, 5000)
   return entry.data
 }
 

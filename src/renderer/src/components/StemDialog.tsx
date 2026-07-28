@@ -56,7 +56,10 @@ export function StemDialog({
   const short = minutesLeft !== undefined && minutesLeft !== null && minutesLeft < minutes
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !running && onClose()}>
+    // Closable even while a job runs: `running` only blocks a second submission. A dialog
+    // opened during someone else's minutes-long job must not trap the user until LALAL's
+    // queue clears.
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent aria-describedby={undefined} className="max-w-[440px]">
         <header className="border-b px-4 py-3">
           <DialogTitle>Split vocals</DialogTitle>
@@ -149,8 +152,8 @@ export function StemDialog({
               Open settings
             </Button>
           )}
-          <Button variant="ghost" size="sm" disabled={running} onClick={onClose}>
-            {running ? 'Working…' : 'Cancel'}
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            {running ? 'Close' : 'Cancel'}
           </Button>
           <Button
             size="sm"

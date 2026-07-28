@@ -1,11 +1,11 @@
 import type { SortKey, Track, TrackKind } from '@shared/types'
-import { relativeKeyPair } from '@shared/keys'
+import { relativeKeyPair, sameKey } from '@shared/keys'
 
 /**
  * Query language for the search box.
  *
  * Bare words match the file name and its path. Prefixed terms narrow by field, e.g.
- *   `vox stem: bpm>120 key:Am ext:wav tag:keeper fav:`
+ *   `vox project: bpm>=120 key:Am ext:wav tag:keeper fav:`
  * Everything is ANDed, which is what you want when you're digging for one file.
  */
 export interface ParsedQuery {
@@ -60,14 +60,19 @@ export function parseQuery(raw: string): ParsedQuery {
       const lower = field.toLowerCase()
       const isBpm = lower === 'bpm'
       const isStars = lower === 'stars' || lower === 'rating'
+      // The matcher compares strictly, so inclusive bounds are nudged past the value by
+      // less than the data's own precision (bpm is stored to 0.1, duration to 1ms).
+      // Without this `bpm>=140` quietly excluded exactly 140.
+      const inclusive = operator.length === 2
+      const nudge = inclusive ? 1e-4 : 0
       if (operator.startsWith('>')) {
-        if (isStars) result.minStars = Math.min(5, value + 1)
-        else if (isBpm) result.bpmMin = value
-        else result.minDuration = value
+        if (isStars) result.minStars = Math.min(5, inclusive ? value : value + 1)
+        else if (isBpm) result.bpmMin = value - nudge
+        else result.minDuration = value - nudge
       } else if (operator.startsWith('<')) {
-        if (isStars) result.maxStars = Math.max(0, value - 1)
-        else if (isBpm) result.bpmMax = value
-        else result.maxDuration = value
+        if (isStars) result.maxStars = Math.max(0, inclusive ? value : value - 1)
+        else if (isBpm) result.bpmMax = value + nudge
+        else result.maxDuration = value + nudge
       } else if (isStars) {
         result.minStars = value
         result.maxStars = value
@@ -82,7 +87,7 @@ export function parseQuery(raw: string): ParsedQuery {
       const field = token.slice(0, colon).toLowerCase()
       const value = token.slice(colon + 1).toLowerCase()
 
-      if (field === 'stars' || field === 'rating' || field === 'rated') {
+      if (field === 'stars' || field === 'rating' || field === 'rated' || field === 'fav') {
         // `stars:3` is an exact rating; `stars:3-5` a range; bare `rated:` means any.
         const range = /^(\d)(?:-(\d))?$/.exec(value)
         if (range) {
@@ -165,9 +170,14 @@ export function matchesQuery(track: Track, query: ParsedQuery, context: MatchCon
     const key = track.musicalKey?.toLowerCase()
     if (!key) return false
     // A detected key is displayed as its relative pair ("Eb/Cm"), so either half is a fair
-    // thing to search for even though only one of them is stored.
+    // thing to search for even though only one of them is stored - and so is the other
+    // spelling of the same note (`key:d#m` finding a track stored as "Ebm").
     const parts = [key, ...relativeKeyPair(key).toLowerCase().split('/')]
-    if (!query.keys.some((k) => parts.some((part) => part === k || part.startsWith(k)))) {
+    if (
+      !query.keys.some((k) =>
+        parts.some((part) => part === k || part.startsWith(k) || sameKey(part, k))
+      )
+    ) {
       return false
     }
   }

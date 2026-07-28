@@ -137,9 +137,19 @@ const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 
  * in figures - and a mismatch between them is the kind of thing that voids a clause.
  */
 export function priceToWords(value: string): string {
-  const amount = Math.floor(Number(value.replace(/[^0-9.]/g, '')))
-  if (!Number.isFinite(amount) || amount < 0) return value
-  const words = spell(amount)
+  const numeric = Number(value.replace(/[^0-9.]/g, ''))
+  if (!Number.isFinite(numeric) || numeric < 0) return value
+  // Cents are spelled the way cheques spell them - "three hundred and 50/100" - because
+  // flooring them off printed words that disagreed with the figures beside them, which is
+  // the exact mismatch this function exists to prevent. The template follows with
+  // "Dollars", so the fraction form reads correctly in place.
+  let dollars = Math.floor(numeric)
+  let cents = Math.round((numeric - dollars) * 100)
+  if (cents === 100) {
+    dollars += 1
+    cents = 0
+  }
+  const words = spell(dollars) + (cents ? ` and ${String(cents).padStart(2, '0')}/100` : '')
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
@@ -229,10 +239,10 @@ function inline(text: string): string {
 /**
  * The subset of Markdown these templates are written in.
  *
- * Not a Markdown implementation: headings, rules, both list kinds, paragraphs, hard breaks
- * from two trailing spaces, and inline bold/italic/underline. Anything else passes through
- * as text, which is the right failure for a legal document - it shows up rather than
- * disappearing.
+ * Not a Markdown implementation: headings, rules, both list kinds, paragraphs (where every
+ * line break is kept, the way the templates were written), and inline bold/italic/underline.
+ * Anything else passes through as text, which is the right failure for a legal document -
+ * it shows up rather than disappearing.
  */
 export function markdownToHtml(markdown: string): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n')
@@ -253,7 +263,6 @@ export function markdownToHtml(markdown: string): string {
 
   for (const raw of lines) {
     const line = raw.trimEnd()
-    const hardBreak = /\s{2,}$/.test(raw)
 
     if (!line.trim()) {
       closeParagraph()
@@ -300,7 +309,7 @@ export function markdownToHtml(markdown: string): string {
       }
     }
 
-    paragraph.push(inline(line.trim()) + (hardBreak ? '' : ''))
+    paragraph.push(inline(line.trim()))
   }
   closeParagraph()
   closeList()
@@ -333,7 +342,7 @@ function stamp(date: Date): string {
 
 function safeName(name: string): string {
   // eslint-disable-next-line no-control-regex
-  return name.replace(/[<>:"/\\|?* -]/g, '').trim().replace(/\.+$/, '') || 'contract'
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim().replace(/\.+$/, '') || 'contract'
 }
 
 export interface ContractResult {

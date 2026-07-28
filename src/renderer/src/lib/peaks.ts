@@ -68,8 +68,14 @@ type Peaks = Uint8Array | null
 const cache = new Map<string, Peaks>()
 const inFlight = new Map<string, Promise<Peaks>>()
 const listeners = new Map<string, Set<(peaks: Peaks) => void>>()
+/**
+ * Bumped by `forgetPeaks`, checked before a load publishes. A file forgotten while its
+ * old contents were mid-decode must not have those stale peaks written back into the
+ * cache the moment the decode lands.
+ */
+const epochs = new Map<string, number>()
 
-const queue: Array<{ path: string; size: number; run: () => void }> = []
+const queue: Array<{ path: string; size: number; run: () => void; cancel: () => void }> = []
 let active = 0
 
 let sharedContext: AudioContext | null = null
@@ -126,25 +132,30 @@ export function requestPeaks(path: string, size: number, priority = false): Prom
   if (existing) return existing
 
   const promise = new Promise<Peaks>((resolve) => {
+    const startEpoch = epochs.get(path) ?? 0
+    const current = (): boolean => (epochs.get(path) ?? 0) === startEpoch
     const run = (): void => {
       active++
       void load(path, size)
         .then((peaks) => {
-          publish(path, peaks)
+          // A forget mid-decode means these peaks describe the file's old contents;
+          // the caller still gets them, the cache doesn't.
+          if (current()) publish(path, peaks)
           resolve(peaks)
         })
         .catch(() => {
-          publish(path, null)
+          if (current()) publish(path, null)
           resolve(null)
         })
         .finally(() => {
           active--
-          inFlight.delete(path)
+          // Only this request's own entry: a forget may have registered a replacement.
+          if (inFlight.get(path) === promise) inFlight.delete(path)
           pump()
         })
     }
 
-    const entry = { path, size, run }
+    const entry = { path, size, run, cancel: () => resolve(null) }
     // The playing track jumps the queue; rows are best-effort background work.
     if (priority) queue.unshift(entry)
     else queue.push(entry)
@@ -166,6 +177,7 @@ export function forgetPeaks(paths: string[]): void {
   for (const path of paths) {
     cache.delete(path)
     inFlight.delete(path)
+    epochs.set(path, (epochs.get(path) ?? 0) + 1)
   }
   void window.umakbang.forgetPeaks(paths)
   // Nothing is re-requested here: a file that changed also changed size, and the row
@@ -176,8 +188,11 @@ export function forgetPeaks(paths: string[]): void {
 export function cancelPeaks(path: string): void {
   const index = queue.findIndex((entry) => entry.path === path)
   if (index !== -1) {
-    queue.splice(index, 1)
+    const [entry] = queue.splice(index, 1)
     inFlight.delete(path)
+    // The promise still has to settle: analysis awaits it while holding one of its two
+    // slots, and an await that never returns leaks the slot for the rest of the session.
+    entry.cancel()
   }
 }
 

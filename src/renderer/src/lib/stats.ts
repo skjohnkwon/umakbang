@@ -1,5 +1,6 @@
 import type { Track } from '@shared/types'
 import { relativeKeyPair } from '@shared/keys'
+import { isUnderAnyDir } from '@/lib/paths'
 
 /**
  * Production statistics derived from FL Studio's per-project time tracking.
@@ -14,8 +15,6 @@ export interface ProjectRecord {
   path: string
   name: string
   relDir: string
-  /** Top-level folder under the library root - the natural grouping. */
-  category: string
   createdMs?: number
   seconds: number
   isBackup: boolean
@@ -57,10 +56,13 @@ export interface Stats {
   capHours: number | null
   cappedCount: number
 
+  /**
+   * Both measured over capped time, like every other figure here. A project left open for
+   * three days is not three days of work, and letting one of them into the mean - or into
+   * the tail of the histogram - describes the forgotten window rather than the habit.
+   */
   medianMinutes: number
   meanMinutes: number
-  longestHours: number
-  longestName: string
   firstCreatedMs: number | null
   lastCreatedMs: number | null
 
@@ -81,7 +83,6 @@ export interface Stats {
   /** [weekday][hour] project counts. */
   heat: number[][]
   histogram: Array<{ label: string; count: number }>
-  categories: Array<{ category: string; count: number; hours: number }>
 }
 
 /**
@@ -190,12 +191,10 @@ export function collectProjects(tracks: Track[]): ProjectRecord[] {
     // Unprobed, or an .flp with no time record at all.
     if (track.projectSeconds === undefined) continue
 
-    const segments = track.rel.split('/')
     records.push({
       path: track.path,
       name: track.name,
       relDir: track.relDir,
-      category: segments.length > 1 ? segments[0] : 'Library root',
       createdMs:
         track.projectCreatedMs !== undefined && track.projectCreatedMs >= ANALYSIS_START_MS
           ? track.projectCreatedMs
@@ -320,7 +319,7 @@ export function computeStats(tracks: Track[], range?: StatsRange | null): Stats 
 
   const histogram = HIST_LABELS.map((label) => ({ label, count: 0 }))
   for (const seconds of times) {
-    const minutes = seconds / 60
+    const minutes = cap(seconds) / 60
     for (let i = 0; i < HIST_BOUNDS.length - 1; i++) {
       if (minutes >= HIST_BOUNDS[i] && minutes < HIST_BOUNDS[i + 1]) {
         histogram[i].count++
@@ -329,19 +328,7 @@ export function computeStats(tracks: Track[], range?: StatsRange | null): Stats 
     }
   }
 
-  const categoryMap = new Map<string, { count: number; seconds: number }>()
-  for (const record of counted) {
-    const entry = categoryMap.get(record.category) ?? { count: 0, seconds: 0 }
-    entry.count++
-    entry.seconds += cap(record.seconds)
-    categoryMap.set(record.category, entry)
-  }
-
-  const nonZero = sorted.filter((value) => value > 0)
-  const longest = counted.reduce<ProjectRecord | null>(
-    (best, record) => (best === null || record.seconds > best.seconds ? record : best),
-    null
-  )
+  const nonZero = sorted.filter((value) => value > 0).map(cap)
   // Reduced rather than spread into Math.min/max, which blows the stack on large inputs.
   let firstCreatedMs: number | null = null
   let lastCreatedMs: number | null = null
@@ -370,8 +357,6 @@ export function computeStats(tracks: Track[], range?: StatsRange | null): Stats 
     meanMinutes: nonZero.length
       ? nonZero.reduce((sum, value) => sum + value, 0) / nonZero.length / 60
       : 0,
-    longestHours: longest ? longest.seconds / 3600 : 0,
-    longestName: longest?.name ?? '',
     firstCreatedMs,
     lastCreatedMs,
 
@@ -386,14 +371,7 @@ export function computeStats(tracks: Track[], range?: StatsRange | null): Stats 
     weekday,
     hour,
     heat,
-    histogram,
-    categories: [...categoryMap.entries()]
-      .map(([category, entry]) => ({
-        category,
-        count: entry.count,
-        hours: entry.seconds / 3600
-      }))
-      .sort((a, b) => b.hours - a.hours)
+    histogram
   }
 }
 
@@ -528,32 +506,108 @@ export function formatMinutes(minutes: number): string {
 /* ------------------------------------------------------------------ key and tempo */
 
 export interface MusicStats {
-  /** Audio files in range, and how many of them have each figure. */
+  /** Distinct works in range - not files - and how many of them have a key. */
   audio: number
   withKey: number
+  /**
+   * Projects in range carrying a tempo. Not audio files: see `computeMusicStats`.
+   */
   withTempo: number
+  /**
+   * The same two counts over the whole library, ignoring the range. Lets the page keep the
+   * panels on screen for a window that happens to be empty, instead of the section
+   * vanishing and reading as though the range control had broken it.
+   */
+  libraryWithKey: number
+  libraryWithTempo: number
   /** Keys by how often you write in them, commonest first. */
   keys: Array<{ label: string; count: number }>
+  /**
+   * The relative pairs in circle-of-fifths order, empty ones left out. Ranked bars answer
+   * "which key most", which is one number; laid out around the wheel the same bars also
+   * show whether a preference is a neighbourhood or a scattering. A key with no files in
+   * the window is dropped rather than drawn as a flat bar with a label under it - over the
+   * whole library all twelve are occupied, but a short range fills three of them.
+   */
+  keyWheel: Array<{ label: string; count: number }>
   /** Tempos to the nearest whole BPM, commonest first. */
   tempos: Array<{ bpm: number; count: number }>
-  /** Ten-BPM bins across the range actually used, for a shape rather than a ranking. */
-  histogram: Array<{ label: string; count: number }>
+  /**
+   * One bin per BPM across the range actually in use.
+   *
+   * This is the ranking and the spread in one chart, which is what they always were: a
+   * producer works at exact tempos, so the commonest ones stand up as spikes and the shape
+   * between them is the spread. Two panels split that into a list with no shape and a shape
+   * with no names, and neither of them said 140 twice as often as 150.
+   */
+  histogram: Array<{ bpm: number; count: number }>
   medianBpm: number | null
+}
+
+/**
+ * The twelve relative pairs, fifths apart. Spelled by `relativeKeyPair` rather than by hand
+ * so the labels are the same strings the counting produced - one table that disagreed about
+ * F#/D#m would silently plot a zero beside a key with fifty files in it.
+ */
+const FIFTHS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F']
+
+/**
+ * The renders one piece of music leaves behind: `REFLECT_Master.wav`, `REFLECT.mp3` and
+ * `REFLECT_notag.wav` are one track, not three. Only words that name a *render* are
+ * stripped - not `(1)`, which in a sample pack is the difference between one hi-hat and
+ * the next.
+ */
+const RENDER_SUFFIX =
+  /(?:[_\s-]*(?:master(?:ed)?|notag|no[_\s-]?tag|final|mixdown|mixed|mix|render|export|v\d+|copy))+$/i
+
+/**
+ * The work a file is a render of: its folder plus its name with the render words off.
+ *
+ * Exported because the explorer folds rows by the same rule (`Settings.collapseRenders`).
+ * Two definitions of "one track" that disagreed would be a bug nobody could see: the panels
+ * would count 40 songs where the list showed 41 rows and neither would look wrong.
+ */
+export function workOf(track: Track): string {
+  const stem = track.name.replace(/\.[^.]+$/, '')
+  return `${track.relDir}/${stem.replace(RENDER_SUFFIX, '').trim()}`.toLowerCase()
 }
 
 /**
  * What you write, as opposed to how long you spend writing it.
  *
- * Audio files rather than projects, dated by the file's own timestamp: an export is the
- * moment a piece of music existed at that tempo in that key, and it is the only date an
- * audio file carries. That means the range control governs this the same way it governs
- * everything else on the page.
+ * **Tempo comes from the projects, key comes from the audio**, and the split is not an
+ * inconsistency. An `.flp` states its tempo exactly (`fillTemposFromProjects` puts it on the
+ * project's own row), so counting projects replaces a detector that is right two thirds of
+ * the time with a fact - and one project is one piece of music, where its master, its MP3 and
+ * its notag render are three files that were only ever one. An FLP says nothing about key, so
+ * that half still reads the audio, folded per work.
+ *
+ * Each is dated by what it has: a project by when FL Studio recorded it as created, an audio
+ * file by its own mtime, since an export is the only date it carries. Both answer the range
+ * control.
  *
  * Keys are counted as relative pairs - Eb and Cm are one entry - because that is how a
  * detected key is displayed, and because the two share every note. Counting them apart
  * would split one preference across two rows and make neither of them look like a habit.
+ *
+ * Two rules keep this a description of the music *you* made, and both are load-bearing.
+ * Measured on this library, without them the panels counted 55,993 audio files and
+ * announced 19,092 keys:
+ *
+ *   - `excludeDirs` (`Settings.randomExcludeDirs`) is a list the user already curates for
+ *     the random button, and it names the sample packs. 45,775 of the 49,213 works here
+ *     live under `Sauce Ingredients` - other people's drum kits and loop libraries, whose
+ *     file names are where nearly all of those keys came from. A statistic titled "keys you
+ *     write in" that is 93% somebody else's loop pack is not a fact about the user at all.
+ *   - Renders are folded, because a track exported as both a master and an MP3 voted twice.
+ *
+ * Together they take 55,993 files down to the ~1,500 pieces of music behind them.
  */
-export function computeMusicStats(tracks: Track[], range?: StatsRange | null): MusicStats {
+export function computeMusicStats(
+  tracks: Track[],
+  range?: StatsRange | null,
+  excludeDirs: string[] = []
+): MusicStats {
   const endExclusiveMs = range ? addDays(range.endMs, 1) : 0
   const keyCounts = new Map<string, number>()
   const tempoCounts = new Map<number, number>()
@@ -561,22 +615,63 @@ export function computeMusicStats(tracks: Track[], range?: StatsRange | null): M
   let audio = 0
   let withKey = 0
   let withTempo = 0
+  let libraryWithKey = 0
+  let libraryWithTempo = 0
 
+  /**
+   * One entry per work. The largest render represents it - the master rather than the MP3
+   * beside it - and a value it happens to lack is taken from a sibling, so folding can only
+   * ever lose a duplicate and never a reading.
+   */
+  const works = new Map<string, { track: Track; key?: string }>()
   for (const track of tracks) {
+    // Projects carry the tempo half, below. A backup copy is the same project counted twice,
+    // which is why `collectProjects` drops them and why this does too.
+    if (track.ext === 'flp' && !isBackupPath(track.rel) && !isUnderAnyDir(track.relDir, excludeDirs)) {
+      if (track.bpm !== undefined && track.bpm > 0) {
+        libraryWithTempo++
+        const created = track.projectCreatedMs
+        // A project FL Studio never dated cannot answer a dated window, the same rule the
+        // rest of the page applies to them.
+        if (range && (created === undefined || created < range.startMs || created >= endExclusiveMs)) {
+          continue
+        }
+        withTempo++
+        const rounded = Math.round(track.bpm)
+        tempoCounts.set(rounded, (tempoCounts.get(rounded) ?? 0) + 1)
+        bpms.push(rounded)
+      }
+      continue
+    }
     if (track.kind !== 'audio') continue
-    if (range && (track.mtimeMs < range.startMs || track.mtimeMs >= endExclusiveMs)) continue
+    if (isUnderAnyDir(track.relDir, excludeDirs)) continue
+
+    const id = workOf(track)
+    const existing = works.get(id)
+    if (!existing) {
+      works.set(id, { track, key: track.musicalKey })
+      continue
+    }
+    if (track.size > existing.track.size) {
+      existing.track = track
+      if (track.musicalKey) existing.key = track.musicalKey
+    } else {
+      existing.key ??= track.musicalKey
+    }
+  }
+
+  for (const work of works.values()) {
+    // Counted before the range test, so an empty window can still be told apart from a
+    // library that has never been analysed.
+    if (work.key) libraryWithKey++
+    const { mtimeMs } = work.track
+    if (range && (mtimeMs < range.startMs || mtimeMs >= endExclusiveMs)) continue
     audio++
 
-    if (track.musicalKey) {
+    if (work.key) {
       withKey++
-      const label = relativeKeyPair(track.musicalKey)
+      const label = relativeKeyPair(work.key)
       keyCounts.set(label, (keyCounts.get(label) ?? 0) + 1)
-    }
-    if (track.bpm !== undefined && track.bpm > 0) {
-      withTempo++
-      const rounded = Math.round(track.bpm)
-      tempoCounts.set(rounded, (tempoCounts.get(rounded) ?? 0) + 1)
-      bpms.push(rounded)
     }
   }
 
@@ -587,22 +682,44 @@ export function computeMusicStats(tracks: Track[], range?: StatsRange | null): M
     .map(([bpm, count]) => ({ bpm, count }))
     .sort((a, b) => b.count - a.count || a.bpm - b.bpm)
 
+  const keyWheel = FIFTHS.map((major) => relativeKeyPair(major))
+    .map((label) => ({ label, count: keyCounts.get(label) ?? 0 }))
+    .filter((entry) => entry.count > 0)
+
   // Bins over the range that is actually in use, so a library that lives between 120 and
-  // 160 doesn't spend nine tenths of its chart on empty bars.
+  // 160 doesn't spend nine tenths of its chart on empty bars. Whole BPM: the spikes at the
+  // tempos actually worked at are the point, and a ten-wide bin flattens them into a slab.
   const histogram: MusicStats['histogram'] = []
   if (bpms.length > 0) {
-    const low = Math.floor(Math.min(...bpms) / 10) * 10
-    const high = Math.ceil((Math.max(...bpms) + 1) / 10) * 10
-    for (let start = low; start < high; start += 10) {
-      histogram.push({
-        label: `${start}`,
-        count: bpms.filter((bpm) => bpm >= start && bpm < start + 10).length
-      })
+    // Reduced rather than spread into Math.min/max, which blows the stack on large
+    // inputs - same trap `computeStats` already dodges.
+    let min = Infinity
+    let max = -Infinity
+    for (const bpm of bpms) {
+      if (bpm < min) min = bpm
+      if (bpm > max) max = bpm
+    }
+    // Rounded out to tens so the axis can be labelled at every tenth bar.
+    const low = Math.floor(min / 10) * 10
+    const high = Math.ceil((max + 1) / 10) * 10
+    for (let bpm = low; bpm < high; bpm++) {
+      histogram.push({ bpm, count: tempoCounts.get(bpm) ?? 0 })
     }
   }
 
   const sorted = bpms.slice().sort((a, b) => a - b)
   const medianBpm = sorted.length > 0 ? quantile(sorted, 0.5) : null
 
-  return { audio, withKey, withTempo, keys, tempos, histogram, medianBpm }
+  return {
+    audio,
+    withKey,
+    withTempo,
+    libraryWithKey,
+    libraryWithTempo,
+    keys,
+    keyWheel,
+    tempos,
+    histogram,
+    medianBpm
+  }
 }

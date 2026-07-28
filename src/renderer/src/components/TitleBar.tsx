@@ -16,6 +16,7 @@ import { MiniPlayerExit } from '@/components/MiniPlayer'
 import { Logo } from '@/components/Logo'
 import { useLibrary } from '@/state/library'
 import { baseName } from '@/lib/format'
+import { samePath } from '@/lib/paths'
 import { useUpdateStatus } from '@/lib/updates'
 import { cn } from '@/lib/utils'
 
@@ -139,13 +140,20 @@ export function TitleBar(): React.JSX.Element {
             <RefreshCw className={cn('h-3.5 w-3.5', scanning && 'animate-spin')} />
             Rescan library
           </DropdownMenuItem>
-          {settings.recentRoots.length > 1 && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Recent</DropdownMenuLabel>
-              {settings.recentRoots
-                .filter((recent) => !roots.some((entry) => entry.path === recent))
-                .map((recent) => (
+          {(() => {
+            // Filtered before the section is gated, or a list whose every entry is
+            // already open rendered a separator and a "Recent" label over nothing.
+            // Compared with samePath like every other path in the app - a root
+            // re-opened with different casing is still the same folder.
+            const recents = settings.recentRoots.filter(
+              (recent) => !roots.some((entry) => samePath(entry.path, recent))
+            )
+            if (recents.length === 0) return null
+            return (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Recent</DropdownMenuLabel>
+                {recents.map((recent) => (
                   <DropdownMenuItem
                     key={recent}
                     onSelect={() => void window.umakbang.openLibrary(recent)}
@@ -154,8 +162,9 @@ export function TitleBar(): React.JSX.Element {
                     <span className="truncate">{baseName(recent)}</span>
                   </DropdownMenuItem>
                 ))}
-            </>
-          )}
+              </>
+            )
+          })()}
         </DropdownMenuContent>
       </DropdownMenu>
 

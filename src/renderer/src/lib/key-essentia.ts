@@ -86,7 +86,7 @@ export function essentiaFailure(): string | null {
  */
 async function essentia(): Promise<EssentiaLike | null> {
   if (loading) return loading
-  loading = (async () => {
+  const attempt = (loading = (async () => {
     try {
       const [wasm, core] = await Promise.all([
         import('essentia.js/dist/essentia-wasm.es.js'),
@@ -115,8 +115,14 @@ async function essentia(): Promise<EssentiaLike | null> {
       unavailableReason = error instanceof Error ? error.message : String(error)
       return null
     }
-  })()
-  return loading
+  })())
+  // A failure is not cached forever: re-selecting the engine in Settings is meant to be
+  // worth another try (and another report), and a permanently pinned null promise made
+  // that a restart-only affair. A success stays cached.
+  void attempt.then((instance) => {
+    if (instance === null && loading === attempt) loading = null
+  })
+  return attempt
 }
 
 /** Whether the engine can be used at all, without committing to analysing anything. */

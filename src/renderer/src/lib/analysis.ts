@@ -29,6 +29,15 @@ import AnalysisWorker from '@/lib/analysis.worker?worker'
 export interface Analysis {
   bpm?: number
   musicalKey?: string
+  /**
+   * How well the winning key profile fitted, 0 to 1, for a key that was *guessed*.
+   *
+   * Measured and then thrown away until now. A reading the detector barely believes was
+   * drawn exactly like one it is sure of, which is the column asserting more than the
+   * analysis established. Absent for a key that came off a tag, a file name or the user's
+   * own tool, because those were declared rather than estimated.
+   */
+  keyFit?: number
 }
 
 /**
@@ -272,6 +281,7 @@ function measure(buffer: AudioBufferLike): Promise<Analysis> {
       }
       if (wantsKey && response.key !== undefined && (response.keyFit ?? 0) >= MIN_KEY_FIT) {
         analysis.musicalKey = response.key
+        analysis.keyFit = response.keyFit
       }
       resolve(analysis)
     })
@@ -285,7 +295,12 @@ function measure(buffer: AudioBufferLike): Promise<Analysis> {
  * immediately.
  */
 export function requestAnalysis(track: Track, pin = false): void {
-  if (!track.playable || done.has(track.path) || queued.has(track.path)) return
+  // `running` matters here as much as `queued`: `markRunning` itself triggers the render
+  // that re-runs the table's visibility sweep, so without it every file being analysed
+  // was immediately queued a second time and decoded twice.
+  if (!track.playable || done.has(track.path) || queued.has(track.path) || running.has(track.path)) {
+    return
+  }
   if (track.size > MAX_DECODE_BYTES) return
   if (!gate || !gate(track.path)) return
 
@@ -330,6 +345,12 @@ const bulk: Track[] = []
 const bulkQueued = new Set<string>()
 let bulkTotal = 0
 let bulkFinished = 0
+/**
+ * Which run a dequeued bulk item belongs to. A reprocess started while the previous one
+ * still has files in flight would otherwise have those stragglers counted against the new
+ * run's totals as they land.
+ */
+let bulkGeneration = 0
 
 const bulkWatchers = new Set<() => void>()
 
@@ -385,6 +406,7 @@ export function reprocessAll(tracks: Iterable<Track>): number {
 
 /** Abandons the rest of a run. Files already done keep their new answers. */
 export function cancelReprocess(): void {
+  bulkGeneration++
   bulk.length = 0
   bulkQueued.clear()
   bulkTotal = 0
@@ -406,7 +428,20 @@ export function cancelAnalysis(path: string): void {
  * Folds in a buffer somebody else has already decoded - the waveform pass. Free tempo and
  * key for any file being seen for the first time.
  */
+/**
+ * A `run()` that is waiting on the peaks decode registers here, so the buffer that decode
+ * produces is handed to it instead of being measured twice. The observer fires inside
+ * `peaks.ts load()` before the request resolves, so by the time `run()` continues the
+ * hand-off has either happened or never will.
+ */
+const bufferHandoff = new Map<string, (buffer: AudioBuffer) => void>()
+
 export function analyseDecoded(path: string, buffer: AudioBuffer): void {
+  const handoff = bufferHandoff.get(path)
+  if (handoff) {
+    handoff(buffer)
+    return
+  }
   if (done.has(path) || running.has(path)) return
   // The waveform decodes whatever is on screen, in or out of scope; only the analysis is
   // gated, so an excluded folder still draws its waveforms and simply isn't measured.
@@ -434,9 +469,10 @@ function pump(): void {
     }
 
     active++
+    const generation = bulkGeneration
     void run(track).finally(() => {
       active--
-      if (!fromQueue && bulkTotal > 0) {
+      if (!fromQueue && generation === bulkGeneration && bulkTotal > 0) {
         bulkFinished++
         // The run is over when the last one lands, not when the queue empties - the final
         // few are still in flight at that point.
@@ -452,12 +488,24 @@ function pump(): void {
 }
 
 async function run(track: Track): Promise<void> {
+  // Something else - `analyseDecoded`, or the other lane during a reprocess - may have
+  // finished this file between queueing and here; a full decode just to find that out
+  // afterwards is the expensive way to return.
+  if (done.has(track.path)) return
   markRunning(track.path, true)
   try {
-    // Peaks first: if the file has never been seen, this decodes it and `analyseDecoded`
-    // gets there before we do, which saves decoding the same file twice in a row.
+    // Peaks first: if the file has never been seen, that request decodes it, and the
+    // hand-off below captures the buffer so it isn't decoded a second time here.
+    let shared: AudioBuffer | null = null
     if (peekPeaks(track.path) === undefined) {
-      await requestPeaks(track.path, track.size)
+      bufferHandoff.set(track.path, (buffer) => {
+        shared = buffer
+      })
+      try {
+        await requestPeaks(track.path, track.size)
+      } finally {
+        bufferHandoff.delete(track.path)
+      }
       if (done.has(track.path)) return
     }
 
@@ -465,8 +513,14 @@ async function run(track: Track): Promise<void> {
     // better than the built-in guess.
     const supplied = await externalKey(track.path)
 
-    const buffer = await decodeTrack(track.path, track.size)
-    if (!buffer || done.has(track.path)) return
+    const buffer = shared ?? (await decodeTrack(track.path, track.size))
+    if (!buffer) {
+      // A file that can't be fetched or decoded would otherwise be retried in full on
+      // every scroll-past, since only a *thrown* failure used to reach `done`.
+      done.add(track.path)
+      return
+    }
+    if (done.has(track.path)) return
     const analysis = await measure(buffer)
     if (supplied) analysis.musicalKey = supplied
     publish(track.path, analysis)

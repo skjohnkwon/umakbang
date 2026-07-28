@@ -163,6 +163,16 @@
   .scroll-thin::-webkit-scrollbar-thumb:hover {
     background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
   }
+
+  /* Scrollable with no scrollbar drawn - for a strip too short to spare the 10px, where
+     the overflow is a couple of buttons at an extreme window size rather than content. */
+  .scroll-none {
+    scrollbar-width: none;
+  }
+
+  .scroll-none::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* Numeric columns line up only if the digits are tabular. */
