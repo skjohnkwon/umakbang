@@ -60,7 +60,7 @@ export function AboutDialog({
 }): React.JSX.Element {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[440px]">
+      <DialogContent className="max-w-[440px] p-4">
         <div className="flex items-center gap-2.5">
           <Logo className="h-7 w-7 shrink-0 text-primary" />
           <div className="min-w-0">

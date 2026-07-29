@@ -1297,6 +1297,19 @@ function registerIpc(): void {
     shell.showItemInFolder(path)
   })
   ipcMain.handle('shell:open', async (_event, path: string) => {
+    // A web link is not a path, and `openPath` is documented for files - it takes the string
+    // as a filename, finds nothing there and reports a failure the caller drops on the floor,
+    // so the About dialog's "View the source" button did nothing at all. `openExternal` is the
+    // one that hands a URL to the browser. Same channel because the renderer's question is the
+    // same either way: open this in whatever the OS uses for it.
+    if (/^https?:\/\//i.test(path)) {
+      try {
+        await shell.openExternal(path)
+        return null
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    }
     const error = await shell.openPath(path)
     return error || null
   })
