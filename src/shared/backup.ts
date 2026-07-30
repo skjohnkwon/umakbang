@@ -17,6 +17,7 @@
  */
 
 import type { LibraryRoot, Settings } from './types'
+import { isUnderKey, pathKey } from './path-key'
 
 export interface SettingsBackup {
   kind: 'umakbang-settings'
@@ -79,16 +80,31 @@ function separatorOf(path: string): string {
   return styleOf(path) === 'windows' ? '\\' : '/'
 }
 
-/** Trailing separators off, and one case for comparing - Windows is case-insensitive. */
+/**
+ * Trailing separators off, one Unicode spelling, and one case - Windows is case-insensitive.
+ *
+ * The composition is the fix for the bug this file was reported with. A backup written on
+ * Windows names `Z:\SAMPLES\ÁNDALE.mp3` composed; a Mac hands the same folder back
+ * decomposed, `A` plus a combining acute. Compared with `toLowerCase` alone those are two
+ * different strings, so `isUnder` said no, `rewrite` returned null, and the file's two tags
+ * and its rating were dropped and counted as dropped - the import reporting, accurately, that
+ * it had thrown away work it had every means of keeping.
+ *
+ * It is also what lets the wizard recognise a folder across two machines at all. `sameName`,
+ * `anchorsFor`, `resolvePick` and `coveredBy` all come through here, and until now none of
+ * them could tell that the `Música` in a Mac's paths and the `Música` in a Windows backup were
+ * the same folder, so every guess it might have made from one answer was refused.
+ *
+ * Composed before lowercased, not after: composition is defined on the code points the
+ * filesystem actually produced, and lowercasing first would hand `pathKey` a string nothing
+ * on either machine ever wrote.
+ */
 function normalise(path: string): string {
-  return path.replace(/[\\/]+$/, '').toLowerCase()
+  return pathKey(path.replace(/[\\/]+$/, '')).toLowerCase()
 }
 
 function isUnder(path: string, folder: string): boolean {
-  const target = normalise(path)
-  const base = normalise(folder)
-  if (target === base) return true
-  return target.startsWith(base) && /[\\/]/.test(path.charAt(folder.replace(/[\\/]+$/, '').length))
+  return isUnderKey(normalise(path), normalise(folder))
 }
 
 /** The last segment of a path, whichever separator it uses. */
@@ -128,13 +144,20 @@ export function joinPath(base: string, ...segments: string[]): string {
   return [trim(base), ...segments.filter(Boolean)].join(separator)
 }
 
-/** What is left of a path once its containing folder is taken off the front. */
+/**
+ * What is left of a path once its containing folder is taken off the front.
+ *
+ * Both sides composed, because the tail is taken by *offset* and the two arguments are
+ * routinely strings from two different machines. A decomposed `á` is two code units where a
+ * composed one is one, so slicing a raw path by the length of a folder written in the other
+ * form cuts it in the wrong place - a character short, or through the middle of a character.
+ */
 function relativeUnder(path: string, folder: string): string {
-  return path.slice(trim(folder).length).replace(/^[\\/]+/, '')
+  return pathKey(path).slice(trim(pathKey(folder)).length).replace(/^[\\/]+/, '')
 }
 
 const sameName = (a: string, b: string): boolean =>
-  lastSegment(a).toLowerCase() === lastSegment(b).toLowerCase()
+  normalise(lastSegment(a)) === normalise(lastSegment(b))
 
 /**
  * What one answer tells us about the others.
@@ -182,7 +205,14 @@ export function candidatesUnder(folder: string, container: string, depth = 3): s
   // `Z:` and the host of a UNC path are segments of the string but not folders anybody can
   // nest, and joining them on produces candidates like `D:\Music\Z:\SAMPLES` that can never
   // exist - noise in a list that is about to be checked against the disk.
-  const segments = segmentsOf(folder).filter((segment) => !/^[a-z]:$/i.test(segment))
+  //
+  // Composed, which is the one place a path built for the filesystem is deliberately not left
+  // alone. These segments are the *other* machine's text, and a candidate is a guess about to
+  // be proved against the disk rather than a path being held: an unfound one costs a row left
+  // unanswered. Composed is the better guess in both directions - it is what NTFS stores, and
+  // APFS opens either form - so a Mac's decomposed `Música` can be found on Windows, which
+  // until now it could not be.
+  const segments = segmentsOf(pathKey(folder)).filter((segment) => !/^[a-z]:$/i.test(segment))
   const out: string[] = []
   for (let take = Math.min(depth, segments.length); take >= 1; take--) {
     out.push(joinPath(container, ...segments.slice(segments.length - take)))
@@ -348,10 +378,19 @@ function prepare(mapping: FolderMapping): Array<[string, string]> {
 }
 
 function rewrite(path: string, ordered: Array<[string, string]>): string | null {
+  // Composed once, up here, because what follows is an offset: the matched folder's length is
+  // sliced off the front of the path. `isUnder` now says yes across the two Unicode spellings,
+  // which is the whole point of it, and slicing the raw string by a length measured on the
+  // other form would cut a character short or straight through a character. The tail therefore
+  // leaves composed too, which is the right form to leave in: it is what the keys these become
+  // are looked up by, and for the two settings that end up at the filesystem instead
+  // (`quickMove`, `stemOutputDir`) it is the better of two guesses about another machine's
+  // text - NTFS stores composed and APFS opens either.
+  const canonical = pathKey(path)
   for (const [source, target] of ordered) {
     if (!isUnder(path, source)) continue
-    const base = source.replace(/[\\/]+$/, '')
-    const rest = path.slice(base.length).replace(/^[\\/]+/, '')
+    const base = pathKey(source).replace(/[\\/]+$/, '')
+    const rest = canonical.slice(base.length).replace(/^[\\/]+/, '')
     if (!rest) return target
     const separator = separatorOf(target)
     return `${target.replace(/[\\/]+$/, '')}${separator}${rest.split(/[\\/]/).join(separator)}`
@@ -401,7 +440,11 @@ export function remapBackup(backup: SettingsBackup, mapping: FolderMapping): Rem
       const next = rewrite(path, ordered)
       if (next === null) dropped[counter]++
       else {
-        out[next] = value
+        // Composed on the way out as well as on the way in. The tail already is, but the head
+        // is a folder the user pointed at on *this* machine, and on a Mac the picker hands
+        // back whatever APFS holds - so without this an import onto a Mac would write the very
+        // decomposed keys that made the export unreadable there in the first place.
+        out[pathKey(next)] = value
         kept[counter]++
       }
     }

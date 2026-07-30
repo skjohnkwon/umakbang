@@ -26,6 +26,7 @@ import {
   extensionOf,
   isIndexable
 } from '../shared/files'
+import { pathKey } from '../shared/path-key'
 import { probeFile } from './probe'
 import { flushMetadataCache, getCachedMetadata, putCachedMetadata } from './metadata-cache'
 import { loadFolderMtimes, recordFolderMtimes, takeIndexReplay } from './index-store'
@@ -438,7 +439,7 @@ function makeTrack(
   const relDir = lastSlash === -1 ? '' : rel.slice(0, lastSlash)
   const dir = full.slice(0, full.length - name.length - 1)
 
-  return {
+  const track: Track = {
     path: full,
     rel,
     dir,
@@ -450,6 +451,16 @@ function makeTrack(
     kind: classifyKind(ext),
     playable: PLAYABLE_EXTENSIONS.has(ext)
   }
+
+  // The composed spelling, and only when it differs. `readdir` hands back whatever the
+  // filesystem holds, which on a Mac is routinely decomposed, and every tag, rating and note
+  // is looked up by the composed form - so the row has to carry it. Assigned rather than
+  // spread in above because this runs 326,000 times a scan and the ASCII case, which is
+  // nearly all of them, then costs one comparison and no property at all.
+  const key = pathKey(full)
+  if (key !== full) track.pathKey = key
+
+  return track
 }
 
 /* ------------------------------------------------------------------ phase 2: probe */

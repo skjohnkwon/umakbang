@@ -18,7 +18,6 @@ import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
 import { ColorPicker, ACCENT_PRESETS, SURFACE_PRESETS } from '@/components/ColorPicker'
-import { Logo } from '@/components/Logo'
 import { Clock } from 'lucide-react'
 import { usePlayer } from '@/state/player'
 import { useLibrary } from '@/state/library'
@@ -33,6 +32,15 @@ import type { Track } from '@shared/types'
 import { useFolderTree } from '@/hooks/useLibraryView'
 import { folderTags } from '@/lib/analysis-scope'
 import { cancelReprocess, reprocessProgress, subscribeReprocess } from '@/lib/analysis'
+import { useAudioOutput } from '@/lib/audio-output'
+import {
+  SHORTCUT_ACTIONS,
+  normaliseKeyName,
+  shortcutConflict,
+  shortcutKey,
+  shortcutLabel,
+  type ShortcutId
+} from '@shared/shortcuts'
 import { checkForUpdates, useUpdateStatus } from '@/lib/updates'
 import { baseName, isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
 import { cn } from '@/lib/utils'
@@ -74,6 +82,7 @@ function gradientCss(stops: readonly string[]): string {
 const SECTIONS = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'player', label: 'Player' },
+  { id: 'shortcuts', label: 'Shortcuts' },
   { id: 'library', label: 'Library' },
   { id: 'analysis', label: 'Analysis' },
   { id: 'stems', label: 'Stems' },
@@ -137,7 +146,6 @@ export function SettingsPage(): React.JSX.Element {
             without this the only way back is to remember that "Files" in the sidebar is
             also the exit. */}
         <div className="flex items-center gap-1.5 px-3 pb-1">
-          <Logo className="h-3 w-3 text-primary/80" />
           <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
             Settings
           </span>
@@ -271,6 +279,32 @@ export function SettingsPage(): React.JSX.Element {
             </p>
 
             <Row
+              label="Headroom"
+              hint="Space above the normal 0dB point in both the level and spectrum visualizers."
+            >
+              <div className="flex w-full items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={18}
+                  step={1}
+                  value={settings.visualizerHeadroomDb}
+                  onChange={(event) =>
+                    patchSettings({ visualizerHeadroomDb: Number(event.target.value) })
+                  }
+                  className="h-1 min-w-0 flex-1 accent-primary"
+                />
+                <span className="w-10 shrink-0 text-right font-mono text-[11px] text-muted-foreground">
+                  {settings.visualizerHeadroomDb} dB
+                </span>
+                <ResetButton
+                  shown={settings.visualizerHeadroomDb !== 6}
+                  onClick={() => patchSettings({ visualizerHeadroomDb: 6 })}
+                />
+              </div>
+            </Row>
+
+            <Row
               label="Waveform colour"
               hint="Spectrum tints each column by where its energy sits - bass low on the ramp, cymbals high."
             >
@@ -353,6 +387,8 @@ export function SettingsPage(): React.JSX.Element {
             </Row>
           </Section>
 
+          <OutputSection />
+
         </div>
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('analysis'))}>
@@ -361,6 +397,10 @@ export function SettingsPage(): React.JSX.Element {
             onChange={(analysisTag) => patchSettings({ analysisTag })}
           />
 
+        </div>
+
+        <div className={cn('mx-auto max-w-[560px] space-y-4', show('shortcuts'))}>
+          <ShortcutsSection />
         </div>
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('library'))}>
@@ -373,6 +413,8 @@ export function SettingsPage(): React.JSX.Element {
             targets={settings.quickMove}
             onChange={(quickMove) => patchSettings({ quickMove })}
           />
+
+          <UndoSection />
 
         </div>
 
@@ -606,6 +648,67 @@ function ChangelogList({ running }: { running: string }): React.JSX.Element | nu
         )
       })}
     </div>
+  )
+}
+
+/**
+ * Where the sound comes out.
+ *
+ * A device that has gone away keeps its place in the menu, marked as missing, rather than
+ * disappearing from it: the setting still names the interface, so the menu has to as well.
+ * Dropping it would leave "System default" selected and reading as a choice somebody made,
+ * which is the silent fallback this whole section exists to replace with a sentence.
+ */
+function OutputSection(): React.JSX.Element {
+  const chosen = useLibrary((s) => s.settings.outputDevice)
+  const setOutputDevice = usePlayer((s) => s.setOutputDevice)
+  const { devices, loaded, unlabelled, failure } = useAudioOutput()
+
+  const missing = chosen !== null && loaded && !devices.some((device) => device.id === chosen.id)
+
+  return (
+    <Section title="Output">
+      <Row
+        label="Play through"
+        hint={
+          chosen
+            ? 'Only umakbang moves - your DAW and everything else keep their own output.'
+            : 'Follows whatever the system is set to.'
+        }
+      >
+        <select
+          value={chosen?.id ?? ''}
+          onChange={(event) => {
+            const id = event.target.value
+            // The missing device is in the list too, and it is not in `devices` - falling
+            // through to null there would turn re-picking your own interface into a reset.
+            const device =
+              devices.find((entry) => entry.id === id) ?? (chosen?.id === id ? chosen : null)
+            setOutputDevice(device)
+          }}
+          className="h-7 max-w-[280px] rounded-md border bg-background px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <option value="">System default</option>
+          {devices.map((device) => (
+            <option key={device.id} value={device.id}>
+              {device.label}
+            </option>
+          ))}
+          {chosen && missing && (
+            <option value={chosen.id}>{chosen.label} (not connected)</option>
+          )}
+        </select>
+      </Row>
+
+      {failure && <p className="text-[11px] text-destructive">{failure}</p>}
+
+      {unlabelled && (
+        <p className="text-[11px] text-muted-foreground/60">
+          The system didn&rsquo;t hand over the device names, so they are numbered here.
+          Pick one and press play to find out which it is.
+        </p>
+      )}
+    </Section>
   )
 }
 
@@ -1193,6 +1296,156 @@ function QuickMoveSection({
     </Section>
   )
 }
+
+/**
+ * The keys umakbang made up, and where the user wants them.
+ *
+ * Only these - `shared/shortcuts.ts` has the argument for why the traditional chords are not
+ * offered. A row captures the next key you press rather than asking you to type a name for
+ * it, because the thing being chosen *is* a keypress and every other spelling of it is a
+ * translation somebody has to get right.
+ */
+function ShortcutsSection(): React.JSX.Element {
+  const shortcuts = useLibrary((s) => s.settings.shortcuts)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const [capturing, setCapturing] = useState<ShortcutId | null>(null)
+  const [refused, setRefused] = useState<string | null>(null)
+
+  // Captured on the window during capture, and in the capture phase: the table and the app
+  // both listen for these keys themselves, and without this a press meant for the picker
+  // would also delete the selection on its way past.
+  useEffect(() => {
+    if (!capturing) return
+    const onKey = (event: KeyboardEvent): void => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.key === 'Escape') {
+        setCapturing(null)
+        setRefused(null)
+        return
+      }
+      // A modifier on its own is somebody still reaching for the key, not the answer.
+      if (['Control', 'Meta', 'Alt', 'Shift'].includes(event.key)) return
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        setRefused('Only keys without Ctrl, ⌘ or Alt can be changed here.')
+        return
+      }
+      const clash = shortcutConflict(shortcuts, capturing, event.key)
+      if (clash) {
+        setRefused(clash)
+        return
+      }
+      patchSettings({ shortcuts: { ...shortcuts, [capturing]: normaliseKeyName(event.key) } })
+      setCapturing(null)
+      setRefused(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [capturing, shortcuts, patchSettings])
+
+  const changed = SHORTCUT_ACTIONS.some(
+    (action) => shortcuts[action.id] && shortcuts[action.id] !== action.defaultKey
+  )
+
+  return (
+    <Section
+      title="Shortcuts"
+      hint="The keys umakbang invented. Ctrl/⌘ combinations - copy, paste, undo, select all - are left alone deliberately: they come from the system and every other app agrees about them."
+    >
+      {SHORTCUT_ACTIONS.map((action) => {
+        const key = shortcutKey(shortcuts, action.id)
+        const listening = capturing === action.id
+        return (
+          <Row key={action.id} label={action.label} hint={listening ? 'Press a key, Esc to cancel.' : action.hint}>
+            <div className="flex items-center gap-1.5">
+              {shortcuts[action.id] && shortcuts[action.id] !== action.defaultKey && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  title={`Back to ${shortcutLabel(action.defaultKey)}`}
+                  aria-label={`Reset ${action.label}`}
+                  onClick={() => {
+                    const next = { ...shortcuts }
+                    delete next[action.id]
+                    patchSettings({ shortcuts: next })
+                  }}
+                  className="text-muted-foreground"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                </Button>
+              )}
+              <Button
+                variant={listening ? 'default' : 'secondary'}
+                size="sm"
+                onClick={() => {
+                  setRefused(null)
+                  setCapturing(listening ? null : action.id)
+                }}
+                className="tnum min-w-[68px]"
+              >
+                {listening ? 'Press a key' : shortcutLabel(key)}
+              </Button>
+            </div>
+          </Row>
+        )
+      })}
+
+      {refused && <p className="text-[11px] text-destructive">{refused}</p>}
+
+      {changed && (
+        <div>
+          <Button variant="outline" size="sm" onClick={() => patchSettings({ shortcuts: {} })}>
+            Reset all to defaults
+          </Button>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+/**
+ * How far back Ctrl+Z reaches.
+ *
+ * A ceiling has to exist - see `Settings.undoDepth` for why - but where it sits is a
+ * judgement about how somebody works rather than anything the app can know, and 25 is only a
+ * guess at the middle of it. Tidying a folder never reaches the end of it; moving a library
+ * about in long batches does so in an afternoon.
+ *
+ * The hint counts what is actually on the stack rather than describing the setting twice,
+ * because turning the number down drops the oldest records immediately - so the count is the
+ * answer to this control, visible in the same breath as the change.
+ */
+function UndoSection(): React.JSX.Element {
+  const depth = useLibrary((s) => s.settings.undoDepth)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const held = useLibrary((s) => s.undo?.depth ?? 0)
+
+  return (
+    <Section
+      title="Undo"
+      hint="Ctrl+Z steps back through file operations - moves, copies, renames and new folders. A delete goes to the Recycle Bin rather than onto this list, since there is no reliable way to bring one back."
+    >
+      <Row
+        label="Operations to remember"
+        hint={
+          held > 0
+            ? `${held.toLocaleString()} ${held === 1 ? 'operation' : 'operations'} to step back through right now.`
+            : 'Nothing to undo at the moment.'
+        }
+      >
+        <SegmentedControl
+          value={String(depth)}
+          options={UNDO_DEPTHS.map((n) => ({ value: String(n), label: String(n) }))}
+          onChange={(value) => patchSettings({ undoDepth: Number(value) })}
+        />
+      </Row>
+    </Section>
+  )
+}
+
+/** Offered rather than a free number: the cost of a deeper history is memory, and these are
+ *  the points on that curve worth telling apart. Main clamps anything else to 1..200. */
+const UNDO_DEPTHS = [5, 10, 25, 50, 100, 200]
 
 /* ------------------------------------------------------------------ pieces */
 

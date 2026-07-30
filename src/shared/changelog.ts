@@ -20,6 +20,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.1.2',
+    date: '2026-07-29',
+    changes: [
+      'Video visualizer layers now give every enabled panel its own horizontal or vertical orientation instead of rotating automatically by aspect ratio.',
+      'Video playback starts only after active video layers are ready, and drift correction no longer stacks decoder seeks that caused intermittent frame jumps.',
+      'Video export no longer plays through the speakers, and its progress UI uses less CPU while the encoder is working.',
+      'Videos can be renamed directly from the editor header or the Videos list.',
+      'The Explorer sidebar starts with Files, keeps Rated, and treats Downloads as a removable Quick access pin; media controls are centred and the Settings logo is gone.'
+    ]
+  },
+  {
     version: '0.1.1',
     date: '2026-07-28',
     changes: [

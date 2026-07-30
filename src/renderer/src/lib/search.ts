@@ -152,6 +152,13 @@ export function isEmptyQuery(query: ParsedQuery): boolean {
   )
 }
 
+/**
+ * The two path-keyed maps a query can ask about.
+ *
+ * Both are keyed by the composed spelling of a path, so every lookup here goes through
+ * `track.pathKey ?? track.path` rather than the raw path. The field rather than a `pathKey`
+ * call: this runs once per track per keystroke over the whole index.
+ */
 export interface MatchContext {
   ratings: Record<string, number>
   tags: Record<string, string[]>
@@ -159,7 +166,7 @@ export interface MatchContext {
 
 export function matchesQuery(track: Track, query: ParsedQuery, context: MatchContext): boolean {
   if (query.minStars !== undefined || query.maxStars !== undefined) {
-    const rating = context.ratings[track.path] ?? 0
+    const rating = context.ratings[track.pathKey ?? track.path] ?? 0
     if (rating < (query.minStars ?? 1) || rating > (query.maxStars ?? 5)) return false
   }
 
@@ -183,7 +190,7 @@ export function matchesQuery(track: Track, query: ParsedQuery, context: MatchCon
   }
 
   if (query.tags.length > 0) {
-    const trackTags = context.tags[track.path]
+    const trackTags = context.tags[track.pathKey ?? track.path]
     if (!trackTags) return false
     const lowered = trackTags.map((t) => t.toLowerCase())
     if (!query.tags.every((t) => lowered.some((existing) => existing.includes(t)))) return false

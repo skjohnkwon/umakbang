@@ -28,6 +28,7 @@ import type {
   TrashResult
 } from '../shared/types'
 import { relFor } from '../shared/roots'
+import { pathKey } from '../shared/path-key'
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -36,11 +37,70 @@ function describeError(error: unknown): string {
 /* ------------------------------------------------------------------ naming */
 
 /**
+ * The names Windows keeps for devices. Reserved with any extension and in any case, so
+ * `CON`, `con.wav` and `Con.tar.gz` are all the same name to Windows.
+ *
+ * `COM0` and `LPT0` are deliberately absent, and so are the superscript spellings `COM¹`
+ * and `LPT²` that some of Microsoft's own documentation lists: measured with `CreateFileW`
+ * on Windows 11 25H2, none of them opens a device, and refusing a name that works
+ * everywhere costs the user something for nothing.
+ */
+const RESERVED_DEVICE_NAMES = new Set([
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  'conin$',
+  'conout$',
+  'com1',
+  'com2',
+  'com3',
+  'com4',
+  'com5',
+  'com6',
+  'com7',
+  'com8',
+  'com9',
+  'lpt1',
+  'lpt2',
+  'lpt3',
+  'lpt4',
+  'lpt5',
+  'lpt6',
+  'lpt7',
+  'lpt8',
+  'lpt9'
+])
+
+/**
+ * The longest a single name may be, and the only path limit this app can actually reach.
+ *
+ * MAX_PATH is not one. libuv prefixes every absolute path with `\\?\` - measured, a
+ * recursive `mkdirSync` under a 99-character root returns `\\?\C:\...` - so the ceiling is
+ * 32,742 characters rather than 260, and the machine's `LongPathsEnabled` setting doesn't
+ * come into it. Directories 285, 1,029 and 4,005 characters deep were created, written,
+ * stat'd, renamed, `cp`'d and `rm`'d here without a complaint. A guard on total path length
+ * would never fire, so there isn't one.
+ *
+ * A single component over 255 is reachable by typing, though, and it fails as `ENOENT: no
+ * such file or directory` for a file and `EINVAL` for a folder - measured, 255 writes and
+ * 256 does not. Neither of those is a sentence about the name being too long.
+ */
+const MAX_NAME_LENGTH = 255
+
+/**
  * Why a name can't be used, or null if it can.
  *
  * Windows is the strict one, so its rules are applied everywhere - a library shared over
  * a network drive or a synced folder shouldn't produce names that only work on one
  * machine.
+ *
+ * Node is no help with any of it, and that is the point. The `\\?\` prefix libuv puts on
+ * every absolute path skips Win32 path normalization entirely, so `writeFile` cheerfully
+ * creates `nul`, `con.wav` and `trailing.` as literal names - and Windows then disagrees
+ * about what those files are called. Measured with `CreateFileW`: `X:\dir\nul` opens the
+ * null device rather than the file sitting there, and `X:\dir\trailing.` opens `trailing`.
+ * A beat renamed to `nul` in umakbang is a file nothing else on the machine can open.
  */
 export function nameError(name: string): string | null {
   const trimmed = name.trim()
@@ -50,6 +110,22 @@ export function nameError(name: string): string | null {
   if (/[<>:"|?*\u0000-\u001f]/.test(trimmed)) return 'Name contains a character Windows forbids.'
   if (trimmed === '.' || trimmed === '..') return 'Not a valid name.'
   if (/[. ]$/.test(trimmed)) return 'Name cannot end with a dot or a space.'
+
+  // The device rule looks at the segment before the *first* dot, which is why `CON.tar.gz`
+  // is `CON`, and it looks at it with trailing dots and spaces stripped, because Win32
+  // strips those before it looks. Only `nul` is still intercepted inside a folder on this
+  // Windows build - `X:\dir\con.wav` is an ordinary file here - but the whole set is
+  // intercepted when the name stands alone, it is what Microsoft documents as reserved, and
+  // it is what archivers, sync clients and non-Windows SMB servers refuse. A library on a
+  // network drive lives under somebody else's rules.
+  const device = trimmed.split('.')[0].replace(/[. ]+$/, '').toLowerCase()
+  if (RESERVED_DEVICE_NAMES.has(device)) {
+    return `Windows reserves "${device.toUpperCase()}" for a device, with or without an extension.`
+  }
+
+  if (trimmed.length > MAX_NAME_LENGTH) {
+    return `Name is too long - ${MAX_NAME_LENGTH} characters at most.`
+  }
   return null
 }
 
@@ -99,7 +175,7 @@ export async function describeFile(full: string, roots: LibraryRoot[]): Promise<
   // it still renders as something sane.
   const rel = relFor(roots, full) ?? name
   const cut = rel.lastIndexOf('/')
-  return {
+  const track: Track = {
     path: full,
     rel,
     dir: dirname(full),
@@ -111,6 +187,15 @@ export async function describeFile(full: string, roots: LibraryRoot[]): Promise<
     kind: classifyKind(ext),
     playable: PLAYABLE_EXTENSIONS.has(ext)
   }
+
+  // Same rule as the scanner's `makeTrack`: the composed spelling rides along, and only when
+  // it differs from the path. A row that reached the index this way - through a paste, a move
+  // or the watched folder being re-read - has to carry it too, or the file's tags and rating
+  // would go missing the moment it was operated on.
+  const key = pathKey(full)
+  if (key !== full) track.pathKey = key
+
+  return track
 }
 
 /** Every indexable file at or beneath a path. A plain file describes to a list of one. */
@@ -286,6 +371,14 @@ export async function trashEntries(paths: string[], roots: LibraryRoot[]): Promi
     // Read the folder before it goes, or there's nothing left to enumerate.
     const doomed = info.isDirectory() ? (await describeTree(path, roots)).map((t) => t.path) : [path]
     try {
+      // `shell.trashItem` has a limit of its own and it is not MAX_PATH. Measured on
+      // Windows 11 25H2: an entry 34 folders and 740 characters down fails with "Failed to
+      // perform delete operation", while 32 folders at 700 characters, 27 at 740 and 54 at
+      // 275 all succeed - so it takes deep *and* long together, and no single number
+      // describes it. It is left to report the OS's own sentence rather than guarded
+      // against, because a guard would have to guess where the line is. What must never
+      // happen is a fallback to `rm`: this function exists so that a misclick is a trip to
+      // the recycle bin rather than a loss.
       await shell.trashItem(path)
     } catch (error) {
       return { trashed, removed, error: `Couldn't delete ${basename(path)}: ${describeError(error)}` }

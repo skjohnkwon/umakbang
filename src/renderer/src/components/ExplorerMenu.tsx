@@ -2,6 +2,7 @@ import type React from 'react'
 import {
   AudioLines,
   ChevronRight,
+  Clapperboard,
   ClipboardPaste,
   Copy,
   CopyPlus,
@@ -10,6 +11,7 @@ import {
   FolderInput,
   FolderPlus,
   FolderSearch,
+  FolderSymlink,
   ListChecks,
   PenLine,
   Pin,
@@ -33,6 +35,8 @@ import type { QuickMoveTarget } from '@shared/types'
 import type { Selected } from '@/lib/selection'
 import { selectionLabel } from '@/lib/selection'
 import { TagEditor } from '@/components/TagEditor'
+import { useLibrary } from '@/state/library'
+import { shortcutKey, shortcutLabel } from '@shared/shortcuts'
 
 /**
  * Everything the explorer can do to what's selected, in one list.
@@ -54,6 +58,8 @@ export interface ExplorerActions {
   rename: () => void
   remove: () => void
   newFolder: (relDir: string) => void
+  /** Makes a folder in `relDir` and moves the selection into it. */
+  newFolderWithSelection: (relDir: string) => void
   /** Files the selection into one of the configured folders. */
   moveTo: (destination: string) => void
   /** Asks for a folder and files the selection into that. */
@@ -75,6 +81,8 @@ export interface ExplorerActions {
   togglePinned: () => void
   /** Opens the contract draft for the selected tracks. */
   generateContract: () => void
+  /** Starts a video project for the selected track. */
+  makeVideo: () => void
 }
 
 export interface MenuContext {
@@ -104,9 +112,53 @@ function Shortcut({ children }: { children: React.ReactNode }): React.JSX.Elemen
   )
 }
 
+/**
+ * Writes a chord the way the platform writes it.
+ *
+ * The table's handler has always taken `metaKey` as readily as `ctrlKey`, so these shortcuts
+ * work on a Mac - the menu was simply naming a key that keyboard does not have, which is the
+ * worst of both, since the hint is what a first-time user trusts. Mac chords are set closed
+ * up (⌘⇧N) and Windows ones spaced (Ctrl ⇧ N), matching what each platform's own menus print.
+ *
+ * A subscription per open menu, not per row: this component mounts when a right-click opens
+ * it and unmounts when it closes.
+ */
+function useIsMac(): boolean {
+  return useLibrary((s) => s.platform?.isMac ?? false)
+}
+
+function useChord(): (...keys: string[]) => string {
+  const isMac = useIsMac()
+  return (...keys) => [isMac ? '⌘' : 'Ctrl', ...keys].join(isMac ? '' : ' ')
+}
+
+/**
+ * What Rename answers to on this keyboard.
+ *
+ * The table binds both, so this is only which one to print. `F2` is the Windows answer and
+ * stays the Windows hint; on a MacBook it needs `fn` held, and Return - what Finder renames
+ * with - is already open/play here, so naming `F2` to a Mac user was naming the one key that
+ * costs them two. `⌘↩` is what that keyboard can reach.
+ */
+function useRenameKey(): string {
+  const bound = useLibrary((s) => shortcutKey(s.settings.shortcuts, 'rename'))
+  // The Mac hint names the chord that keyboard can actually reach, and that one is fixed -
+  // so it wins over a rebinding, which only ever moves the other key.
+  if (useIsMac()) return '⌘↩'
+  return shortcutLabel(bound)
+}
+
+/** Whatever the user has Delete bound to, so the menu cannot name a key that does nothing. */
+function useTrashKey(): string {
+  return shortcutLabel(useLibrary((s) => shortcutKey(s.settings.shortcuts, 'trash')))
+}
+
 /** The full menu for a row, acting on the whole selection it belongs to. */
 export function SelectionMenuItems({ context }: { context: MenuContext }): React.JSX.Element {
   const { selected, targetDir, clipboardCount, revealLabel, quickMove, actions } = context
+  const chord = useChord()
+  const renameKey = useRenameKey()
+  const trashKey = useTrashKey()
   const randomExcluded = context.randomExcluded ?? false
   const pinned = context.pinned ?? false
   const playableCount = selected.tracks.filter((track) => track.playable).length
@@ -147,12 +199,12 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
       <ContextMenuItem onSelect={actions.cut}>
         <Scissors className="h-3.5 w-3.5" />
         Cut
-        <Shortcut>Ctrl X</Shortcut>
+        <Shortcut>{chord('X')}</Shortcut>
       </ContextMenuItem>
       <ContextMenuItem onSelect={actions.copy}>
         <Copy className="h-3.5 w-3.5" />
         Copy
-        <Shortcut>Ctrl C</Shortcut>
+        <Shortcut>{chord('C')}</Shortcut>
       </ContextMenuItem>
       <ContextMenuItem
         disabled={clipboardCount === 0 || targetDir === null}
@@ -161,19 +213,19 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
         <ClipboardPaste className="h-3.5 w-3.5" />
         {/* Says where it lands, because a right-click on a folder pastes *into* it. */}
         {single && only.directory ? 'Paste into folder' : 'Paste'}
-        <Shortcut>Ctrl V</Shortcut>
+        <Shortcut>{chord('V')}</Shortcut>
       </ContextMenuItem>
       <ContextMenuItem onSelect={actions.duplicate}>
         <CopyPlus className="h-3.5 w-3.5" />
         Duplicate
-        <Shortcut>Ctrl D</Shortcut>
+        <Shortcut>{chord('D')}</Shortcut>
       </ContextMenuItem>
 
       <ContextMenuSeparator />
       <ContextMenuItem disabled={!single} onSelect={actions.rename}>
         <PenLine className="h-3.5 w-3.5" />
         Rename…
-        <Shortcut>F2</Shortcut>
+        <Shortcut>{renameKey}</Shortcut>
       </ContextMenuItem>
       {taggableCount > 0 && (
         <ContextMenuItem onSelect={actions.renameWithMetadata}>
@@ -184,7 +236,7 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
       <ContextMenuItem onSelect={actions.remove}>
         <Trash2 className="h-3.5 w-3.5" />
         Delete
-        <Shortcut>Del</Shortcut>
+        <Shortcut>{trashKey}</Shortcut>
       </ContextMenuItem>
 
       <ContextMenuSeparator />
@@ -194,6 +246,18 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
       >
         <FolderPlus className="h-3.5 w-3.5" />
         New folder…
+      </ContextMenuItem>
+      {/* Gathering what is already selected, which is the way a folder usually comes to be
+          wanted: you find the three takes of one beat and then need somewhere to put them.
+          Doing it by hand is make the folder, lose the selection, find the files again. */}
+      <ContextMenuItem
+        disabled={targetDir === null}
+        onSelect={() => targetDir !== null && actions.newFolderWithSelection(targetDir)}
+      >
+        <FolderSymlink className="h-3.5 w-3.5" />
+        {selected.paths.length === 1
+          ? 'New folder with this item…'
+          : `New folder with ${selected.paths.length.toLocaleString()} items…`}
       </ContextMenuItem>
       {/* The folders you file into most, from settings - the common case is two clicks
           rather than a drag across the whole tree. */}
@@ -240,6 +304,16 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
         <ContextMenuItem onSelect={actions.reprocess}>
           <Wand2 className="h-3.5 w-3.5" />
           {playableCount === 1 ? 'Reprocess tempo and key' : `Reprocess ${playableCount} files`}
+        </ContextMenuItem>
+      )}
+
+      {/* Same reasoning as the contract below it: a reel is something you make *of* a
+          finished beat, so it starts where the beat is rather than on a page you have to
+          go and find the file from again. One track, because a video is of one thing. */}
+      {playable && (
+        <ContextMenuItem onSelect={actions.makeVideo}>
+          <Clapperboard className="h-3.5 w-3.5" />
+          Make video…
         </ContextMenuItem>
       )}
 
@@ -323,6 +397,7 @@ export function FolderMenuItems({
   label: string
 }): React.JSX.Element {
   const { targetDir, clipboardCount, revealLabel, actions } = context
+  const chord = useChord()
 
   return (
     <>
@@ -334,7 +409,7 @@ export function FolderMenuItems({
       >
         <ClipboardPaste className="h-3.5 w-3.5" />
         Paste
-        <Shortcut>Ctrl V</Shortcut>
+        <Shortcut>{chord('V')}</Shortcut>
       </ContextMenuItem>
       <ContextMenuItem
         disabled={targetDir === null}
@@ -342,14 +417,14 @@ export function FolderMenuItems({
       >
         <FolderPlus className="h-3.5 w-3.5" />
         New folder…
-        <Shortcut>Ctrl ⇧ N</Shortcut>
+        <Shortcut>{chord('⇧', 'N')}</Shortcut>
       </ContextMenuItem>
 
       <ContextMenuSeparator />
       <ContextMenuItem onSelect={actions.selectAll}>
         <ListChecks className="h-3.5 w-3.5" />
         Select all
-        <Shortcut>Ctrl A</Shortcut>
+        <Shortcut>{chord('A')}</Shortcut>
       </ContextMenuItem>
 
       <ContextMenuSeparator />

@@ -163,7 +163,7 @@ function HistorySection(): React.JSX.Element {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onClick={() => void window.umakbang.reveal(record.pdfPath ?? record.markdownPath)}
+                onClick={() => void window.umakbang.reveal(record.markdownPath)}
               >
                 <FolderOpen className="h-3.5 w-3.5" />
               </Button>

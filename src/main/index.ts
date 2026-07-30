@@ -35,6 +35,22 @@ import {
   setContractOutputDir
 } from './contracts'
 import {
+  abortVideoWrite,
+  beginVideoWrite,
+  deleteVideoProject,
+  finishVideoWrite,
+  getVideoData,
+  initVideos,
+  listCaptureSources,
+  pickMedia,
+  pickVideoDir,
+  removeRecording,
+  saveCaptureSettings,
+  saveVideoProject,
+  setVideoOutputDir,
+  writeVideoChunk
+} from './videos'
+import {
   createFolder,
   describeDir,
   nameError,
@@ -63,6 +79,17 @@ import {
 } from './store'
 import { appendIndexPatch, clearIndex, initIndexStore } from './index-store'
 import {
+  cancelUndo,
+  clampUndoDepth,
+  forget,
+  redoSummary,
+  remember,
+  runRedo,
+  runUndo,
+  setUndoLimit,
+  summary as undoSummary
+} from './undo'
+import {
   fitFor,
   looksLikeBundle,
   offerRestart,
@@ -86,6 +113,9 @@ import type {
   TransferMode,
   TransferResult,
   TrashResult,
+  UndoOutcome,
+  UndoProgress,
+  UndoSummary,
   UpdateStatus
 } from '../shared/types'
 import { rootFor } from '../shared/roots'
@@ -266,6 +296,12 @@ function createWindow(): void {
   // (`activate`) opens onto an empty library.
   mainWindow.webContents.on('did-finish-load', () => {
     beginScan(getUserData().settings.roots)
+    // The undo record lives here, not in the page, so it survives a reload - and it has to
+    // be pushed again or the affordance does not. This is not a rare accident: Ctrl+R is
+    // Rescan Library, one keystroke from the Ctrl+Z that is about to be wanted, and a
+    // mistyped one that reloaded the window used to take the way back with it.
+    mainWindow?.webContents.send('undo:state', undoSummary())
+    mainWindow?.webContents.send('redo:state', redoSummary())
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
@@ -288,6 +324,8 @@ function createWindow(): void {
 /* ------------------------------------------------------------------ menu */
 
 function buildMenu(): void {
+  const pending = undoSummary()
+  const redoPending = redoSummary()
   // macOS needs a real menu for the standard shortcuts (⌘Q, ⌘C, ⌘W) to work at all.
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' as const }] : []),
@@ -308,7 +346,36 @@ function buildMenu(): void {
         isMac ? { role: 'close' as const } : { role: 'quit' as const }
       ]
     },
-    { role: 'editMenu' },
+    {
+      // Spelled out rather than `{ role: 'editMenu' }`, because the first item has to name
+      // the operation it would reverse and a role menu cannot be told anything.
+      label: 'Edit',
+      submenu: [
+        {
+          label: pending?.label ?? 'Undo',
+          accelerator: 'CmdOrCtrl+Z',
+          // Always enabled, even with nothing to reverse. The accelerator on an application
+          // menu item is claimed by the menu before the page ever sees the key, so a
+          // disabled item would not hand the keystroke back to a focused text field - it
+          // would swallow it. The renderer decides which undo was meant: a field that has
+          // focus gets `textUndo()`, and everything else gets the file operation.
+          click: () => mainWindow?.webContents.send('menu:undo')
+        },
+        {
+          // Same reasoning as Undo above: named after the record so the menu says what it
+          // would put back, and always enabled so the accelerator is handed to a focused
+          // text field rather than swallowed by a disabled item.
+          label: redoPending?.label ?? 'Redo',
+          accelerator: 'CmdOrCtrl+Y',
+          click: () => mainWindow?.webContents.send('menu:redo')
+        },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
     {
       label: 'View',
       submenu: [
@@ -332,6 +399,20 @@ function buildMenu(): void {
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+/**
+ * Says what is pending, everywhere it is named.
+ *
+ * The menu is rebuilt whole rather than having its first item edited: a built `MenuItem`'s
+ * label cannot be changed, and the template is a dozen plain objects. The renderer is told
+ * separately because the durable affordance is not the menu - Windows users do not look in
+ * menu bars, so the toolbar carries the same summary.
+ */
+function publishUndo(): void {
+  buildMenu()
+  mainWindow?.webContents.send('undo:state', undoSummary())
+  mainWindow?.webContents.send('redo:state', redoSummary())
 }
 
 /* ------------------------------------------------------------------ scanning */
@@ -466,6 +547,12 @@ function openingDir(): string {
 function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
   const target = mainWindow
   if (!target) return
+  // The library gained a folder, so the pending record is no longer safe to run: `journal()`
+  // decides which index a patch belongs to by `rootFor(...)?.label`, and a set of roots that
+  // has changed underneath a record can send its inverse patch to a different file than the
+  // one the operation itself was written to - or to none at all.
+  forget()
+  publishUndo()
   ensureScanner()
   // The renderer needs the full list before any of the new folder's tracks arrive, or the
   // first row through resolves its label against a set that doesn't contain it yet.
@@ -619,13 +706,43 @@ function dragIcon(): Electron.NativeImage {
 
 /* ------------------------------------------------------------------ ipc */
 
+/**
+ * The index on disk still has the old paths until a full scan runs, and replaying it
+ * would resurrect rows for files that have moved. Every operation that touches the
+ * filesystem records what it did, here, in one place.
+ *
+ * At module scope rather than inside `registerIpc` because it closes over nothing local and
+ * `undo:run` is the second caller: an undo is journalled exactly the way the operation it
+ * reverses was, which is what keeps a moved file from reappearing at either of its two paths
+ * on the next launch.
+ */
+function journal(result: TransferResult | TrashResult): void {
+  const roots = getUserData().settings.roots
+  if (roots.length === 0) return
+  const added = 'items' in result ? result.items.map((item) => item.track) : []
+  // Each folder keeps its own index, so a move between two of them has to be written to
+  // both: removed from one, added to the other.
+  for (const root of roots) {
+    const mine = added.filter((track) => rootFor(roots, track.path)?.label === root.label)
+    const gone = result.removed.filter((path) => rootFor(roots, path)?.label === root.label)
+    if (mine.length === 0 && gone.length === 0) continue
+    appendIndexPatch(root.path, { removed: gone, added: mine })
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle('app:platform', (): PlatformInfo => {
     let musicDir = join(homedir(), 'Music')
+    let downloadsDir = join(homedir(), 'Downloads')
     try {
       musicDir = app.getPath('music')
     } catch {
       // Not every Linux setup defines a music directory.
+    }
+    try {
+      downloadsDir = app.getPath('downloads')
+    } catch {
+      // Same fallback as the music directory on a minimal Linux setup.
     }
     return {
       platform: process.platform,
@@ -633,7 +750,8 @@ function registerIpc(): void {
       isWindows,
       revealLabel: isMac ? 'Reveal in Finder' : isWindows ? 'Show in Explorer' : 'Show in Files',
       homeDir: homedir(),
-      musicDir
+      musicDir,
+      downloadsDir
     }
   })
 
@@ -644,9 +762,23 @@ function registerIpc(): void {
 
   ipcMain.handle('store:userData', () => getUserData())
 
-  ipcMain.handle('store:updateSettings', (_event, patch: Partial<Settings>) =>
-    updateSettings(patch)
-  )
+  ipcMain.handle('store:updateSettings', (_event, patch: Partial<Settings>) => {
+    // Clamped on the way in rather than only when applied, so the number in the settings file
+    // is the number in force. Storing 9999 and running 200 would leave the two describing
+    // different apps, and the control in Settings showing none of its options as chosen.
+    const settings = updateSettings(
+      patch.undoDepth !== undefined
+        ? { ...patch, undoDepth: clampUndoDepth(patch.undoDepth) }
+        : patch
+    )
+    // Turning it down trims the history there and then, so the count on the toolbar button
+    // answers the control immediately rather than at the next operation.
+    if (patch.undoDepth !== undefined) {
+      setUndoLimit(settings.undoDepth)
+      publishUndo()
+    }
+    return settings
+  })
 
   /*
    * There is no settings-only `.json` export any more, only the bundle. Two export buttons
@@ -980,6 +1112,10 @@ function registerIpc(): void {
     // worth anything - left behind it is a 200MB file nothing will ever read again, or
     // worse, replay stale rows if the same folder is re-added someday.
     if (dropped) clearIndex(dropped.path)
+    // Same reason as in `scanAdditional`: a record written against a set of roots that no
+    // longer exists would journal its inverse patch into a file nothing reads, or nowhere.
+    forget()
+    publishUndo()
     // A full reset: the renderer's index is one flat list with no idea which folder each
     // row came from, so the only way to drop one folder's rows is to rebuild from what's
     // left. The saved indexes make that a second, not a rescan.
@@ -1031,6 +1167,31 @@ function registerIpc(): void {
     return { ...result, data: getContractData() }
   })
 
+  /* --- videos --- */
+
+  ipcMain.handle('videos:get', () => getVideoData())
+  ipcMain.handle('videos:saveProject', (_event, project) => saveVideoProject(project))
+  ipcMain.handle('videos:deleteProject', (_event, id: string) => deleteVideoProject(id))
+  ipcMain.handle('videos:saveCapture', (_event, patch) => saveCaptureSettings(patch))
+  ipcMain.handle('videos:setOutputDir', (_event, dir: string) => setVideoOutputDir(dir))
+  ipcMain.handle('videos:pickOutputDir', () => pickVideoDir())
+  ipcMain.handle('videos:removeRecording', (_event, id: string, deleteFile: boolean) =>
+    removeRecording(id, deleteFile)
+  )
+  ipcMain.handle('videos:sources', () => listCaptureSources())
+  ipcMain.handle('videos:pickMedia', (_event, kind: 'audio' | 'video' | 'image') => pickMedia(kind))
+
+  ipcMain.handle('videos:beginWrite', (_event, kind, name: string, ext: string) =>
+    beginVideoWrite(kind, name, ext)
+  )
+  ipcMain.handle('videos:writeChunk', (_event, id: string, bytes: Uint8Array) =>
+    writeVideoChunk(id, bytes)
+  )
+  ipcMain.handle('videos:finishWrite', (_event, id: string, meta) => finishVideoWrite(id, meta))
+  // Sent rather than invoked: an abort is called from an error path and from teardown, and
+  // neither has anything useful to do with the answer.
+  ipcMain.on('videos:abortWrite', (_event, id: string) => abortVideoWrite(id))
+
   /** The refresh button - the same re-read the watcher does, asked for by hand. */
   ipcMain.handle('library:refreshFolder', async (_event, dir: string) => {
     await refreshFolder(dir)
@@ -1039,6 +1200,11 @@ function registerIpc(): void {
 
   ipcMain.handle('library:rescan', () => {
     const roots = getUserData().settings.roots
+    // A rescan is the button for "the library is wrong", and it rebuilds the index from the
+    // disk as it is now. Offering to reverse an operation the rebuild has just absorbed is
+    // offering to undo something the user has said they no longer trust the record of.
+    forget()
+    publishUndo()
     // The only pass that visits every folder for real. A launch replays the index and then
     // skips folders whose mtime has not moved, which cannot see a file overwritten in place -
     // and "rescan" is precisely the button for when you believe the library is wrong.
@@ -1107,25 +1273,6 @@ function registerIpc(): void {
     putPeaks(path, data)
   })
 
-  /**
-   * The index on disk still has the old paths until a full scan runs, and replaying it
-   * would resurrect rows for files that have moved. Every operation that touches the
-   * filesystem records what it did, here, in one place.
-   */
-  function journal(result: TransferResult | TrashResult): void {
-    const roots = getUserData().settings.roots
-    if (roots.length === 0) return
-    const added = 'items' in result ? result.items.map((item) => item.track) : []
-    // Each folder keeps its own index, so a move between two of them has to be written to
-    // both: removed from one, added to the other.
-    for (const root of roots) {
-      const mine = added.filter((track) => rootFor(roots, track.path)?.label === root.label)
-      const gone = result.removed.filter((path) => rootFor(roots, path)?.label === root.label)
-      if (mine.length === 0 && gone.length === 0) continue
-      appendIndexPatch(root.path, { removed: gone, added: mine })
-    }
-  }
-
   ipcMain.handle(
     'fs:transfer',
     async (
@@ -1136,6 +1283,8 @@ function registerIpc(): void {
     ): Promise<TransferResult> => {
       const result = await transfer(paths, destination, mode, getUserData().settings.roots)
       journal(result)
+      remember(mode, result)
+      publishUndo()
       return result
     }
   )
@@ -1143,18 +1292,133 @@ function registerIpc(): void {
   ipcMain.handle('fs:rename', async (_event, path: string, newName: string) => {
     const result = await renameEntry(path, newName, getUserData().settings.roots)
     journal(result)
+    remember('rename', result)
+    publishUndo()
     return result
   })
 
+  /**
+   * Deliberately the one operation that records no undo.
+   *
+   * `shell.trashItem` has no reliable way back on either platform - there is no cross-platform
+   * API that restores an item from the Recycle Bin or the Trash, and a per-platform one would
+   * be right on one machine and silent on the other. So a delete carries no Undo affordance at
+   * all: the notice says where the files went and offers to show them there. A dead Undo is
+   * worse than none, because the first one that does nothing teaches the user that none of
+   * them work, including the ones that do.
+   *
+   * If somebody comes to make this consistent with its two neighbours, this is why it isn't.
+   */
   ipcMain.handle('fs:trash', async (_event, paths: string[]): Promise<TrashResult> => {
     const result = await trashEntries(paths, getUserData().settings.roots)
     journal(result)
     return result
   })
 
-  ipcMain.handle('fs:createFolder', (_event, parent: string, name: string) =>
-    createFolder(parent, name)
+  /* --- undo --- */
+
+  /** What is pending. Asked for on mount, since the state predates the listener. */
+  ipcMain.handle('undo:current', (): UndoSummary | null => undoSummary())
+
+  ipcMain.handle('undo:cancel', () => {
+    cancelUndo()
+  })
+
+  /**
+   * Chromium's own text undo, for a focused field.
+   *
+   * The Edit menu's first item took Ctrl/⌘+Z off `{ role: 'undo' }` so it could name the
+   * operation it would reverse, and an application menu accelerator is claimed before the
+   * page ever sees the key - so the field's own undo has to be handed back to it explicitly.
+   * A page cannot do that for itself: `document.execCommand('undo')` is inert in a modern
+   * Chromium, and this is the same call the role was making.
+   */
+  ipcMain.handle('edit:textUndo', (event) => {
+    event.sender.undo()
+  })
+
+  /**
+   * Where the pieces meet.
+   *
+   * The reverse operation comes back as an ordinary `TransferResult`, so it goes through the
+   * same `journal()` the operation itself did and the renderer puts it through the same
+   * `applyTransfer` - ratings, tags and notes follow the files back without a line of code
+   * that knows it is an undo.
+   *
+   * The record is consumed whatever happened, including a partial failure and a cancel. A
+   * record holding only what could not be restored is a stack of one that changes its own
+   * count, and "Undo Move (43 files)" followed by "Undo Move (4 files)" reads as the app
+   * having done something it did not.
+   */
+  ipcMain.handle(
+    'undo:run',
+    async (
+      event,
+      id: string
+    ): Promise<{ result: TransferResult; outcome: UndoOutcome }> => {
+      const report = (progress: UndoProgress): void => {
+        if (!event.sender.isDestroyed()) event.sender.send('undo:progress', progress)
+      }
+      const { result, outcome } = await runUndo(id, getUserData().settings.roots, report)
+      journal(result)
+      // `runUndo` spends the record itself, and only when it actually ran one - forgetting
+      // here as well threw away a live record whenever a press was refused.
+      publishUndo()
+      return { result, outcome }
+    }
   )
+
+  /** What can be put forward again. Asked for on mount, like `undo:current`. */
+  ipcMain.handle('redo:current', (): UndoSummary | null => redoSummary())
+
+  /**
+   * The same handler with the stacks the other way round.
+   *
+   * Progress is reported on `undo:progress` rather than a channel of its own: the renderer
+   * shows one "N of M" for whichever is running, and two channels would be two subscriptions
+   * feeding one readout.
+   */
+  ipcMain.handle(
+    'redo:run',
+    async (
+      event,
+      id: string
+    ): Promise<{ result: TransferResult; outcome: UndoOutcome }> => {
+      const report = (progress: UndoProgress): void => {
+        if (!event.sender.isDestroyed()) event.sender.send('undo:progress', progress)
+      }
+      const { result, outcome } = await runRedo(id, getUserData().settings.roots, report)
+      journal(result)
+      publishUndo()
+      return { result, outcome }
+    }
+  )
+
+  /**
+   * Makes a folder, and records it as the one undo kind that had no way back.
+   *
+   * `undo.ts` has always known how to reverse this - `rmdir`, never a recursive remove, so
+   * anything put in the folder since keeps it - and `UndoKind` has always named it. Nothing
+   * ever called `remember` for it, so the branch was unreachable and New Folder was the one
+   * operation in the app that recorded nothing at all.
+   *
+   * The record is stated rather than taken from a `TransferResult`, because creating a folder
+   * is not a transfer: nothing moved, so `from` and `to` are the same path and there are no
+   * items. `remember` already skips directories when it stamps entries, so an empty `items`
+   * is what it would have built anyway, and `labelFor` reads it as "Undo New Folder".
+   */
+  ipcMain.handle('fs:createFolder', async (_event, parent: string, name: string) => {
+    const result = await createFolder(parent, name)
+    if (result.path) {
+      remember('newFolder', {
+        moves: [{ from: result.path, to: result.path, directory: true }],
+        items: [],
+        removed: []
+      })
+      publishUndo()
+    }
+    return result
+  })
 
   /**
    * Writes a piece the user cut out of a track, beside the track it came from.
@@ -1293,8 +1557,16 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('shell:reveal', (_event, path: string) => {
-    shell.showItemInFolder(path)
+  ipcMain.handle('shell:reveal', async (_event, path: string) => {
+    if (!path) return
+    if (existsSync(path)) {
+      shell.showItemInFolder(path)
+      return
+    }
+    // History can outlive one generated file. Opening its still-existing parent is useful:
+    // showItemInFolder silently does nothing when the exact child has gone away.
+    const parent = dirname(path)
+    if (existsSync(parent)) await shell.openPath(parent)
   })
   ipcMain.handle('shell:open', async (_event, path: string) => {
     // A web link is not a path, and `openPath` is documented for files - it takes the string
@@ -1485,7 +1757,11 @@ if (!app.requestSingleInstanceLock()) {
       console.log(`umakbang: not portable (${portableChoice.reason}), data in ${portableChoice.dir}`)
     }
     initStore()
+    // After `initStore`, or this reads `DEFAULT_SETTINGS` instead of what is on disk - the
+    // same trap `applyAnalysisSettings` documents in the renderer.
+    setUndoLimit(getUserData().settings.undoDepth)
     initContracts(getDataDir(), app.getPath('documents'))
+    initVideos(getDataDir())
     // The scanner owns the index, but moves and renames happen here, and they have to be
     // recorded or the next launch replays a file at a path it no longer has.
     initIndexStore(getDataDir())

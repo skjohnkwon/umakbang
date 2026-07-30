@@ -254,7 +254,7 @@ export function useVisibleRows(): Row[] {
           (kinds.length === 0 || kinds.includes(t.kind)) &&
           (exts.length === 0 || exts.includes(t.ext)) &&
           (tagFilter.length === 0 ||
-            tagFilter.some((tag) => tags[t.path]?.includes(tag)) ||
+            tagFilter.some((tag) => tags[t.pathKey ?? t.path]?.includes(tag)) ||
             // A tag on a folder is a statement about what's in it, so its files answer to
             // it too. Without this, filtering by a tag you only ever put on a folder
             // showed the folder and then nothing at all once you opened it.
@@ -276,7 +276,9 @@ export function useVisibleRows(): Row[] {
         // Ratings live in the store rather than on the track, so they sort here.
         const sign = sortDir === 'asc' ? 1 : -1
         result.sort((a, b) => {
-          const diff = (ratings[a.path] ?? 0) - (ratings[b.path] ?? 0)
+          // The field rather than a `pathKey` call: this is a comparator, so it runs
+          // n log n times, and the composed spelling is already sitting on the track.
+          const diff = (ratings[a.pathKey ?? a.path] ?? 0) - (ratings[b.pathKey ?? b.path] ?? 0)
           return diff !== 0 ? sign * diff : compareTracks(a, b, 'name', 'asc')
         })
       } else {
@@ -357,12 +359,21 @@ export function useVisibleRows(): Row[] {
       fileRows(narrowed(searching ? files.filter((t) => matchesQuery(t, parsed, context)) : files))
 
     // Stats and settings replace the table entirely.
-    if (view.mode === 'stats' || view.mode === 'settings' || view.mode === 'contracts') return []
+    // The pages that are not a list of files have no rows of their own.
+    if (
+      view.mode === 'stats' ||
+      view.mode === 'settings' ||
+      view.mode === 'contracts' ||
+      view.mode === 'videos'
+    ) {
+      return []
+    }
     if (view.mode === 'downloads') return flat(downloads)
     if (view.mode === 'rated') {
       return flat(
         tracks.filter((t) => {
-          const rating = ratings[t.path] ?? 0
+          // Field read, not a `pathKey` call: this walks the whole index.
+          const rating = ratings[t.pathKey ?? t.path] ?? 0
           return rating >= view.min && rating <= view.max
         })
       )
@@ -464,7 +475,13 @@ function folderScore(node: FolderNode, terms: string[]): number {
   return score
 }
 
-function collectFiles(node: FolderNode, out: Track[]): void {
+/**
+ * Every file at or beneath a folder, appended to `out`.
+ *
+ * Exported because the delete confirmation describes what a folder is about to take with it,
+ * and a second walk written beside this one would be a second answer to the same question.
+ */
+export function collectFiles(node: FolderNode, out: Track[]): void {
   for (const file of node.files) out.push(file)
   for (const child of node.children) collectFiles(child, out)
 }

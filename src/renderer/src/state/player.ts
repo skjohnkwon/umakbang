@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { Track } from '@shared/types'
+import type { Settings, Track } from '@shared/types'
+import { applyOutputDevice } from '@/lib/audio-output'
 import { isUnderAnyDir } from '@/lib/paths'
 import { useLibrary } from './library'
 
@@ -48,6 +49,14 @@ interface PlayerState {
   toggleMute: () => void
   /** Sets the output level, 0..1. Anything above zero also lifts a mute. */
   setVolume: (volume: number) => void
+  /**
+   * Chooses which device playback comes out of; null is whatever the OS is using.
+   *
+   * Persisted and applied here rather than by the settings page, because the element is a
+   * singleton this module owns and a device that refuses to open has to be reported
+   * wherever it is chosen from.
+   */
+  setOutputDevice: (device: Settings['outputDevice']) => void
   /** Sets the loop region, or clears it with null. */
   setRegion: (region: { start: number; end: number } | null) => void
   stop: () => void
@@ -90,7 +99,7 @@ function weightedPick(
   if (!favourUnrated) return tracks[Math.floor(Math.random() * tracks.length)]
 
   const weightOf = (track: Track): number =>
-    (ratings[track.path] ?? 0) === 0 ? UNRATED_WEIGHT : 1
+    (ratings[track.pathKey ?? track.path] ?? 0) === 0 ? UNRATED_WEIGHT : 1
 
   let total = 0
   for (const track of tracks) total += weightOf(track)
@@ -142,8 +151,29 @@ export function getAudioElement(): HTMLAudioElement {
     if (autoAdvance) usePlayer.getState().next()
     else usePlayer.setState({ playing: false })
   })
+  /**
+   * Two different failures wear the same event, and telling them apart is the whole of this.
+   *
+   * `MEDIA_ERR_SRC_NOT_SUPPORTED` is the honest "Chromium has no decoder for this" - a `.wma`,
+   * an `.ape`, a project file somebody asked to hear - and the message has always said so.
+   * Anything else is the protocol handler failing to hand over bytes, which for a local file
+   * overwhelmingly means it is not there any more. Reporting *that* as a decode problem sends
+   * the user to their DAW to open a file that no longer exists.
+   *
+   * So the missing case asks the store to look, rather than asserting: `recheckPaths` re-reads
+   * the containing folder through the same reconciliation the watcher uses, so the row dims
+   * only if the disk agrees, and un-dims by itself when a disconnected drive comes back.
+   */
   element.addEventListener('error', () => {
     const track = usePlayer.getState().current
+    const undecodable = element.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+
+    if (track && !undecodable) {
+      void useLibrary.getState().recheckPaths([track.path])
+      usePlayer.setState({ playing: false, error: `Can't play ${track.name} - looking for it…` })
+      return
+    }
+
     usePlayer.setState({
       playing: false,
       error: track ? `Can't decode .${track.ext} - open it in your DAW instead.` : 'Playback failed.'
@@ -197,8 +227,30 @@ function buildQueue(track: Track, context: Track[]): Track[] {
   return scoped.some((t) => t.path === track.path) ? scoped : [track, ...scoped]
 }
 
+/**
+ * Sends playback to the chosen device, and says so out loud when it can't go there.
+ *
+ * Silence with no explanation is the thing this is here to prevent: a producer whose DAW
+ * has the interface open exclusively presses play, hears nothing, and has no way to tell
+ * that from a broken app. `applyOutputDevice` hands the message back once per cause, so the
+ * notice appears when the situation does rather than on every file auditioned after it.
+ */
+function routeOutput(device: Settings['outputDevice']): void {
+  void applyOutputDevice(getAudioElement(), device).then((failure) => {
+    if (failure) useLibrary.getState().notify(failure, 'error')
+  })
+}
+
 function load(track: Track, autoplay: boolean): void {
   const element = getAudioElement()
+  /**
+   * Re-applied per track for the same reason the volume below is: this is the one choke
+   * point every playback path goes through, so it is where the setting saved on the last
+   * run first reaches the element. It is a no-op once the device has not moved, and it is
+   * also the retry - an interface a DAW was holding when the app launched gets another
+   * chance on the next file rather than staying wrong for the session.
+   */
+  routeOutput(useLibrary.getState().settings.outputDevice)
   /**
    * The saved level, applied here rather than at launch.
    *
@@ -419,6 +471,13 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     // Persisted, so the level survives a restart. The store debounces its own write, which
     // is what makes it safe to call on every frame of a slider drag.
     useLibrary.getState().patchSettings({ volume })
+  },
+
+  setOutputDevice: (device) => {
+    useLibrary.getState().patchSettings({ outputDevice: device })
+    // Immediately, rather than on the next track: a picker you have to press play to find
+    // out about is not a picker, and the whole point is to hear the change.
+    routeOutput(device)
   },
 
   setRegion: (region) => {

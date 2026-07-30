@@ -16,7 +16,7 @@ import { stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { extname } from 'node:path'
 import { aiffToWav, type RewrapResult } from './aiff'
-import { UMAKBANG_FILE_SCHEME, fromUmakbangFileUrl } from '../shared/url'
+import { UMAKBANG_FILE_SCHEME, fromUmakbangFileUrl, urlFamily } from '../shared/url'
 
 /** Must run before the app 'ready' event. */
 export function registerFileSchemePrivileges(): void {
@@ -65,6 +65,29 @@ async function rewrapAiff(filePath: string): Promise<RewrapResult | null> {
   return wav
 }
 
+/**
+ * Types for a request that asked for `visual`.
+ *
+ * A separate table rather than a merged one because `.mp4` and `.webm` belong to both and
+ * mean different things in each - see `toUmakbangVisualUrl` for why the caller decides
+ * rather than the extension.
+ */
+const VISUAL_MIME_TYPES: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp'
+}
+
 const MIME_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
   '.wave': 'audio/wav',
@@ -85,6 +108,15 @@ export function registerFileProtocol(): void {
     if (!filePath) return new Response('Bad request', { status: 400 })
 
     const ext = extname(filePath).toLowerCase()
+    const visual = urlFamily(request.url) === 'visual'
+
+    if (visual) {
+      try {
+        return await serveFile(filePath, VISUAL_MIME_TYPES[ext] ?? 'application/octet-stream', request)
+      } catch {
+        return new Response('Not found', { status: 404 })
+      }
+    }
 
     // Chromium has no AIFF decoder, so serve a WAV-wrapped copy from memory instead.
     if (AIFF_EXTENSIONS.has(ext)) {

@@ -24,7 +24,7 @@ import { cn } from '@/lib/utils'
  */
 const SEARCH_FROM = 10
 
-export function TagBar(): React.JSX.Element {
+export function TagBar({ height }: { height: number }): React.JSX.Element {
   const tags = useAllTags()
   const tagFilter = useLibrary((s) => s.tagFilter)
   const toggleTagFilter = useLibrary((s) => s.toggleTagFilter)
@@ -85,9 +85,14 @@ export function TagBar(): React.JSX.Element {
           add one.
         </p>
       ) : (
-        // Capped and scrollable: a library can accumulate a lot of tags, and this strip
-        // must never grow enough to squeeze the transport off the bottom.
-        <div className="scroll-thin flex max-h-[92px] flex-wrap gap-1 overflow-y-auto">
+        /* Scrollable, and capped at whatever the sidebar's split is set to rather than at a
+           fixed 92px. The cap exists so the strip can never grow enough to squeeze the
+           transport off the bottom; who decides where it sits is the user, by dragging the
+           divider directly under these chips. */
+        <div
+          className="scroll-thin flex flex-wrap gap-1 overflow-y-auto"
+          style={{ maxHeight: height }}
+        >
           {shown.length === 0 && (
             <p className="px-1 text-[11px] text-muted-foreground/60">No tag matches that.</p>
           )}

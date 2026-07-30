@@ -84,7 +84,7 @@ export function NowPlayingBar(): React.JSX.Element {
   const split = useLibrary((s) => s.settings.playerSplit)
   const savedDetails = useLibrary((s) => s.settings.playerDetails)
   const detectedKey = useLibrary((s) => s.detectedKey)
-  const keyDetected = current !== null && detectedKey[current.path] !== undefined
+  const keyDetected = current !== null && detectedKey[current.pathKey ?? current.path] !== undefined
   const detailFields = useMemo(
     () => (savedDetails.length > 0 ? normalizeDetailFields(savedDetails) : DEFAULT_DETAIL_FIELDS),
     [savedDetails]
@@ -250,7 +250,7 @@ export function NowPlayingBar(): React.JSX.Element {
           explorer can be narrower than the split alone, and a half that refuses to give way
           pushes the transport out over the panel beside it. */}
       <div
-        className="flex min-w-0 shrink flex-col justify-center gap-2 overflow-hidden"
+        className="flex min-w-0 shrink flex-col items-center justify-center gap-2 overflow-hidden text-center"
         style={{ width: effectiveSplit, maxWidth: '100%' }}
       >
         {current ? (
@@ -261,12 +261,12 @@ export function NowPlayingBar(): React.JSX.Element {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -3 }}
               transition={QUICK}
-              className="flex min-w-0 flex-col"
+              className="flex w-full min-w-0 flex-col items-center"
             >
-              <div className="truncate text-[12px] font-medium leading-tight" title={current.path}>
+              <div className="w-full truncate text-[12px] font-medium leading-tight" title={current.path}>
                 {current.name}
               </div>
-              <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              <div className="mt-0.5 flex min-w-0 items-center justify-center gap-1.5">
                 {/* Everything the table used to spend a column each on. One file's worth of
                     detail belongs to the file you're listening to, not to all 250,000 rows
                     at once. */}
@@ -278,7 +278,7 @@ export function NowPlayingBar(): React.JSX.Element {
             </motion.div>
           </AnimatePresence>
         ) : (
-          <p className="truncate text-[11px] text-muted-foreground/70">
+          <p className="w-full truncate text-center text-[11px] text-muted-foreground/70">
             Select a file to start playing - the rest of its folder queues up automatically.
           </p>
         )}

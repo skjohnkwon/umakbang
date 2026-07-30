@@ -19,6 +19,13 @@ import { type Surface, useVisualizerCanvas } from './useVisualizerCanvas'
 /** Below ~30Hz there is nothing musical to show, and log scales blow up near zero. */
 const MIN_HZ = 30
 
+/** dB span represented by the fine analyser before user-selected headroom. */
+const SPECTRUM_RANGE_DB = 84
+
+function headroomDb(value: number | undefined): number {
+  return Math.max(0, Math.min(18, value ?? 6))
+}
+
 /* ------------------------------------------------------------------ shared helpers */
 
 /** Analyser scratch buffers live in refs - a frame must never allocate. */
@@ -395,6 +402,8 @@ interface BarLayout {
 
 
 export function FrequencyBars(props: VisualizerProps): React.JSX.Element {
+  const headroom = headroomDb(useLibrary((state) => state.settings.visualizerHeadroomDb))
+  const spectrumZero = SPECTRUM_RANGE_DB / (SPECTRUM_RANGE_DB + headroom)
   const layoutRef = useRef<BarLayout | null>(null)
   const dataRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
 
@@ -437,7 +446,8 @@ export function FrequencyBars(props: VisualizerProps): React.JSX.Element {
 
     for (let i = 0; i < layout.count; i++) {
       const from = layout.edges[i]
-      const value = bandPeak(data, from, Math.max(from, layout.edges[i + 1] - 1)) / 255
+      const value =
+        (bandPeak(data, from, Math.max(from, layout.edges[i + 1] - 1)) / 255) * spectrumZero
       layout.peaks[i] = value
       // Bars are coloured by their own magnitude, so a spike reads hot against the cool
       // floor around it - the flat gradient said the same thing at every level.
@@ -839,6 +849,9 @@ const TICKS_DB = [-48, -36, -24, -12, -6, 0]
 
 export function LevelMeter(props: VisualizerProps): React.JSX.Element {
   const vertical = props.orientation === 'horizontal'
+  const headroom = headroomDb(useLibrary((state) => state.settings.visualizerHeadroomDb))
+  const meterRangeDb = 60 + headroom
+  const meterZero = 60 / meterRangeDb
   const leftRef = useRef<Float32Array<ArrayBuffer> | null>(null)
   const rightRef = useRef<Float32Array<ArrayBuffer> | null>(null)
   const holdsRef = useRef<[Hold, Hold]>([
@@ -895,7 +908,7 @@ export function LevelMeter(props: VisualizerProps): React.JSX.Element {
     context.fillStyle = palette.muted
     context.globalAlpha = 0.22
     for (const db of TICKS_DB) {
-      const at = Math.round(((db + 60) / 60) * (length - 1))
+      const at = Math.round(((db + 60) / meterRangeDb) * (length - 1))
       if (vertical) context.fillRect(start, length - 1 - at, thickness, 1)
       else context.fillRect(at, start, 1, thickness)
     }
@@ -912,7 +925,7 @@ export function LevelMeter(props: VisualizerProps): React.JSX.Element {
       context.textAlign = vertical ? 'left' : 'center'
       context.textBaseline = vertical ? 'middle' : 'top'
       for (const db of TICKS_DB) {
-        const at = Math.round(((db + 60) / 60) * (length - 1))
+        const at = Math.round(((db + 60) / meterRangeDb) * (length - 1))
         const text = db === 0 ? '0' : String(db)
         if (vertical) context.fillText(text, start + thickness + 3, length - 1 - at)
         else context.fillText(text, at, start + thickness + 2)
@@ -930,8 +943,8 @@ export function LevelMeter(props: VisualizerProps): React.JSX.Element {
         const magnitude = value < 0 ? -value : value
         if (magnitude > peak) peak = magnitude
       }
-      const rms = toUnitDb(Math.sqrt(sum / samples.length))
-      const held = updateHold(holdsRef.current[channel], toUnitDb(peak), now)
+      const rms = toUnitDb(Math.sqrt(sum / samples.length)) * meterZero
+      const held = updateHold(holdsRef.current[channel], toUnitDb(peak) * meterZero, now)
       const offset = start + channel * (barSize + gap)
 
       context.fillStyle = palette.border
@@ -946,7 +959,7 @@ export function LevelMeter(props: VisualizerProps): React.JSX.Element {
       else context.fillRect(0, offset, rms * length, barSize)
 
       if (held > 0.01) {
-        context.fillStyle = held > 0.98 ? palette.hot : palette.foreground
+        context.fillStyle = held >= meterZero - 0.002 ? palette.hot : palette.foreground
         const at = Math.min(length - 2, held * length)
         if (vertical) context.fillRect(offset, length - at - 2, barSize, 2)
         else context.fillRect(at, offset, 2, barSize)
@@ -958,7 +971,8 @@ export function LevelMeter(props: VisualizerProps): React.JSX.Element {
     // What the loudest channel is peaking at, in dBFS, since that is the number people
     // are watching for. Over is drawn in the hot colour: at 0dBFS it has already clipped.
     const loudest = Math.max(peaks[0], peaks[1])
-    const db = loudest > 0 ? 20 * Math.log10(loudest) : -Infinity
+    const rawDb = loudest > 0 ? 20 * Math.log10(loudest) : -Infinity
+    const db = rawDb === -Infinity ? rawDb : Math.min(0, rawDb)
     context.font = '10px system-ui, sans-serif'
     context.textAlign = 'right'
     context.textBaseline = 'top'

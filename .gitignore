@@ -10,3 +10,6 @@ tools/keyeval/__pycache__/
 tools/keyeval/manifest.results.json
 tools/keyeval/manifest.csv
 CLAUDE.md
+context/
+# The launcher this workspace keeps pointed at release/win-unpacked. One machine's path.
+*.lnk

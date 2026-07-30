@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
 import { labelForRoot } from '../shared/roots'
+import { keyedRecord, pathKey } from '../shared/path-key'
 import type { SettingsBackup } from '../shared/backup'
 import { backupsDir, isPortable } from './portable'
 export type { SettingsBackup }
@@ -98,7 +99,26 @@ export function initStore(): void {
   // Absent from every file written before the column started saying how sure it is.
   userData.detectedKeyFit ??= {}
 
-  peaksCache = readJson(peaksFile, {})
+  // Every path-keyed map composed once, here, where it arrives.
+  //
+  // This is not a shape migration and it is not a branch that has to live forever - it is
+  // idempotent, so a file that is already composed comes out of it byte for byte the same,
+  // and a file written by an older build is fixed the first time it is read and stays fixed.
+  // Doing it on arrival rather than per lookup is what keeps `getUserData` a plain object the
+  // renderer can iterate: the alternative is a `normalize` inside every read of every map, on
+  // a library where 99% of the paths never needed one.
+  //
+  // A file carrying both spellings of one path loses the earlier entry (see `keyedRecord`).
+  // `tools/repair-path-keys.js` is the same conversion run by hand, and it reports those
+  // collisions rather than swallowing them, which is why it exists.
+  userData.tags = keyedRecord(userData.tags)
+  userData.ratings = keyedRecord(userData.ratings)
+  userData.notes = keyedRecord(userData.notes)
+  userData.detectedBpm = keyedRecord(userData.detectedBpm)
+  userData.detectedKey = keyedRecord(userData.detectedKey)
+  userData.detectedKeyFit = keyedRecord(userData.detectedKeyFit)
+
+  peaksCache = keyedRecord(readJson<Record<string, PeaksEntry>>(peaksFile, {}))
 }
 
 /**
@@ -231,18 +251,25 @@ function normalise(path: string): string {
   return path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
 }
 
-/** 0 clears the rating rather than storing a meaningless zero. */
+/**
+ * 0 clears the rating rather than storing a meaningless zero.
+ *
+ * The key is composed here, and at every other write into a path-keyed map below. The caller
+ * hands over a path the way the filesystem gave it, which is the only form that can be opened
+ * again (see `path-key.ts`), and the two forms are only ever reconciled on the key side.
+ */
 export function setRating(path: string, rating: number): Record<string, number> {
+  const key = pathKey(path)
   const clamped = Math.max(0, Math.min(5, Math.round(rating)))
-  if (clamped === 0) delete userData.ratings[path]
-  else userData.ratings[path] = clamped
+  if (clamped === 0) delete userData.ratings[key]
+  else userData.ratings[key] = clamped
   scheduleWrite(userDataFile, () => userData)
   return userData.ratings
 }
 
 export function setDetectedBpm(path: string, bpm: number): void {
   if (!Number.isFinite(bpm) || bpm <= 0) return
-  userData.detectedBpm[path] = Math.round(bpm * 10) / 10
+  userData.detectedBpm[pathKey(path)] = Math.round(bpm * 10) / 10
   // Long debounce: a browsing session can analyse hundreds of files.
   scheduleWrite(userDataFile, () => userData, 3000)
 }
@@ -251,11 +278,12 @@ export function setDetectedBpm(path: string, bpm: number): void {
 export function setDetectedKey(path: string, key: string, fit?: number): void {
   const trimmed = key.trim()
   if (!trimmed) return
-  userData.detectedKey[path] = trimmed
+  const at = pathKey(path)
+  userData.detectedKey[at] = trimmed
   // A key that arrived from the user's own tool has no fit of its own, and last run's number
   // would describe a different answer entirely.
-  if (fit !== undefined && Number.isFinite(fit)) userData.detectedKeyFit[path] = fit
-  else delete userData.detectedKeyFit[path]
+  if (fit !== undefined && Number.isFinite(fit)) userData.detectedKeyFit[at] = fit
+  else delete userData.detectedKeyFit[at]
   scheduleWrite(userDataFile, () => userData, 3000)
 }
 
@@ -267,9 +295,10 @@ export function setDetectedKey(path: string, key: string, fit?: number): void {
  */
 export function clearDetected(paths: string[]): void {
   for (const path of paths) {
-    delete userData.detectedBpm[path]
-    delete userData.detectedKey[path]
-    delete userData.detectedKeyFit[path]
+    const key = pathKey(path)
+    delete userData.detectedBpm[key]
+    delete userData.detectedKey[key]
+    delete userData.detectedKeyFit[key]
   }
   scheduleWrite(userDataFile, () => userData)
 }
@@ -280,8 +309,9 @@ export function clearDetected(paths: string[]): void {
  */
 export function setNote(path: string, note: string): void {
   const trimmed = note.trim()
-  if (trimmed) userData.notes[path] = trimmed
-  else delete userData.notes[path]
+  const key = pathKey(path)
+  if (trimmed) userData.notes[key] = trimmed
+  else delete userData.notes[key]
   // Short debounce, unlike the analysis maps: this is typing, and a note lost to a crash is
   // a sentence the user has to remember writing.
   scheduleWrite(userDataFile, () => userData, 800)
@@ -289,8 +319,9 @@ export function setNote(path: string, note: string): void {
 
 export function setTags(path: string, tags: string[]): Record<string, string[]> {
   const cleaned = [...new Set(tags.map((t) => t.trim()).filter(Boolean))]
-  if (cleaned.length === 0) delete userData.tags[path]
-  else userData.tags[path] = cleaned
+  const key = pathKey(path)
+  if (cleaned.length === 0) delete userData.tags[key]
+  else userData.tags[key] = cleaned
   scheduleWrite(userDataFile, () => userData)
   return userData.tags
 }
@@ -332,7 +363,13 @@ const LOCAL_ONLY = [
   // than a preference about how you like to work. It is seeded only when empty, so an
   // imported value would not just point at the exporting machine's install folder - it would
   // stop the seeding from ever running again and leave it pointing there for good.
-  'bundleExportDir'
+  'bundleExportDir',
+  // A piece of hardware plugged into *this* machine, and an id that means nothing anywhere
+  // else: Chromium salts device ids per profile, so the exporting machine's interface id
+  // matches nothing on the importing one. Carried across, it would put the receiving app
+  // into the one state this setting is built to explain - asked for a device that does not
+  // exist - on a machine where nobody had chosen anything.
+  'outputDevice'
 ] as const
 
 export function exportBackup(): SettingsBackup {
@@ -363,12 +400,17 @@ export function importBackup(backup: SettingsBackup): UserData {
   const incoming: Partial<Settings> = { ...backup.settings }
   for (const key of LOCAL_ONLY) delete incoming[key]
 
+  // The incoming maps are composed before they are merged in, even though `remapBackup`
+  // already composes what it rewrites. This is the path a backup takes when it needs no
+  // mapping at all - a reinstall on the same machine, or one platform to itself - which goes
+  // straight from the file into here without passing through the wizard, and it is exactly
+  // the case where two spellings of one library would land side by side in the same map.
   userData.settings = { ...userData.settings, ...incoming }
-  userData.tags = { ...userData.tags, ...(backup.tags ?? {}) }
-  userData.ratings = { ...userData.ratings, ...(backup.ratings ?? {}) }
-  userData.notes = { ...userData.notes, ...(backup.notes ?? {}) }
-  userData.detectedBpm = { ...userData.detectedBpm, ...(backup.detectedBpm ?? {}) }
-  userData.detectedKey = { ...userData.detectedKey, ...(backup.detectedKey ?? {}) }
+  userData.tags = { ...userData.tags, ...keyedRecord(backup.tags ?? {}) }
+  userData.ratings = { ...userData.ratings, ...keyedRecord(backup.ratings ?? {}) }
+  userData.notes = { ...userData.notes, ...keyedRecord(backup.notes ?? {}) }
+  userData.detectedBpm = { ...userData.detectedBpm, ...keyedRecord(backup.detectedBpm ?? {}) }
+  userData.detectedKey = { ...userData.detectedKey, ...keyedRecord(backup.detectedKey ?? {}) }
 
   writeJsonAtomic(userDataFile, userData)
   return userData
@@ -377,7 +419,7 @@ export function importBackup(backup: SettingsBackup): UserData {
 /* ------------------------------------------------------------------ waveform peaks */
 
 export function getPeaks(path: string): string | null {
-  const entry = peaksCache[path]
+  const entry = peaksCache[pathKey(path)]
   if (!entry) return null
   // The stamp is recorded in memory only. Scheduling a write here meant browsing rows
   // (pure cache hits) re-serialised an up-to-11MB JSON document on the same thread that
@@ -397,8 +439,9 @@ export function getPeaks(path: string): string | null {
 export function forgetPeaks(paths: string[]): void {
   let removed = false
   for (const path of paths) {
-    if (peaksCache[path]) {
-      delete peaksCache[path]
+    const key = pathKey(path)
+    if (peaksCache[key]) {
+      delete peaksCache[key]
       removed = true
     }
   }
@@ -422,7 +465,10 @@ export function mergePeaks(entries: Array<{ p: string; d: string }>): number {
   let added = 0
   for (const { p, d } of entries) {
     if (typeof p !== 'string' || typeof d !== 'string') continue
-    peaksCache[p] = { data: d, usedAt: now }
+    // Composed like everything else that arrives from another machine's file. A bundle's
+    // peaks are only restored when the roots are present under the same paths, so a mismatch
+    // here is a spelling difference and nothing else.
+    peaksCache[pathKey(p)] = { data: d, usedAt: now }
     added++
   }
   trimPeaks()
@@ -438,7 +484,7 @@ function trimPeaks(): void {
 }
 
 export function putPeaks(path: string, data: string): void {
-  peaksCache[path] = { data, usedAt: Date.now() }
+  peaksCache[pathKey(path)] = { data, usedAt: Date.now() }
 
   const keys = Object.keys(peaksCache)
   if (keys.length > MAX_PEAKS_ENTRIES) {

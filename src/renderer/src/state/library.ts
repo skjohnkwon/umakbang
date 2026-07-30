@@ -10,6 +10,9 @@ import type {
   TrackKind,
   TransferMode,
   TransferResult,
+  UndoOutcome,
+  UndoProgress,
+  UndoSummary,
   UserData
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
@@ -30,7 +33,19 @@ import {
 } from '@/lib/analysis'
 import { inAnalysisScope } from '@/lib/analysis-scope'
 import { plausibleBpm } from '@shared/tempo'
+import { pathKey } from '@shared/path-key'
 import { absolutePath, baseName, parentPath, relativePath, samePath } from '@/lib/paths'
+
+/**
+ * The key a track's own entries live under, in tags, ratings, notes and the detected maps.
+ *
+ * `Track.path` is what the filesystem answers to and `Track.pathKey` is the composed
+ * spelling, present only when the two differ - which for an all-ASCII library is never, so
+ * this is a field read rather than a `normalize` call per row. `byPath` is deliberately not
+ * keyed by this: that map is row identity, and every path it hands back has to round-trip to
+ * the filesystem unaltered.
+ */
+const keyOf = (track: Track): string => track.pathKey ?? track.path
 
 export type ViewMode =
   | { mode: 'folder'; dir: string }
@@ -41,6 +56,8 @@ export type ViewMode =
   | { mode: 'settings' }
   /** Contracts: what has been generated, who for, and on what terms. */
   | { mode: 'contracts' }
+  /** Videos: the reel composer, the screen recorder and what has been made. */
+  | { mode: 'videos' }
   /** The OS Downloads folder - a staging area, listed on demand. */
   | { mode: 'downloads' }
 
@@ -65,6 +82,15 @@ function sameView(a: ViewMode | undefined, b: ViewMode): boolean {
  * walk a long way through. Fifty is far more than anybody retraces by hand.
  */
 const HISTORY_LIMIT = 50
+
+/**
+ * How many folders one failed operation is allowed to send main back to the disk for.
+ *
+ * A selection can span the whole library when it came out of a search, and this runs off a
+ * failure rather than off a sweep - the point is to settle the handful of files somebody was
+ * just acting on, not to audit the index.
+ */
+const RECHECK_DIRS = 8
 
 /**
  * One place in the history: a view, and the file that was revealed to reach it.
@@ -173,8 +199,54 @@ interface LibraryState {
    * so without this a folder you just made wouldn't appear until you put something in it.
    */
   extraDirs: Set<string>
-  /** The outcome of the last file operation, shown briefly and then dismissed. */
-  notice: { message: string; tone: 'info' | 'error'; nonce: number } | null
+  /**
+   * Files umakbang currently cannot reach: moved or deleted outside the app, on a drive that
+   * went away, or refused by the OS. Keyed by `Track.path` - what the filesystem answers to,
+   * the same key `byPath` uses - not by the composed spelling the tag maps carry.
+   *
+   * A set in the store rather than a field on `Track`, for two reasons. Track objects are
+   * interned and mutated in place, so a field on one would have to be folded into
+   * `FileTable`'s `metaSignature` before a single row repainted. And this is not a fact about
+   * the file: it is what the app knows about reaching it right now, which the next scan
+   * settles either way.
+   */
+  unreachable: Set<string>
+  /**
+   * The outcome of the last file operation, shown briefly and then dismissed.
+   *
+   * `undoable` is the only thing the notice carries about the undo, and deliberately not the
+   * label or the id. Main sends `undo:state` from inside the `fs:transfer` handler, before
+   * the invoke that started the operation has resolved, so a notice built from the record at
+   * notify time would be depending on which of those two landed first. `Notice` reads
+   * `s.undo` live instead, which also keeps the button from naming a record that has since
+   * been consumed.
+   */
+  notice: { message: string; tone: 'info' | 'error'; nonce: number; undoable?: boolean } | null
+
+  /**
+   * The one file operation that can be reversed, as main describes it. Null when there is
+   * nothing - which is most of the time, and is why the toolbar button is absent rather
+   * than disabled.
+   */
+  undo: UndoSummary | null
+  /** True from the press until the reversal is finished or stopped. */
+  undoRunning: boolean
+  /** How far through, reported per file so a long reversal can be watched. */
+  undoProgress: UndoProgress | null
+  /**
+   * Runs the pending record backwards, and follows the files back to where they went.
+   *
+   * One at a time and once per record: main spends the record whether or not every file
+   * came back, so the outcome is the only report there will be.
+   */
+  runUndo: () => Promise<void>
+  /**
+   * What has been undone and can be put forward again. Null unless something has been undone,
+   * so the button is absent rather than permanently greyed - the same rule as `undo`.
+   */
+  redo: UndoSummary | null
+  /** Puts the newest undone operation back. Shares `undoRunning`: one pass at a time. */
+  runRedo: () => Promise<void>
   /**
    * The window is shrunk to the mini player. Not persisted: it's a "get out of the way"
    * mode you turn on for a session, and launching into a 300px square with no library in
@@ -203,6 +275,21 @@ interface LibraryState {
   /** A folder was re-read: fold in what it holds now. `dir` is absolute. */
   applyFolder: (dir: string, incoming: Track[]) => void
   removeTracks: (paths: string[]) => void
+  /**
+   * Marks files as ones umakbang can no longer read, so their rows dim instead of going.
+   *
+   * Public because the places that find out are spread thin: a folder re-read is one, a file
+   * operation that came back with an error is another, and the `<audio>` element failing to
+   * load a source is a third.
+   */
+  markUnreachable: (paths: string[]) => void
+  /** Takes files off that list - they were found again. */
+  clearUnreachable: (paths: Iterable<string>) => void
+  /**
+   * Asks main to re-read the folders these files live in, so the disk settles whether they
+   * are still there. Answers come back through `applyFolder` like any other folder change.
+   */
+  recheckPaths: (paths: string[]) => void
   applyMetadata: (patches: MetadataPatch[]) => void
   setProgress: (progress: ScanProgress) => void
 
@@ -303,10 +390,25 @@ interface LibraryState {
   trashPaths: (paths: string[]) => Promise<void>
   /** Creates a folder inside a library folder. Resolves to an error message, or null. */
   createFolder: (relDir: string, name: string) => Promise<string | null>
+  /**
+   * Creates a folder and files the selection into it. Resolves to an error message, or null.
+   *
+   * Two operations rather than one, deliberately: the folder is made through `fs:createFolder`
+   * and the files go in through the ordinary transfer, so both are journalled, both are
+   * recorded on the undo stack, and neither needed a new path through `fs-ops.ts`. It also
+   * means a move that fails part way leaves the folder standing with whatever landed in it,
+   * which is the honest outcome - the alternative is deciding on the user's behalf to undo
+   * their half-finished tidy.
+   */
+  createFolderWithSelection: (
+    relDir: string,
+    name: string,
+    paths: string[]
+  ) => Promise<string | null>
   /** Renames a file or folder. Resolves to an error message, or null. */
   renameEntry: (path: string, newName: string, directory: boolean) => Promise<string | null>
 
-  notify: (message: string, tone?: 'info' | 'error') => void
+  notify: (message: string, tone?: 'info' | 'error', undoable?: boolean) => void
   dismissNotice: () => void
   setMiniPlayer: (mini: boolean) => void
 
@@ -404,7 +506,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   selection: new Set(),
   clipboard: null,
   extraDirs: new Set(),
+  unreachable: new Set(),
   notice: null,
+  undo: null,
+  redo: null,
+  undoRunning: false,
+  undoProgress: null,
   miniPlayer: false,
   // Off by default: browsing shows subfolders as rows and drills down, like a file
   // manager. The toolbar toggle flattens the whole subtree when you'd rather see every
@@ -438,6 +545,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       platform,
       settings: userData.settings,
       roots: userData.settings.roots,
+      // Taken as they arrive. Main puts every path-keyed map through `keyedRecord` before
+      // it hands one over, so what lands here is already canonical.
       tags: userData.tags,
       ratings: userData.ratings ?? {},
       notes: userData.notes ?? {},
@@ -480,8 +589,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       lastFolderDir: sameRoot ? get().lastFolderDir : '',
       selectedPath: null,
       selection: new Set(),
-      // A fresh walk of the disk supersedes anything we were remembering about it.
-      extraDirs: sameRoot ? get().extraDirs : new Set()
+      // A fresh walk of the disk supersedes anything we were remembering about it - which
+      // includes every row we had dimmed for being unreachable. The walk is the authority on
+      // what is there; nothing dimmed by a single folder's re-read should outlive it.
+      extraDirs: sameRoot ? get().extraDirs : new Set(),
+      unreachable: new Set()
     })
   },
 
@@ -499,11 +611,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       if (track.bpm !== undefined && !plausibleBpm(track.bpm)) track.bpm = undefined
       // Fold in any previously analysed tempo and key so sorting and `bpm>` / `key:`
       // filters see them too, not just the displayed value.
-      if (track.bpm === undefined && detectedBpm[track.path] !== undefined) {
-        track.bpm = detectedBpm[track.path]
+      const key = keyOf(track)
+      if (track.bpm === undefined && detectedBpm[key] !== undefined) {
+        track.bpm = detectedBpm[key]
       }
-      if (track.musicalKey === undefined && detectedKey[track.path] !== undefined) {
-        track.musicalKey = detectedKey[track.path]
+      if (track.musicalKey === undefined && detectedKey[key] !== undefined) {
+        track.musicalKey = detectedKey[key]
       }
       byPath.set(track.path, track)
       tracks.push(track)
@@ -522,9 +635,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
    *
    * What the watcher sends after something in the folder you're looking at changed - a
    * bounce re-exported over itself, a file dropped in from outside. New files are added,
-   * files that have gone are dropped, and a file whose size or timestamp moved is updated
-   * in place *and* has everything derived from its contents thrown away: the waveform, the
-   * tempo and the key all described the take before this one.
+   * files that have gone are dimmed rather than dropped (see below), and a file whose size or
+   * timestamp moved is updated in place *and* has everything derived from its contents thrown
+   * away: the waveform, the tempo and the key all described the take before this one.
    */
   applyFolder: (dir, incoming) => {
     const { byPath, tracks } = get()
@@ -569,15 +682,42 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         const detectedKey = { ...state.detectedKey }
         const detectedKeyFit = { ...state.detectedKeyFit }
         for (const path of stale) {
-          delete detectedBpm[path]
-          delete detectedKey[path]
-          delete detectedKeyFit[path]
+          // These paths came off `Track.path`, so they are what the filesystem answers to
+          // rather than what the maps are keyed by.
+          const key = pathKey(path)
+          delete detectedBpm[key]
+          delete detectedKey[key]
+          delete detectedKeyFit[key]
         }
         return { detectedBpm, detectedKey, detectedKeyFit }
       })
     }
     if (arrived.length > 0) get().addTracks(arrived)
-    if (gone.length > 0) get().removeTracks(gone)
+
+    /*
+     * A file that has gone is dimmed, not dropped, and the distinction is about who moved it.
+     *
+     * Everything umakbang does to a file takes its row out at the time: `applyTransfer` and
+     * `trashPaths` both call `removeTracks` synchronously, long before the watcher's 600ms
+     * debounce brings the folder back here. So by the time a re-read runs, what is left in
+     * `gone` is only ever what went without the app being asked - dragged away in Explorer,
+     * deleted from a DAW, or sitting on a share that dropped. Those must not vanish. The row
+     * is the only place its rating, tags and note are visible; a row disappearing under the
+     * pointer means the next click lands on a different file; and `describeDir` answers `[]`
+     * for a folder it merely could not *read*, so a permission or an unplugged drive used to
+     * empty a whole folder out of the index while looking like a tidy-up.
+     *
+     * Dimming is not permanent, and it is not a second index either. Coming back is this same
+     * re-read finding the file again, which is the `clearUnreachable` below. The end of the
+     * line is the next full scan: it walks the disk for real and sends `removed`, and that
+     * diff is allowed to delete rows because it has actually looked.
+     */
+    if (gone.length > 0) get().markUnreachable(gone)
+    // Anything the folder does hold is reachable, whatever we thought a moment ago. Cheap:
+    // `clearUnreachable` returns straight back out while nothing is marked, which is almost
+    // always, so the ordinary save-and-refresh pays nothing for this.
+    get().clearUnreachable(present)
+
     if (touched) bumpRevision(false)
 
     // Whatever is new or has moved gets its headers read straight away. Without this a
@@ -598,7 +738,42 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     for (const path of paths) byPath.delete(path)
     // A new array identity is what invalidates the incrementally-built folder tree.
     set({ tracks: get().tracks.filter((track) => !doomed.has(track.path)) })
+    // A row that has gone for good takes its dim with it, or the set grows for the life of
+    // the session holding paths nothing can ever draw.
+    get().clearUnreachable(paths)
     flushRevision()
+  },
+
+  markUnreachable: (paths) => {
+    const { unreachable } = get()
+    const next = new Set(unreachable)
+    let added = false
+    for (const path of paths) {
+      if (next.has(path)) continue
+      next.add(path)
+      added = true
+    }
+    // A fresh set only when something actually changed: the table subscribes to this by
+    // identity, so handing back a new one for no reason repaints every visible row.
+    if (added) set({ unreachable: next })
+  },
+
+  clearUnreachable: (paths) => {
+    const { unreachable } = get()
+    if (unreachable.size === 0) return
+    const next = new Set(unreachable)
+    let dropped = false
+    for (const path of paths) dropped = next.delete(path) || dropped
+    if (dropped) set({ unreachable: next })
+  },
+
+  recheckPaths: (paths) => {
+    if (paths.length === 0) return
+    // The folders, not the files. Main has one call for this - the same re-read the watcher
+    // fires - so whatever comes back lands in `applyFolder` and is reconciled the one way,
+    // rather than by a second rule written here that could disagree with it.
+    const dirs = [...new Set(paths.map(parentPath))].slice(0, RECHECK_DIRS)
+    for (const dir of dirs) void window.umakbang.refreshFolder(dir)
   },
 
   applyMetadata: (patches) => {
@@ -720,7 +895,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       (typeFilter.kinds.length === 0 || typeFilter.kinds.includes(track.kind)) &&
       (typeFilter.exts.length === 0 || typeFilter.exts.includes(track.ext))
     const passesTags =
-      tagFilter.length === 0 || tagFilter.some((tag) => tags[track.path]?.includes(tag))
+      tagFilter.length === 0 ||
+      tagFilter.some((tag) => tags[keyOf(track)]?.includes(tag))
 
     const view: ViewMode = { mode: 'folder', dir: track.relDir }
 
@@ -791,8 +967,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     if (cleaned.length === 0 || paths.length === 0) return
     const next = { ...get().tags }
     for (const path of paths) {
-      const merged = [...new Set([...(next[path] ?? []), ...cleaned])]
-      next[path] = merged
+      // The map is keyed by the composed spelling; the IPC call keeps the raw path, because
+      // main composes it itself before writing and never hands it to the filesystem.
+      const key = pathKey(path)
+      const merged = [...new Set([...(next[key] ?? []), ...cleaned])]
+      next[key] = merged
       void window.umakbang.setTags(path, merged)
     }
     set({ tags: next })
@@ -811,6 +990,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // with it twice - which is what makes this a merge as well as a rename.
       const merged = [...new Set(list.map((tag) => (tag === from ? next : tag)))]
       tags[path] = merged
+      // `path` here is one of the store's own keys, so it is already composed - which means
+      // `setTags` is being handed a key rather than a path. That is safe because main puts
+      // everything it receives through `pathKey` before storing it, and a composed string
+      // composes to itself; nothing on this road reaches the filesystem.
       void window.umakbang.setTags(path, merged)
       touched++
     }
@@ -831,9 +1014,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   removeTag: (paths, tag) => {
     const next = { ...get().tags }
     for (const path of paths) {
-      const remaining = (next[path] ?? []).filter((entry) => entry !== tag)
-      if (remaining.length === 0) delete next[path]
-      else next[path] = remaining
+      const key = pathKey(path)
+      const remaining = (next[key] ?? []).filter((entry) => entry !== tag)
+      if (remaining.length === 0) delete next[key]
+      else next[key] = remaining
       void window.umakbang.setTags(path, remaining)
     }
     set({ tags: next })
@@ -900,11 +1084,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // Carry over anything already analysed for these files, key as well as tempo.
     const { detectedBpm, detectedKey } = get()
     for (const track of downloads) {
-      if (track.bpm === undefined && detectedBpm[track.path] !== undefined) {
-        track.bpm = detectedBpm[track.path]
+      const key = keyOf(track)
+      if (track.bpm === undefined && detectedBpm[key] !== undefined) {
+        track.bpm = detectedBpm[key]
       }
-      if (track.musicalKey === undefined && detectedKey[track.path] !== undefined) {
-        track.musicalKey = detectedKey[track.path]
+      if (track.musicalKey === undefined && detectedKey[key] !== undefined) {
+        track.musicalKey = detectedKey[key]
       }
     }
     set({ downloads })
@@ -940,6 +1125,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     applyTransfer(result, mode)
     if (result.error) {
       get().notify(result.error, 'error')
+      // "That file is no longer there." is the commonest way a producer meets this: the file
+      // was moved in Explorer an hour ago and the row has been stale ever since. The message
+      // says so once and then goes; the re-read is what makes the row itself say it, and it
+      // is the disk that decides rather than a guess read off the wording of an error.
+      get().recheckPaths(paths)
       return
     }
     // Sources that vanished between the copy and the paste are skipped rather than
@@ -953,7 +1143,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     if (landed.length > 0) set({ selection: new Set(landed), selectedPath: landed[0] })
 
     const verb = mode === 'move' ? 'Moved' : 'Copied'
-    get().notify(`${verb} ${describeCount(result.moves.length)} to ${baseName(destination)}.`)
+    // Undoable, so the notice carries the way back beside the sentence saying what happened.
+    // The label comes off `undo` at render time rather than riding along here - see `notify`.
+    get().notify(
+      `${verb} ${describeCount(result.moves.length)} to ${baseName(destination)}.`,
+      'info',
+      true
+    )
   },
 
   moveIntoFolder: async (paths, relDir) => {
@@ -1002,8 +1198,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     const ids = rowIdsOf(landed, get().roots)
     if (ids.length > 0) set({ selection: new Set(ids), selectedPath: ids[0] })
 
-    if (failure) get().notify(failure, 'error')
-    else if (landed.length > 0) get().notify(`Duplicated ${describeCount(landed.length)}.`)
+    if (failure) {
+      get().notify(failure, 'error')
+      get().recheckPaths(paths)
+    } else if (landed.length > 0) {
+      get().notify(`Duplicated ${describeCount(landed.length)}.`, 'info', true)
+    }
   },
 
   trashPaths: async (paths) => {
@@ -1038,6 +1238,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ selection: new Set(), selectedPath: null })
     if (result.error) {
       get().notify(result.error, 'error')
+      // Same as a failed transfer: the folder gets re-read so the row says what the message
+      // only had time to.
+      get().recheckPaths(paths)
       return
     }
     if (result.trashed.length === 0) return
@@ -1045,6 +1248,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     const bin = platform?.isMac ? 'Trash' : platform?.isWindows ? 'Recycle Bin' : 'trash'
     get().notify(`Moved ${describeCount(result.trashed.length)} to the ${bin}.`)
   },
+
+  runUndo: async () => runReversal('undo'),
+  runRedo: async () => runReversal('redo'),
 
   createFolder: async (relDir, name) => {
     const { roots } = get()
@@ -1065,9 +1271,40 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     return null
   },
 
+  createFolderWithSelection: async (relDir, name, paths) => {
+    const { roots } = get()
+    if (roots.length === 0) return 'No library is open.'
+    if (paths.length === 0) return 'Nothing is selected.'
+
+    const made = await window.umakbang.createFolder(absolutePath(roots, relDir), name)
+    if (made.error || !made.path) return made.error ?? 'Could not create the folder.'
+
+    // Grafted on by hand before the move, the same way `createFolder` does it and for the
+    // same reason: nothing indexes an empty folder. It matters more here, because if the
+    // move then fails there would otherwise be a folder on disk with no row to show for it.
+    const rel = relativePath(roots, made.path)
+    if (rel) {
+      set({ extraDirs: new Set([...get().extraDirs, rel]) })
+      flushRevision()
+    }
+
+    // The ordinary move, so it notices, journals and records its own undo like any other.
+    await get().transferPaths(paths, made.path, 'move')
+
+    // The folder is what to select, not the files - they are a level down now and have no
+    // row in this folder at all, and `transferPaths` selects what landed. It is also what
+    // was just named, so it is what a rename, a drag or a Delete would sensibly mean next.
+    if (rel) set({ selection: new Set([`dir:${rel}`]), selectedPath: `dir:${rel}` })
+    return null
+  },
+
   renameEntry: async (path, newName, directory) => {
     const result = await window.umakbang.renameEntry(path, newName)
-    if (result.error) return result.error
+    if (result.error) {
+      // The rename popover shows the sentence; this is what makes the row behind it agree.
+      get().recheckPaths([path])
+      return result.error
+    }
     const landed = result.moves[0]
     if (!landed) return null
 
@@ -1098,58 +1335,74 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     track.name = name
     track.rel = lastSlash === -1 ? name : `${track.rel.slice(0, lastSlash)}/${name}`
     track.ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+    // The new name is a new spelling, so the field that says whether the two forms differ
+    // has to be worked out again rather than carried over. Deleted rather than set equal to
+    // the path, since `keyOf` reads its absence as "these are the same string".
+    const landedKey = pathKey(track.path)
+    if (landedKey === track.path) delete track.pathKey
+    else track.pathKey = landedKey
     byPath.delete(path)
     byPath.set(track.path, track)
 
     // Ratings, tags and detected values are keyed by path, so they have to follow the
     // file - a rename that dropped the detected tempo and key looked fine until the next
-    // launch, when both came back blank.
-    const rating = ratings[path]
+    // launch, when both came back blank. The old entries sit under the composed spelling
+    // of where the file was; the new ones go under the composed spelling of where it is.
+    const was = pathKey(path)
+    const now = keyOf(track)
+    const rating = ratings[was]
     if (rating !== undefined) {
       const nextRatings = { ...ratings }
-      delete nextRatings[path]
-      nextRatings[track.path] = rating
+      delete nextRatings[was]
+      nextRatings[now] = rating
       set({ ratings: nextRatings })
       void window.umakbang.setRating(path, 0)
       void window.umakbang.setRating(track.path, rating)
     }
-    if (tags[path]) {
-      const moved = tags[path]
+    if (tags[was]) {
+      const moved = tags[was]
       const next = { ...tags }
-      delete next[path]
-      next[track.path] = moved
+      delete next[was]
+      next[now] = moved
       set({ tags: next })
       void window.umakbang.setTags(path, [])
       void window.umakbang.setTags(track.path, moved)
     }
     const { notes } = get()
-    if (notes[path] !== undefined) {
-      const moved = notes[path]
+    if (notes[was] !== undefined) {
+      const moved = notes[was]
       const next = { ...notes }
-      delete next[path]
-      next[track.path] = moved
+      delete next[was]
+      next[now] = moved
       set({ notes: next })
       void window.umakbang.setNote(path, '')
       void window.umakbang.setNote(track.path, moved)
     }
-    const { detectedBpm, detectedKey } = get()
-    if (detectedBpm[path] !== undefined || detectedKey[path] !== undefined) {
+    const { detectedBpm, detectedKey, detectedKeyFit } = get()
+    if (detectedBpm[was] !== undefined || detectedKey[was] !== undefined) {
       const nextBpm = { ...detectedBpm }
       const nextKey = { ...detectedKey }
-      const bpm = nextBpm[path]
-      const musicalKey = nextKey[path]
-      delete nextBpm[path]
-      delete nextKey[path]
+      const nextFit = { ...detectedKeyFit }
+      const bpm = nextBpm[was]
+      const musicalKey = nextKey[was]
+      // The fit travels with the key it describes. `setDetectedKey` called without one
+      // *deletes* the stored fit (store.ts), so leaving it off here didn't merely fail to
+      // carry it - it erased it, and the column then drew a 0.13 reading as a certainty.
+      const fit = nextFit[was]
+      delete nextBpm[was]
+      delete nextKey[was]
+      delete nextFit[was]
       if (bpm !== undefined) {
-        nextBpm[track.path] = bpm
+        nextBpm[now] = bpm
         void window.umakbang.setDetectedBpm(track.path, bpm)
       }
       if (musicalKey !== undefined) {
-        nextKey[track.path] = musicalKey
-        void window.umakbang.setDetectedKey(track.path, musicalKey)
+        nextKey[now] = musicalKey
+        if (fit !== undefined) nextFit[now] = fit
+        void window.umakbang.setDetectedKey(track.path, musicalKey, fit)
       }
       void window.umakbang.clearDetected([path])
-      set({ detectedBpm: nextBpm, detectedKey: nextKey })
+      set({ detectedBpm: nextBpm, detectedKey: nextKey, detectedKeyFit: nextFit })
     }
 
     set({ selectedPath: track.path, selection: new Set([track.path]) })
@@ -1157,8 +1410,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     return null
   },
 
-  notify: (message, tone = 'info') =>
-    set({ notice: { message, tone, nonce: (get().notice?.nonce ?? 0) + 1 } }),
+  notify: (message, tone = 'info', undoable = false) =>
+    set({
+      notice: { message, tone, nonce: (get().notice?.nonce ?? 0) + 1, ...(undoable ? { undoable } : {}) }
+    }),
 
   dismissNotice: () => set({ notice: null }),
 
@@ -1283,10 +1538,18 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // Also arrives as `library:roots` from the scan main kicked off, which sets `scanning`
       // with it. Set here too so the library appears whichever lands first.
       roots: settings.roots,
+      // Canonical already, like `hydrate`'s: an import and a bundle restore both come back
+      // out of main's own store, which composes every key on the way in.
       tags: data.tags,
       ratings: data.ratings,
+      // Notes and the key fit are adopted too. They were left out, so after an import or a
+      // bundle restore the renderer went on showing the notes it had while main held the
+      // imported ones, until the next reload put them back in step - which looks exactly
+      // like the import having silently skipped them.
+      notes: data.notes,
       detectedBpm: data.detectedBpm,
       detectedKey: data.detectedKey,
+      detectedKeyFit: data.detectedKeyFit,
       typeFilter: settings.typeFilter ?? { kinds: [], exts: [] },
       importing: null
     })
@@ -1317,8 +1580,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // Clicking the star you're already on clears the rating, which is the usual idiom.
     const clamped = Math.max(0, Math.min(5, Math.round(rating)))
     const next = { ...get().ratings }
-    if (clamped === 0) delete next[path]
-    else next[path] = clamped
+    const key = pathKey(path)
+    if (clamped === 0) delete next[key]
+    else next[key] = clamped
     set({ ratings: next })
     void window.umakbang.setRating(path, clamped)
   },
@@ -1334,8 +1598,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
      * question about the trimmed value, so a note of nothing but spaces still removes itself.
      * `store.ts` trims on the way to disk, which is where a tidy value actually matters.
      */
-    if (note.trim()) next[path] = note
-    else delete next[path]
+    const key = pathKey(path)
+    if (note.trim()) next[key] = note
+    else delete next[key]
     set({ notes: next })
     // The main store debounces the write to disk; this is per keystroke by design, so the
     // note on screen is never behind what was typed.
@@ -1422,17 +1687,20 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
     for (const track of tracks) {
       if (!track.playable) continue
+      // Raw: `clearDetected` and `forgetAnalysis` both name files, not map entries, and main
+      // composes on its own side.
       forget.push(track.path)
 
       // Only what analysis produced is cleared. A tempo off an ACID chunk or an ID3 tag
       // was never in these maps, and re-deriving it from the audio would be replacing a
       // fact with a guess.
-      if (nextBpm[track.path] !== undefined) {
-        delete nextBpm[track.path]
+      const key = keyOf(track)
+      if (nextBpm[key] !== undefined) {
+        delete nextBpm[key]
         track.bpm = undefined
       }
-      if (nextKey[track.path] !== undefined) {
-        delete nextKey[track.path]
+      if (nextKey[key] !== undefined) {
+        delete nextKey[key]
         track.musicalKey = undefined
       }
       queued++
@@ -1457,7 +1725,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   reprocessCached: () => {
-    const { detectedBpm, detectedKey, byPath } = get()
+    const { detectedBpm, detectedKey } = get()
     const nextBpm = { ...detectedBpm }
     const nextKey = { ...detectedKey }
     const forget: string[] = []
@@ -1465,16 +1733,24 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
     // Only files that actually have an analysed value: everything else either has nothing
     // to replace or carries a figure the file itself declared.
-    for (const path of new Set([...Object.keys(detectedBpm), ...Object.keys(detectedKey)])) {
-      const track = byPath.get(path)
-      if (!track || !track.playable) continue
-      forget.push(path)
-      if (nextBpm[path] !== undefined) {
-        delete nextBpm[path]
+    //
+    // Walked from the index rather than from the maps' keys, and that is a fix rather than a
+    // tidy-up. The keys are composed and `byPath` is keyed by the raw path, so looking a key
+    // up in it missed every file whose name is not already composed - silently, since a miss
+    // here just skips the file. Going the other way each track carries both spellings, and it
+    // is two object reads per track instead of a Map lookup per key.
+    for (const track of get().tracks) {
+      if (!track.playable) continue
+      const key = keyOf(track)
+      if (nextBpm[key] === undefined && nextKey[key] === undefined) continue
+      // Raw, like `recalculateAnalysis`: these name files.
+      forget.push(track.path)
+      if (nextBpm[key] !== undefined) {
+        delete nextBpm[key]
         track.bpm = undefined
       }
-      if (nextKey[path] !== undefined) {
-        delete nextKey[path]
+      if (nextKey[key] !== undefined) {
+        delete nextKey[key]
         track.musicalKey = undefined
       }
       tracks.push(track)
@@ -1502,15 +1778,18 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   applyAnalysis: (path, analysis) => {
+    // `path` arrives raw - it came off a Track and went to the decoder - so it looks the row
+    // up as itself and keys the maps by the track's own composed spelling.
     const track = get().byPath.get(path)
     if (!track) return
+    const key = keyOf(track)
     let changed = false
 
     // Never overwrite what the file itself declared: a tag or an ACID chunk is
     // authoritative and analysis is only the fallback for files that carry neither.
     if (analysis.bpm !== undefined && track.bpm === undefined) {
       track.bpm = analysis.bpm
-      set({ detectedBpm: { ...get().detectedBpm, [path]: analysis.bpm } })
+      set({ detectedBpm: { ...get().detectedBpm, [key]: analysis.bpm } })
       void window.umakbang.setDetectedBpm(path, analysis.bpm)
       changed = true
     }
@@ -1519,9 +1798,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       const fits = { ...get().detectedKeyFit }
       // A key from the user's own tool arrives with no fit, and last run's number would be
       // describing an answer this one has just replaced.
-      if (analysis.keyFit === undefined) delete fits[path]
-      else fits[path] = analysis.keyFit
-      set({ detectedKey: { ...get().detectedKey, [path]: analysis.musicalKey }, detectedKeyFit: fits })
+      if (analysis.keyFit === undefined) delete fits[key]
+      else fits[key] = analysis.keyFit
+      set({ detectedKey: { ...get().detectedKey, [key]: analysis.musicalKey }, detectedKeyFit: fits })
       void window.umakbang.setDetectedKey(path, analysis.musicalKey, analysis.keyFit)
       changed = true
     }
@@ -1534,7 +1813,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // authoritative, analysis is only a fallback.
     if (!track || track.bpm !== undefined) return
     track.bpm = bpm
-    set({ detectedBpm: { ...get().detectedBpm, [path]: bpm } })
+    set({ detectedBpm: { ...get().detectedBpm, [keyOf(track)]: bpm } })
     void window.umakbang.setDetectedBpm(path, bpm)
     bumpRevision()
   },
@@ -1542,8 +1821,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   updateTags: (path, tags) => {
     const cleaned = [...new Set(tags.map((t) => t.trim()).filter(Boolean))]
     const next = { ...get().tags }
-    if (cleaned.length === 0) delete next[path]
-    else next[path] = cleaned
+    const key = pathKey(path)
+    if (cleaned.length === 0) delete next[key]
+    else next[key] = cleaned
     set({ tags: next })
     void window.umakbang.setTags(path, cleaned)
   }
@@ -1554,8 +1834,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
  *
  * The index follows the files rather than waiting on a rescan, which on a library this
  * size would take the better part of a minute for a change whose shape we already know.
- * Ratings, tags and analysed tempo are keyed by path, so they have to follow too - moved
- * they go with the file, copied they are shared with the copy.
+ * Ratings, tags, notes and analysed tempo are keyed by path, so they have to follow too -
+ * moved they go with the file, copied they are shared with the copy.
  */
 function applyTransfer(result: TransferResult, mode: TransferMode): void {
   const store = useLibrary.getState()
@@ -1568,12 +1848,20 @@ function applyTransfer(result: TransferResult, mode: TransferMode): void {
   const { byPath, roots } = store
   const nextRatings = { ...store.ratings }
   const nextTags = { ...store.tags }
+  const nextNotes = { ...store.notes }
   const nextBpm = { ...store.detectedBpm }
   const nextKey = { ...store.detectedKey }
+  const nextFit = { ...store.detectedKeyFit }
   const moving = mode === 'move'
   let touched = false
 
   for (const { from, track } of result.items) {
+    // Where the file was, and where it is now, as the maps spell them. `from` itself stays
+    // raw wherever it goes back out over IPC or into `byPath`, which is keyed by the path
+    // the filesystem answers to.
+    const fromKey = pathKey(from)
+    const toKey = keyOf(track)
+
     // What has already been read off this file comes with it, or the row lands with an
     // empty duration and tempo until something probes it again.
     const before = byPath.get(from)
@@ -1592,46 +1880,66 @@ function applyTransfer(result: TransferResult, mode: TransferMode): void {
       })
     }
 
-    const rating = nextRatings[from]
+    const rating = nextRatings[fromKey]
     if (rating !== undefined) {
       if (moving) {
-        delete nextRatings[from]
+        delete nextRatings[fromKey]
         void window.umakbang.setRating(from, 0)
       }
-      nextRatings[track.path] = rating
+      nextRatings[toKey] = rating
       void window.umakbang.setRating(track.path, rating)
       touched = true
     }
 
-    const applied = nextTags[from]
+    const applied = nextTags[fromKey]
     if (applied) {
       if (moving) {
-        delete nextTags[from]
+        delete nextTags[fromKey]
         void window.umakbang.setTags(from, [])
       }
-      nextTags[track.path] = applied
+      nextTags[toKey] = applied
       void window.umakbang.setTags(track.path, applied)
+      touched = true
+    }
+
+    // The note follows too. `renameEntry` has always carried it and this did not, so the
+    // same file kept its note when renamed and lost it when dragged one folder across -
+    // which reads as the app eating something the user typed, because it is. It is the one
+    // value here that cannot be recomputed from the audio.
+    const note = nextNotes[fromKey]
+    if (note !== undefined) {
+      if (moving) {
+        delete nextNotes[fromKey]
+        void window.umakbang.setNote(from, '')
+      }
+      nextNotes[toKey] = note
+      void window.umakbang.setNote(track.path, note)
       touched = true
     }
 
     // Both detected values follow the file the same way - and on a move the old path's
     // persisted entries are cleared too, or umakbang-data.json accumulates readings for
     // paths that no longer exist while the moved file loses its own on the next launch.
-    const detectedTempo = nextBpm[from]
-    const detectedMusicalKey = nextKey[from]
+    const detectedTempo = nextBpm[fromKey]
+    const detectedMusicalKey = nextKey[fromKey]
+    // Carried for the same reason as in `renameEntry`: `setDetectedKey` with no fit deletes
+    // the stored one, so a moved file's key lost the measurement that says how sure it was.
+    const detectedFit = nextFit[fromKey]
     if (detectedTempo !== undefined || detectedMusicalKey !== undefined) {
       if (moving) {
-        delete nextBpm[from]
-        delete nextKey[from]
+        delete nextBpm[fromKey]
+        delete nextKey[fromKey]
+        delete nextFit[fromKey]
         void window.umakbang.clearDetected([from])
       }
       if (detectedTempo !== undefined) {
-        nextBpm[track.path] = detectedTempo
+        nextBpm[toKey] = detectedTempo
         void window.umakbang.setDetectedBpm(track.path, detectedTempo)
       }
       if (detectedMusicalKey !== undefined) {
-        nextKey[track.path] = detectedMusicalKey
-        void window.umakbang.setDetectedKey(track.path, detectedMusicalKey)
+        nextKey[toKey] = detectedMusicalKey
+        if (detectedFit !== undefined) nextFit[toKey] = detectedFit
+        void window.umakbang.setDetectedKey(track.path, detectedMusicalKey, detectedFit)
       }
       touched = true
     }
@@ -1642,8 +1950,10 @@ function applyTransfer(result: TransferResult, mode: TransferMode): void {
     useLibrary.setState({
       ratings: nextRatings,
       tags: nextTags,
+      notes: nextNotes,
       detectedBpm: nextBpm,
-      detectedKey: nextKey
+      detectedKey: nextKey,
+      detectedKeyFit: nextFit
     })
   }
 
@@ -1737,6 +2047,139 @@ function withoutDirs(dirs: Set<string>, removed: string[]): Set<string> {
 
 function describeCount(count: number): string {
   return count === 1 ? '1 item' : `${count.toLocaleString()} items`
+}
+
+/** The second half of "Restored 39 of 43." - why the other four stayed where they were. */
+const UNDO_REFUSALS: Record<UndoOutcome['failures'][number]['reason'], (count: number) => string> = {
+  changed: (count) => `${count} changed on disk since.`,
+  occupied: (count) => `${count} could not go back - something is already there.`,
+  missing: (count) => `${count} ${count === 1 ? 'is' : 'are'} no longer there.`,
+  error: (count) => `${count} could not be put back.`
+}
+
+/**
+ * What a partial undo refused, in a sentence.
+ *
+ * One failure says which file and why, because that is the whole answer. More than one is
+ * grouped by reason and counted: reversing a move of forty files can refuse a dozen of them,
+ * and a notice holding a dozen sentences is one nobody finishes reading.
+ */
+/**
+ * One press of Undo or of Redo.
+ *
+ * Both directions are this function because on this side they are identical: the same
+ * `TransferResult` comes back, goes through the same `applyTransfer`, sweeps the same
+ * hand-held folders and reports the same way. Only which call is made and which summary is
+ * read differ, so a second copy of all of that would be a second thing to keep in step.
+ *
+ * At module level rather than in the store object because it is called from two actions and
+ * reads the store the way `applyTransfer` beside it does.
+ */
+async function runReversal(direction: 'undo' | 'redo'): Promise<void> {
+  const store = useLibrary.getState()
+  const pending = direction === 'undo' ? store.undo : store.redo
+  if (!pending || store.undoRunning) return
+
+  const set = useLibrary.setState
+  const get = useLibrary.getState
+
+  set({ undoRunning: true, undoProgress: { done: 0, total: pending.fileCount } })
+  // One channel for both, since one readout shows whichever is running.
+  const off = window.umakbang.onUndoProgress((undoProgress) => set({ undoProgress }))
+
+  try {
+    const { result, outcome } =
+      direction === 'undo'
+        ? await window.umakbang.runUndo(pending.id)
+        : await window.umakbang.runRedo(pending.id)
+
+    // Always as a move, whatever the record reversed. `applyTransfer` only honours
+    // `result.removed` when it is moving, and every reversal removes files from wherever the
+    // operation put them - the copies it trashes as much as the originals it puts back.
+    applyTransfer(result, 'move')
+
+    /**
+     * A copy of a folder that held nothing indexable leaves no rows behind, only a node
+     * held by hand in `extraDirs` - and the reverse of a copy carries `removed` and
+     * nothing else, so `applyTransfer`'s cleanup, which keys off `result.moves`, never
+     * sees the folder go. An undone New Folder is the same shape.
+     *
+     * So the disk is asked which of the hand-held folders are still there, rather than the
+     * outcome, which does not name them. There are only ever as many of these as have been
+     * pasted or created since the last scan, and this runs once per press.
+     */
+    const { extraDirs, roots } = get()
+    if (extraDirs.size > 0 && roots.length > 0) {
+      const held = [...extraDirs]
+      const alive = new Set(
+        await window.umakbang.directoriesExist(held.map((rel) => absolutePath(roots, rel)))
+      )
+      const gone = held.filter((rel) => !alive.has(absolutePath(roots, rel)))
+      // The same drop `trashPaths` does, so a folder takes anything held beneath it.
+      if (gone.length > 0) {
+        set({ extraDirs: withoutDirs(get().extraDirs, gone) })
+        flushRevision()
+      }
+    }
+
+    // Where the files went, so it can be checked rather than believed. Only the kinds that
+    // put something somewhere report one; a copy's undo leaves nothing to go and look at.
+    if (outcome.landedRel !== undefined) {
+      get().setView({ mode: 'folder', dir: outcome.landedRel })
+      // The query goes, the way it does in `revealTrack`: arriving at the folder with a
+      // search still in force shows the search's hits and not the folder, so the files that
+      // just moved would be exactly what is not on screen. `showView` has already emptied
+      // the selection, so what landed is put in afterwards rather than before.
+      const landed = rowIdsOf(result.moves, get().roots)
+      set({
+        query: '',
+        recursive: false,
+        ...(landed.length > 0 ? { selection: new Set(landed), selectedPath: landed[0] } : {})
+      })
+    }
+
+    const verb = direction === 'undo' ? 'Put' : 'Moved'
+    if (outcome.cancelled) {
+      get().notify(`Stopped. ${verb} ${outcome.restored} of ${outcome.total} back.`)
+    } else if (outcome.failures.length > 0) {
+      // An undone New Folder moves no files, so there is nothing to count and "Restored 0
+      // of 0" in front of the reason says nothing anybody can act on.
+      get().notify(
+        outcome.total === 0
+          ? describeUndoFailures(outcome.failures)
+          : `Restored ${outcome.restored} of ${outcome.total}. ${describeUndoFailures(outcome.failures)}`,
+        'error'
+      )
+    } else if (pending.kind === 'newFolder') {
+      get().notify('Removed the folder again.')
+    } else if (pending.kind === 'copy') {
+      // A copy is undone by trashing the copies, so "put back" is the one thing it did
+      // not do - it took away, and the count is of what went rather than what returned.
+      get().notify(`Removed ${describeCount(outcome.restored)}.`)
+    } else {
+      get().notify(
+        direction === 'undo'
+          ? `Put ${describeCount(outcome.restored)} back.`
+          : `Moved ${describeCount(outcome.restored)} forward again.`
+      )
+    }
+  } finally {
+    off()
+    // `undo` and `redo` are deliberately not cleared here. `undo` used to be, because the
+    // record was spent and there was never another behind it - but with a stack there
+    // usually is, and main has already sent both states from inside the handler, before this
+    // invoke resolved. Clearing here would land *after* those messages and wipe the next
+    // record's affordance, so a second press would find nothing. Main owns what is pending;
+    // this only owns whether a pass is in flight.
+    set({ undoRunning: false, undoProgress: null })
+  }
+}
+
+function describeUndoFailures(failures: UndoOutcome['failures']): string {
+  if (failures.length === 1) return failures[0].message
+  const counts = new Map<UndoOutcome['failures'][number]['reason'], number>()
+  for (const failure of failures) counts.set(failure.reason, (counts.get(failure.reason) ?? 0) + 1)
+  return [...counts].map(([reason, count]) => UNDO_REFUSALS[reason](count)).join(' ')
 }
 
 /**
@@ -1852,8 +2295,15 @@ export function connectLibraryEvents(): () => void {
     // Both channels existed for years with no listener: a scanner crash emptied the
     // library in silence, and a declined folder pick closed its dialog and said nothing.
     window.umakbang.onLibraryError(({ message }) => useLibrary.getState().notify(message, 'error')),
-    window.umakbang.onLibraryNotice(({ message }) => useLibrary.getState().notify(message))
+    window.umakbang.onLibraryNotice(({ message }) => useLibrary.getState().notify(message)),
+    window.umakbang.onUndoState((undo) => useLibrary.setState({ undo })),
+    window.umakbang.onRedoState((redo) => useLibrary.setState({ redo }))
   ]
+  // Asked for as well as subscribed to. The record lives in main and survives a renderer
+  // reload - Ctrl+R is Rescan Library, one keystroke from the Ctrl+Z that is about to be
+  // wanted - so a page that only listened would show no way back until the next operation.
+  void window.umakbang.undoState().then((undo) => useLibrary.setState({ undo }))
+  void window.umakbang.redoState().then((redo) => useLibrary.setState({ redo }))
   void store.hydrate()
   return () => unsubscribes.forEach((off) => off())
 }

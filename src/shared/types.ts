@@ -5,8 +5,29 @@ export type TrackKind = 'audio' | 'midi' | 'project'
 
 /** One file in the library. Metadata fields are filled in by the background probe pass. */
 export interface Track {
-  /** Absolute path on disk. Doubles as the stable identity of a row. */
+  /**
+   * Absolute path on disk, exactly as the filesystem gave it. Doubles as the stable identity
+   * of a row.
+   *
+   * Never Unicode-normalized, and that is measured rather than assumed: **NTFS is
+   * normalization-sensitive.** A file created with a decomposed (NFD) name opens only via its
+   * decomposed path - the composed one returns ENOENT - and `readdir` hands the decomposed
+   * form back. Composing this would make such a file list in the explorer and then refuse to
+   * open, play, move or trash, which is a far worse failure than the one composing was meant
+   * to fix. `pathKey` below is where the composed spelling lives instead.
+   */
   path: string
+  /**
+   * The composed (NFC) spelling of `path`, for looking this file up in the path-keyed maps -
+   * tags, ratings, notes, detected tempo and key, the waveform cache.
+   *
+   * **Absent whenever it would equal `path`,** which is every all-ASCII name and so ~99% of a
+   * library. That is the whole design of the field: `src/shared/path-key.ts` returns the
+   * argument unchanged for an ASCII string, so the common row carries no second string and no
+   * extra property, and the 280.1MB → 187.1MB the index interning bought back is not quietly
+   * spent again on a copy of every path. Read it as `track.pathKey ?? track.path`.
+   */
+  pathKey?: string
   /** Path relative to the library root, using forward slashes. */
   rel: string
   /** Absolute path of the containing directory. */
@@ -159,13 +180,32 @@ export interface Settings {
   columns: ColumnState[]
   /** Where browsing was when the app last closed, so it reopens in place. */
   lastDir: string
-  lastViewMode: 'folder' | 'rated' | 'stats' | 'settings' | 'contracts'
+  lastViewMode: 'folder' | 'rated' | 'stats' | 'settings' | 'contracts' | 'videos'
 
   /** Last window position and size, restored on launch. */
   windowBounds: { x: number; y: number; width: number; height: number } | null
   windowMaximized: boolean
+  /**
+   * Rebound keys, by action id. Anything absent uses its default.
+   *
+   * Only the keys umakbang invented are in here - see `src/shared/shortcuts.ts` for why the
+   * traditional chords are deliberately not offered.
+   */
+  shortcuts: Record<string, string>
+
   /** Width of the folder sidebar on the left, in pixels. */
   sidebarWidth: number
+  /**
+   * Where the sidebar splits, in pixels: how much room the tag chips get before the folder
+   * tree starts.
+   *
+   * It was a fixed 92px cap, chosen so the strip could never grow enough to squeeze the
+   * transport off the bottom. That reasoning holds for a *default* and not for a limit - how
+   * many tags somebody has is their business, and a producer who tags heavily was scrolling a
+   * three-line window while the tree below had the whole pane. Dragging it is also how you
+   * temporarily give the tree everything, which is the other half of the same complaint.
+   */
+  tagsHeight: number
   /** Width of the now-playing / visualizer panel on the right, in pixels. */
   panelWidth: number
   /**
@@ -197,6 +237,17 @@ export interface Settings {
    * while muted lifts the mute rather than leaving you dragging something inaudible.
    */
   volume: number
+  /**
+   * Where playback comes out. Null is the system default, which is what follows the OS.
+   *
+   * The label is stored beside the id, and it is not decoration. A device id is only
+   * meaningful while the device is there, so once an interface is unplugged the id names
+   * nothing at all - and a picker that fell silently back to the default would be the exact
+   * failure this setting exists to make legible. The saved name is what lets the app say
+   * *"Scarlett 2i2 isn't connected"* rather than showing "System default" as though the user
+   * had chosen it.
+   */
+  outputDevice: { id: string; label: string } | null
   /** User accent / background overrides; null means "use the stylesheet default". */
   themePrimary: string | null
   themeBackground: string | null
@@ -211,6 +262,8 @@ export interface Settings {
    * taste and two was not enough. Empty means `DEFAULT_VISUALIZER_STOPS`.
    */
   visualizerStops: string[]
+  /** Empty space above the visualizers' established 0dB point, in decibels. */
+  visualizerHeadroomDb: number
   /**
    * How the waveforms are coloured.
    *
@@ -243,6 +296,8 @@ export interface Settings {
    * are the same handful of folders, and keeping two lists meant adding each one twice.
    */
   quickMove: QuickMoveTarget[]
+  /** The OS Downloads staging view starts as a removable Quick access pin. */
+  downloadsQuickAccess: boolean
   /**
    * Folders that hold music the user did not write, as root-relative paths. A folder
    * excludes everything beneath it too. Sample packs and one-shot libraries outnumber
@@ -340,6 +395,17 @@ export interface Settings {
   analysisConcurrency: number
 
   /**
+   * How many file operations Ctrl+Z can step back through, 1..200.
+   *
+   * A cap exists at all because a record holds one entry per file it touched, and pasting a
+   * large folder is tens of thousands of them - an unbounded history would keep every one of
+   * those alive for the life of the process. Where the cap should sit is not something the
+   * app can know: 25 covers a normal session of tidying, and somebody moving a library about
+   * in long batches wants more. Turning it down also frees whatever the dropped records held.
+   */
+  undoDepth: number
+
+  /**
    * LALAL.AI licence key, for the "Split vocals" action.
    *
    * A credential, so it is left out of a settings export along with the library root and
@@ -422,6 +488,95 @@ export interface TrashResult {
   removed: string[]
 }
 
+/* ------------------------------------------------------------------ undo */
+
+/**
+ * Which operation an undo record reverses.
+ *
+ * Trash is deliberately absent. `shell.trashItem` has no reliable cross-platform way back,
+ * and an Undo that sometimes does nothing teaches people that none of them work - so a
+ * delete carries no Undo affordance at all rather than a dead one.
+ */
+export type UndoKind = 'move' | 'copy' | 'rename' | 'newFolder'
+
+/**
+ * One file an operation left somewhere, with the stamp it left it with.
+ *
+ * `size` and `mtimeMs` are the whole of "never reverse something done outside umakbang". A
+ * move carries both across untouched, so a file whose stamp still matches is one nothing
+ * has written to since umakbang put it there. A mismatch is refused and reported.
+ */
+export interface UndoEntry {
+  /** Where the file is now. */
+  at: string
+  /** Where it was before. Absent for a copy, which came from nowhere. */
+  from?: string
+  size: number
+  mtimeMs: number
+}
+
+/** The last operation, in enough detail to be run backwards. One of these at a time. */
+export interface UndoRecord {
+  id: string
+  kind: UndoKind
+  /** The top-level entries the operation handled, exactly as `TransferResult` reported them. */
+  moves: Array<{ from: string; to: string; directory: boolean }>
+  items: UndoEntry[]
+  /** The folder the operation started from, so the undo can say where things went back to. */
+  originDir: string
+  at: number
+}
+
+/**
+ * What the menu, the toolbar and the notice all say about the pending undo.
+ *
+ * The label is built once, in main, precisely so those three cannot word it three different
+ * ways - "Undo Move (43 files)" is one sentence about one record, not three renderings of it.
+ */
+export interface UndoSummary {
+  id: string
+  kind: UndoKind
+  label: string
+  fileCount: number
+  /**
+   * How many operations are on the stack, this one included.
+   *
+   * Only so the button can say there is more than one press in it. Undo runs the newest and
+   * nothing else, so this is never a thing to pick from - a count, not an index.
+   */
+  depth: number
+}
+
+/** How far through an undo is, reported per file so a long one can be watched. */
+export interface UndoProgress {
+  done: number
+  total: number
+}
+
+/**
+ * What an undo managed.
+ *
+ * Partial failure is reported rather than swallowed: "Restored 39 of 43. 4 changed on disk
+ * since." is the sentence this exists to make possible.
+ */
+export interface UndoOutcome {
+  restored: number
+  total: number
+  failures: Array<{
+    path: string
+    /**
+     * `changed` - the file is not the one umakbang put there. `occupied` - something is at
+     * the path it would go back to. `missing` - it is no longer where it was left.
+     */
+    reason: 'changed' | 'occupied' | 'missing' | 'error'
+    message: string
+  }>
+  /** Where the files went back to, root-relative, when there is somewhere to look. */
+  landedRel?: string
+  /** True when the user stopped it part way. What had already been put back stays put back. */
+  cancelled: boolean
+}
+
 export interface UserData {
   settings: Settings
   /** Absolute path -> tags applied to it. */
@@ -467,6 +622,7 @@ export interface PlatformInfo {
   revealLabel: string
   homeDir: string
   musicDir: string
+  downloadsDir: string
 }
 
 /**
@@ -526,7 +682,12 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sized for the panes that earn the space: a sidebar wide enough for nested folder names
   // without truncating them, and a now-playing panel wide enough for the visualizers to be
   // readable rather than decorative.
+  // Empty means every key is where `SHORTCUT_ACTIONS` puts it.
+  shortcuts: {},
   sidebarWidth: 345,
+  // The cap the tag strip used to be fixed at, kept as the starting point - it is a good
+  // default and a bad limit. See `tagsHeight`.
+  tagsHeight: 92,
   panelWidth: 576,
   playerHeight: 118,
   playerSplit: 318,
@@ -538,15 +699,20 @@ export const DEFAULT_SETTINGS: Settings = {
   themePrimary: null,
   themeBackground: null,
   visualizerStops: [],
+  visualizerHeadroomDb: 6,
   waveformTint: 'spectrum',
   typeFilter: { kinds: [], exts: [] },
   collapseRenders: false,
   quickMove: [],
+  downloadsQuickAccess: true,
   randomExcludeDirs: [],
   randomFavourUnrated: false,
   visualizerOnly: false,
   alwaysOnTop: false,
   volume: 1,
+  // Whatever the OS is set to. Anything else would be this machine's guess about hardware
+  // it has not looked at yet.
+  outputDevice: null,
   analysisTag: null,
   detectKeyFromAudio: true,
   // Essentia by default. It was `builtin` for two reasons and neither holds any more: the
@@ -565,6 +731,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Analysis is off the main thread in a worker, so the ceiling is cores rather than
   // responsiveness, and 2 left a library crawling through its own backlog.
   analysisConcurrency: 10,
+  // Enough for a session's worth of tidying without holding a history nobody will walk back
+  // through. See `undoDepth` for why there is a ceiling on it at all.
+  undoDepth: 25,
   lalalKey: '',
   bundleExportDir: '',
   stemOutputDir: '',

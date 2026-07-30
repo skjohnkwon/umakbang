@@ -19,9 +19,11 @@ import {
   Loader2,
   MousePointerClick,
   Pin,
+  Redo2,
   Repeat,
   RefreshCw,
   Star,
+  Undo2,
   Wand2,
   Library
 } from 'lucide-react'
@@ -60,6 +62,7 @@ import {
 } from '@/lib/random-scope'
 import { cn } from '@/lib/utils'
 import { KIND_LABELS, baseName } from '@/lib/format'
+import { shortcutKey, shortcutLabel } from '@shared/shortcuts'
 
 export function Toolbar({
   rows,
@@ -83,6 +86,15 @@ export function Toolbar({
   const scanning = useLibrary((s) => s.scanning)
   const selectionCount = useLibrary((s) => s.selection.size)
   const stemJob = useLibrary((s) => s.stemJob)
+  // The durable way back. The menu carries it too, but a menu bar is not where a Windows
+  // user looks for the thing they just did, so the button sits with Back and Forward - which
+  // is the other control on this strip that means "take me to before".
+  const undo = useLibrary((s) => s.undo)
+  const redo = useLibrary((s) => s.redo)
+  const undoRunning = useLibrary((s) => s.undoRunning)
+  const undoProgress = useLibrary((s) => s.undoProgress)
+  const runUndo = useLibrary((s) => s.runUndo)
+  const runRedo = useLibrary((s) => s.runRedo)
 
   const canGoUp = view.mode === 'folder' && view.dir !== ''
   const parentDir = canGoUp && view.mode === 'folder' ? parentOf(view.dir) : ''
@@ -125,6 +137,78 @@ export function Toolbar({
             <ArrowRight className="h-3.5 w-3.5" />
           </Button>
         </Hint>
+
+        {/* Absent rather than disabled when there is nothing to reverse, which is most of
+            the time: a permanently greyed button is chrome nobody reads, and its arriving is
+            what says an operation was recorded. The label is main's single wording of the
+            record - `title` rather than a `Hint`, because it already is the whole sentence
+            and a tooltip repeating it says nothing twice. */}
+        {undo !== null && (
+          <>
+            <Button
+              variant="ghost"
+              /* Grows a number when there is more than one press in it, the way Clear does.
+                 Without it a stack of operations looks exactly like a single one, and the
+                 whole point of the stack is that the second press does something. */
+              size={undo.depth > 1 ? 'sm' : 'icon-sm'}
+              className={cn(undo.depth > 1 && 'gap-1 px-1.5')}
+              aria-label={undo.label}
+              title={
+                undo.depth > 1
+                  ? `${undo.label} - ${undo.depth} operations to step back through`
+                  : undo.label
+              }
+              disabled={undoRunning}
+              onClick={() => void runUndo()}
+            >
+              {undoRunning ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Undo2 className="h-3.5 w-3.5" />
+              )}
+              {undo.depth > 1 && !undoRunning && (
+                <span className="tnum text-[11px]">{undo.depth}</span>
+              )}
+            </Button>
+            {/* Stopping is between files, never inside one, so this is offered for as long as
+                there are files left to decide about. The count is on it rather than beside
+                it: 30px of strip has no room for a second status text. */}
+            {undoRunning && (
+              <Button
+                variant="subtle"
+                size="sm"
+                className="tnum"
+                onClick={() => void window.umakbang.cancelUndo()}
+              >
+                {undoProgress
+                  ? `Cancel ${undoProgress.done}/${undoProgress.total}`
+                  : 'Cancel'}
+              </Button>
+            )}
+          </>
+        )}
+
+        {/* Absent until something has been undone, on the same rule as Undo beside it - and
+            for redo that is nearly always, so a permanent greyed arrow would be chrome that
+            never does anything. Not shown mid-run either: the reversal in flight is about to
+            change what there is to redo. */}
+        {redo !== null && !undoRunning && (
+          <Button
+            variant="ghost"
+            size={redo.depth > 1 ? 'sm' : 'icon-sm'}
+            className={cn(redo.depth > 1 && 'gap-1 px-1.5')}
+            aria-label={redo.label}
+            title={
+              redo.depth > 1
+                ? `${redo.label} - ${redo.depth} operations to step forward through`
+                : redo.label
+            }
+            onClick={() => void runRedo()}
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+            {redo.depth > 1 && <span className="tnum text-[11px]">{redo.depth}</span>}
+          </Button>
+        )}
       </div>
 
       <Hint
@@ -147,6 +231,12 @@ export function Toolbar({
           <CornerLeftUp className="h-3.5 w-3.5" />
         </Button>
       </Hint>
+
+      {/* Left of the path, with the other controls that act on where you are standing rather
+          than on the whole library: Up leaves this folder, Refresh re-reads it, New folder
+          makes one inside it. The toggles after the path are about the whole library. */}
+      <RefreshFolderButton />
+      <NewFolderButton />
 
       <div className="flex min-w-0 flex-1 items-center gap-1 text-[12px]">
         {view.mode === 'rated' && (
@@ -227,8 +317,6 @@ export function Toolbar({
 
       <PlaybackToggles />
       <ClearFiltersButton />
-      <NewFolderButton />
-      <RefreshFolderButton />
       <RecalculateButton rows={rows} />
       <RandomBeatButton />
       <AudioOnlyToggle />
@@ -359,6 +447,7 @@ function RefreshFolderButton(): React.JSX.Element {
         size="icon-sm"
         aria-label="Refresh folder"
         disabled={!dir}
+        className="shrink-0"
         onClick={() => {
           if (!dir) return
           setSpinning(true)
@@ -381,9 +470,10 @@ function RefreshFolderButton(): React.JSX.Element {
 function RandomBeatButton(): React.JSX.Element {
   const empty = useLibrary((s) => s.tracks.length === 0)
   const playRandom = usePlayer((s) => s.playRandom)
+  const key = useLibrary((s) => shortcutLabel(shortcutKey(s.settings.shortcuts, 'random')))
 
   return (
-    <Hint label="Play a random beat and go to it" side="bottom">
+    <Hint label={`Play a random beat and go to it (${key})`} side="bottom">
       <Button
         variant="ghost"
         size="icon-sm"

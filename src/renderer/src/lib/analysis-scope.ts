@@ -20,6 +20,7 @@
  */
 
 import type { LibraryRoot } from '@shared/types'
+import { pathKey } from '@shared/path-key'
 import { absolutePath } from '@/lib/paths'
 
 export interface AnalysisScope {
@@ -44,8 +45,19 @@ export function inAnalysisScope(relDir: string, scope: AnalysisScope): boolean {
   const segments = relDir ? relDir.split('/') : []
 
   // Nearest first: the deepest folder that has an opinion is the one that holds.
+  //
+  // Composed before it is looked up, because this path is built by string arithmetic - a
+  // root's stored path joined to segments of `relDir` - rather than taken off a Track, so
+  // nothing upstream of it has been through `pathKey`.
+  //
+  // That closes only half the gap. `Track.rel` and `Track.relDir` are *not* canonical: the
+  // scanner builds them from what `readdir` handed back, so a folder whose name is stored
+  // decomposed on disk produces decomposed segments, and composing the joined result gives a
+  // key the tag was never filed under. Closing that means canonicalising the relative paths
+  // themselves, which reaches the folder tree, `folderSort`, `pinnedDirs` and
+  // `randomExcludeDirs`, and is a separate change.
   for (let depth = segments.length; depth >= 1; depth--) {
-    const applied = tags[absolutePath(roots, segments.slice(0, depth).join('/'))]
+    const applied = tags[pathKey(absolutePath(roots, segments.slice(0, depth).join('/')))]
     if (!applied || applied.length === 0) continue
     return applied.some((entry) => entry.toLowerCase() === wanted)
   }

@@ -12,15 +12,19 @@ import { ThemeBridge } from '@/components/ThemeBridge'
 import { VisualizerOnlyView } from '@/components/VisualizerOnlyView'
 import { Loading, NoLibrary, NoResults } from '@/components/EmptyState'
 import { absolutePath } from '@/lib/paths'
+import { runExplorerShortcut } from '@/lib/explorer-shortcuts'
+import { matchesShortcut } from '@shared/shortcuts'
 import { connectUpdates } from '@/lib/updates'
 import { MiniPlayer } from '@/components/MiniPlayer'
 import { Notice } from '@/components/Notice'
 import { StatsPage } from '@/components/stats/StatsPage'
 import { SettingsPage } from '@/components/SettingsPage'
 import { ContractsPage } from '@/components/contracts/ContractsPage'
+import { VideosPage } from '@/components/videos/VideosPage'
 import { ContractDialog } from '@/components/ContractDialog'
 import { ImportWizard } from '@/components/ImportWizard'
 import { useContracts } from '@/state/contracts'
+import { useVideos } from '@/state/videos'
 import { connectLibraryEvents, useLibrary } from '@/state/library'
 import { usePlayer } from '@/state/player'
 import { useFolderTree, useVisibleRows } from '@/hooks/useLibraryView'
@@ -29,6 +33,19 @@ import { endRowDrag } from '@/lib/drag'
 
 /** How far the left/right arrows scrub the playing track. */
 const SEEK_STEP_SECONDS = 3
+
+/**
+ * Whether a press is a given letter, by physical key *or* by the character it produced.
+ *
+ * `code` alone is the tidier test - it is layout-independent, so Ctrl+Z is the same physical
+ * key on AZERTY - but it is not always populated. Measured: keys injected without a scancode
+ * arrive with `code: ''` and only `key: 'Z'` set, which is what a macro tool, a remapper or
+ * an on-screen keyboard sends, and this machine has one of those installed. Matching either
+ * costs nothing and is what `FileTable`'s own handler has always done, which reads `key`.
+ */
+function isLetter(event: KeyboardEvent, code: string, letter: string): boolean {
+  return event.code === code || event.key.toLowerCase() === letter
+}
 
 export default function App(): React.JSX.Element {
   const roots = useLibrary((s) => s.roots)
@@ -165,6 +182,51 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
+  /**
+   * Ctrl/⌘+Z, and which undo it meant.
+   *
+   * The Edit menu's first item owns the accelerator. On a window with a visible menu bar
+   * that claims the key in the browser process and the page never sees it - but this window
+   * is `titleBarStyle: 'hidden'`, so on Windows there is no menu bar for the accelerator to
+   * hang off and the item never fires. Measured: Ctrl+Z did nothing at all. So both paths
+   * exist, this one and the keydown fallback below, and they are safe together rather than
+   * exclusive: `runUndo` refuses when there is no record or one is already running, and
+   * zustand's `set` is synchronous, so whichever path arrives first claims the record and
+   * the second is a no-op. Do not "simplify" this by deleting either one.
+   *
+   * A focused field gets Chromium's own text undo, which only main can trigger -
+   * `document.execCommand('undo')` does nothing in a modern Chromium. Everything else gets
+   * the file operation.
+   */
+  useEffect(() => {
+    const typingNow = (): boolean => {
+      const active = document.activeElement as HTMLElement | null
+      return (
+        active?.tagName === 'INPUT' ||
+        active?.tagName === 'TEXTAREA' ||
+        active?.isContentEditable === true
+      )
+    }
+    const offUndo = window.umakbang.onMenuUndo(() => {
+      if (typingNow()) {
+        void window.umakbang.textUndo()
+        return
+      }
+      void useLibrary.getState().runUndo()
+    })
+    // Redo has no text equivalent to hand back: `webContents.redo()` exists, but the field
+    // being typed in is the search box and a redo there is not a thing anybody reaches for.
+    // A focused field simply keeps the key rather than having a file operation happen under it.
+    const offRedo = window.umakbang.onMenuRedo(() => {
+      if (typingNow()) return
+      void useLibrary.getState().runRedo()
+    })
+    return () => {
+      offUndo()
+      offRedo()
+    }
+  }, [])
+
   // Global transport shortcuts. Left/right scrub the playing track and are deliberately
   // handled only here - the table doesn't bind them, so a keypress can't seek twice.
   useEffect(() => {
@@ -176,6 +238,39 @@ export default function App(): React.JSX.Element {
         target?.isContentEditable === true
       if (typing) return
 
+      const mod = event.ctrlKey || event.metaKey
+
+      // Undo, for the case the Edit menu's accelerator never fires - see the effect above.
+      // A focused field has already returned at the `typing` guard, deliberately without
+      // `preventDefault`, so Chromium's own text undo still runs there.
+      if (mod && !event.shiftKey && isLetter(event, 'KeyZ', 'z')) {
+        event.preventDefault()
+        void useLibrary.getState().runUndo()
+        return
+      }
+
+      // Redo, on both of the chords people reach for: Ctrl+Y is what Windows file managers
+      // use and what the menu names, Ctrl+Shift+Z is what every editor and DAW uses. Binding
+      // one and not the other means half the people who try it conclude there is no redo.
+      if (
+        mod &&
+        ((!event.shiftKey && isLetter(event, 'KeyY', 'y')) ||
+          (event.shiftKey && isLetter(event, 'KeyZ', 'z')))
+      ) {
+        event.preventDefault()
+        void useLibrary.getState().runRedo()
+        return
+      }
+
+      // The explorer's own clipboard keys - Ctrl+C/X/V/A/D and Ctrl+Shift+C/N - which were
+      // bound to the table's scroll container and therefore dead everywhere else. See
+      // `lib/explorer-shortcuts.ts`; the handler is the table's, not a second copy of it.
+      //
+      // `defaultPrevented` is what stops one press doing the work twice: React dispatches
+      // the table's `onKeyDown` from the root container on the way up, so with focus in the
+      // table it has already run and marked the event by the time this listener sees it.
+      if (!event.defaultPrevented && runExplorerShortcut(event)) return
+
       // Alt turns the same two keys into navigation, which is where every file manager
       // and browser puts Back and Forward. Checked before the seek cases, or holding Alt
       // would scrub instead.
@@ -186,11 +281,38 @@ export default function App(): React.JSX.Element {
         return
       }
 
+      /**
+       * The app-wide half of the rebindable set - see `shared/shortcuts.ts`.
+       *
+       * Both of these belong here rather than in the table for the same reason Space always
+       * has: the table binding them as well fires them twice for one press. The dice in
+       * particular is not about the selection at all, so being bound to the window is what
+       * makes it work from the settings page or with nothing selected.
+       */
+      const { shortcuts } = useLibrary.getState().settings
+      if (matchesShortcut(event, shortcuts, 'playPause')) {
+        // The video editor owns playback while it is open. Its window listener's
+        // preventDefault() does not stop this global Explorer listener.
+        if (useVideos.getState().project !== null) return
+        event.preventDefault()
+        usePlayer.getState().togglePlay()
+        return
+      }
+      if (matchesShortcut(event, shortcuts, 'random')) {
+        event.preventDefault()
+        usePlayer.getState().playRandom()
+        return
+      }
+
+      // Arrow keys nudge selected video layers and must not also seek Explorer.
+      if (
+        useVideos.getState().project !== null &&
+        (event.code === 'ArrowLeft' || event.code === 'ArrowRight')
+      ) {
+        return
+      }
+
       switch (event.code) {
-        case 'Space':
-          event.preventDefault()
-          usePlayer.getState().togglePlay()
-          break
         case 'ArrowRight':
           event.preventDefault()
           usePlayer.getState().seekBy(SEEK_STEP_SECONDS)
@@ -244,8 +366,25 @@ export default function App(): React.JSX.Element {
   const importing = useLibrary((s) => s.importing)
   const cancelImport = useLibrary((s) => s.cancelImport)
 
+  /**
+   * The video editor takes the whole page.
+   *
+   * It has a transport of its own and a frame that wants the width, so the app's own
+   * transport strip and visualizer panel are folded away while a project is open - two play
+   * buttons an inch apart that start different things is the kind of thing you only get
+   * wrong once, publicly. The editor carries a button to put them back, and this is only
+   * ever about the editor: the videos *list* keeps the normal chrome, because nothing there
+   * is competing for it.
+   */
+  const editingVideo = useVideos((s) => s.project !== null)
+  const videoChromeOpen = useVideos((s) => s.chromeOpen)
+  const hideChrome = view.mode === 'videos' && editingVideo && !videoChromeOpen
+
   const pageKey =
-    view.mode === 'stats' || view.mode === 'settings' || view.mode === 'contracts'
+    view.mode === 'stats' ||
+    view.mode === 'settings' ||
+    view.mode === 'contracts' ||
+    view.mode === 'videos'
       ? view.mode
       : 'browse'
 
@@ -284,6 +423,8 @@ export default function App(): React.JSX.Element {
                       <SettingsPage />
                     ) : view.mode === 'contracts' ? (
                       <ContractsPage />
+                    ) : view.mode === 'videos' ? (
+                      <VideosPage />
                     ) : (
                       <>
                         <Toolbar
@@ -299,11 +440,12 @@ export default function App(): React.JSX.Element {
                 </div>
                 {/* Outside the animated swap: the transport belongs to whatever is
                     playing, not to the page you happen to be looking at, so it stays put
-                    when you step into Stats rather than sliding away with the table. */}
-                <NowPlayingBar />
+                    when you step into Stats rather than sliding away with the table. The
+                    video editor is the one exception - see `hideChrome`. */}
+                {!hideChrome && <NowPlayingBar />}
               </main>
 
-              {panelOpen && <NowPlayingPanel />}
+              {panelOpen && !hideChrome && <NowPlayingPanel />}
             </div>
           )}
 

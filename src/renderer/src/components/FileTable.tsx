@@ -9,6 +9,7 @@ import {
   FileAudio2,
   FileMusic,
   FileSliders,
+  FileX2,
   Folder,
   Loader2,
   PencilLine,
@@ -18,6 +19,7 @@ import {
 import type { ColumnId, ColumnState, Settings, SortKey, Track, TrackKind } from '@shared/types'
 import { useLibrary } from '@/state/library'
 import { useContracts } from '@/state/contracts'
+import { useVideos } from '@/state/videos'
 import { usePlayer } from '@/state/player'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -37,11 +39,19 @@ import {
   type ExplorerActions,
   type MenuContext
 } from '@/components/ExplorerMenu'
-import { useSort, type Row } from '@/hooks/useLibraryView'
+import { collectFiles, useSort, type Row } from '@/hooks/useLibraryView'
 import { useFolderDrop } from '@/hooks/useFolderDrop'
 import { beginRowDrag, consumeDragClick } from '@/lib/drag'
+import { setExplorerShortcuts, type ShortcutEvent } from '@/lib/explorer-shortcuts'
+import { matchesShortcut } from '@shared/shortcuts'
 import { absolutePath, baseName, relativePath } from '@/lib/paths'
-import { anchorOfRow, resolveSelection, rowId, selectionLabel } from '@/lib/selection'
+import {
+  anchorOfRow,
+  resolveSelection,
+  rowId,
+  selectionLabel,
+  type Selected
+} from '@/lib/selection'
 import { fifthsPosition, relativeKeyPair } from '@shared/keys'
 import { isRandomExcluded, toggleRandomExcluded } from '@/lib/random-scope'
 import { addPinned, isPinned, removePinned } from '@/lib/quick-access'
@@ -161,6 +171,131 @@ function describeDirs(dirs: string[]): string {
 /** How a count of entries reads in a message. */
 function items(count: number): string {
   return count === 1 ? '1 item' : `${count.toLocaleString()} items`
+}
+
+/* --------------------------------------------------- what a delete is about to cost */
+
+/**
+ * Four stars is where a rating stops being a shrug and starts meaning "keep this".
+ *
+ * The delete dialog counts them because that count is the one thing the app can say that the
+ * folder name cannot: 340 files is a number, and 37 of them being ones you marked worth
+ * keeping is an argument.
+ */
+const KEEP_RATING = 4
+
+/** Everything the delete confirmation needs, measured once when the delete is asked for. */
+interface DeletePrompt {
+  paths: string[]
+  /** The one entry's name, or how many entries there are - what the title is about. */
+  label: string
+  /** Folders in the selection. Their contents go with them and are counted below. */
+  folders: number
+  /** Files picked out in their own right, as opposed to found beneath a folder. */
+  loose: number
+  /** Everything that actually goes, folder contents included. */
+  files: number
+  bytes: number
+  /** Of those files, how many are rated at least `KEEP_RATING`, and how many carry a tag. */
+  rated: number
+  tagged: number
+}
+
+/**
+ * Works out what a delete takes with it, from what the renderer is already holding.
+ *
+ * Folders are walked through the same tree the explorer is drawing (`collectFiles`), so this
+ * costs no disk read and no second pass over the index - the counts are a fold over Track
+ * objects that already exist. Ratings and tags are read off the store by hand rather than
+ * through a subscription: this runs on a press rather than in render, and the table holds
+ * every subscription itself precisely so a row never has to.
+ */
+function describeDeletion(selected: Selected, rows: Row[]): DeletePrompt {
+  const gathered: Track[] = [...selected.tracks]
+  const wanted = new Set(selected.dirs)
+  for (const row of rows) {
+    if (row.type === 'folder' && wanted.has(row.node.path)) collectFiles(row.node, gathered)
+  }
+
+  const { ratings, tags } = useLibrary.getState()
+  // A search flattens the subtree, so a folder and something inside it can both be on screen
+  // and both be selected. Counting the overlap twice would overstate the damage in the one
+  // message that has to be trusted.
+  const seen = new Set<string>()
+  let bytes = 0
+  let rated = 0
+  let tagged = 0
+  for (const file of gathered) {
+    if (seen.has(file.path)) continue
+    seen.add(file.path)
+    bytes += file.size
+    // Keyed by the composed spelling, which a track carries beside its own path only when
+    // the two differ. Reading the raw path here under-counted what a delete was about to
+    // take, in the one message that has to be trusted.
+    const key = file.pathKey ?? file.path
+    if ((ratings[key] ?? 0) >= KEEP_RATING) rated++
+    if ((tags[key]?.length ?? 0) > 0) tagged++
+  }
+
+  return {
+    paths: selected.paths,
+    label: selectionLabel(selected),
+    folders: selected.dirs.length,
+    loose: selected.tracks.length,
+    files: seen.size,
+    bytes,
+    rated,
+    tagged
+  }
+}
+
+/**
+ * The sentence the dialog reads out, sized to what is going.
+ *
+ * A count on its own does not tell 340 loops from 340 albums, so the size comes with it. A
+ * folder additionally says what is under it, since that is the part the row on screen never
+ * showed. The counts under a folder are of *indexed* files and say so: umakbang knows about
+ * the audio, the projects and the MIDI, and a folder can hold artwork and PDFs besides.
+ */
+function deletionMessage(prompt: DeletePrompt, trashLabel: string): string {
+  const size = formatSize(prompt.bytes)
+  const entries = prompt.folders + prompt.loose
+
+  let scale: string
+  if (prompt.folders === 0) {
+    scale = `${prompt.files === 1 ? '1 file' : `${prompt.files.toLocaleString()} files`}, ${size}.`
+  } else {
+    const subject =
+      prompt.loose === 0
+        ? prompt.folders === 1
+          ? 'The folder and everything in it'
+          : `${prompt.folders} folders and everything in them`
+        : `${prompt.folders === 1 ? '1 folder' : `${prompt.folders} folders`} and ${
+            prompt.loose === 1 ? '1 file' : `${prompt.loose.toLocaleString()} files`
+          }, with everything beneath`
+    const beneath =
+      prompt.files === 0
+        ? 'nothing umakbang has indexed'
+        : `${prompt.files.toLocaleString()} indexed files, ${size}`
+    scale = `${subject}: ${beneath}.`
+  }
+
+  const stars = '★'.repeat(KEEP_RATING)
+  let worth = ''
+  if (prompt.rated > 0 && prompt.tagged > 0) {
+    worth = `${prompt.rated.toLocaleString()} of them ${prompt.rated === 1 ? 'is' : 'are'} rated ${stars} or better, and ${prompt.tagged.toLocaleString()} ${prompt.tagged === 1 ? 'is' : 'are'} tagged.`
+  } else if (prompt.rated > 0) {
+    worth = `${prompt.rated.toLocaleString()} of them ${prompt.rated === 1 ? 'is' : 'are'} rated ${stars} or better.`
+  } else if (prompt.tagged > 0) {
+    worth = `${prompt.tagged.toLocaleString()} of them ${prompt.tagged === 1 ? 'is' : 'are'} tagged.`
+  }
+
+  const bin =
+    entries === 1
+      ? `It goes to the ${trashLabel}, so you can put it back.`
+      : `They go to the ${trashLabel}, so you can put them back.`
+
+  return [scale, worth, bin].filter((part) => part.length > 0).join(' ')
 }
 
 /**
@@ -415,6 +550,9 @@ export function FileTable({
   const savedColumns = useLibrary((s) => s.settings.columns)
   const quickMove = useLibrary((s) => s.settings.quickMove)
   const randomExcludeDirs = useLibrary((s) => s.settings.randomExcludeDirs)
+  // Subscribed once here and read by the key handler, like every other setting the rows
+  // need - a `useLibrary` per row is the subscription this table exists to avoid.
+  const shortcuts = useLibrary((s) => s.settings.shortcuts)
   const { key: sortKey, dir: sortDir } = useSort()
   const revealNonce = useLibrary((s) => s.revealNonce)
   const setView = useLibrary((s) => s.setView)
@@ -436,6 +574,9 @@ export function FileTable({
   // Same shape for "which files are being analysed" - the set is read here and each row is
   // told only whether it is in it, so a row never subscribes to anything itself.
   const analysing = useAnalysing()
+  // And the same again for the files that have gone from under us. One subscription, a
+  // boolean per row.
+  const unreachable = useLibrary((s) => s.unreachable)
   const currentPath = usePlayer((s) => s.current?.path ?? null)
   const playing = usePlayer((s) => s.playing)
   const play = usePlayer((s) => s.play)
@@ -448,9 +589,8 @@ export function FileTable({
   } | null>(null)
   const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null)
   const [prompt, setPrompt] = useState<NamePrompt | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState<{ paths: string[]; label: string } | null>(
-    null
-  )
+  // Only the deletes big enough to ask about ever fill this in. See `remove` below.
+  const [confirmDelete, setConfirmDelete] = useState<DeletePrompt | null>(null)
   const [menuTarget, setMenuTarget] = useState<MenuTarget>({ kind: 'folder', dir: null })
   /** Files waiting on a yes before anything is uploaded. */
   const [stemPrompt, setStemPrompt] = useState<Track[] | null>(null)
@@ -600,10 +740,23 @@ export function FileTable({
         const store = useLibrary.getState()
         if (store.query) store.setQuery('')
         setView({ mode: 'folder', dir: row.node.path })
-      } else if (row.track.playable) {
-        play(row.track, files)
+      } else {
+        // A dimmed row is a dead end, and it has to say so out loud: without this the click
+        // is answered by silence, which is exactly what a broken app looks like. The re-read
+        // goes out with the sentence, so a file that has come back - a share that
+        // reconnected, a bounce re-exported over the same name - undims itself rather than
+        // waiting for somebody to find the toolbar's refresh button first.
+        const store = useLibrary.getState()
+        if (store.unreachable.has(row.track.path)) {
+          store.notify(`${row.track.name} is not where umakbang left it.`, 'error')
+          store.recheckPaths([row.track.path])
+          return
+        }
+        if (row.track.playable) play(row.track, files)
       }
     },
+    // Read off the store rather than subscribed to: this callback is rebuilt on every
+    // change to `files` as it is, and one file going missing should not be another.
     [setView, play, files]
   )
   const openRowRef = useRef(openRow)
@@ -801,6 +954,40 @@ export function FileTable({
     })
   }, [])
 
+  /**
+   * A folder made around what is already selected.
+   *
+   * The name is suggested from the selection rather than left as "New folder": gathering
+   * three takes of one beat almost always wants that beat's name, and typing it again is the
+   * step that makes people not bother. A single file gives its own stem; several give the
+   * folder they came from, which is the only thing they are all known to have in common.
+   */
+  const promptNewFolderWithSelection = useCallback((relDir: string) => {
+    const { paths, only } = selectedRef.current
+    if (paths.length === 0) return
+    const rect = scrollRef.current?.getBoundingClientRect()
+    const suggestion = only
+      ? stemOf(only.name)
+      : relDir
+        ? baseName(relDir)
+        : 'New folder'
+
+    setPrompt({
+      title:
+        paths.length === 1
+          ? 'New folder with 1 item'
+          : `New folder with ${paths.length.toLocaleString()} items`,
+      initial: suggestion,
+      confirmLabel: 'Create',
+      busyLabel: 'Creating…',
+      selectStem: false,
+      skipIfUnchanged: false,
+      submit: (name) => useLibrary.getState().createFolderWithSelection(relDir, name, paths),
+      x: (rect?.left ?? 200) + 16,
+      y: (rect?.top ?? 120) + 28
+    })
+  }, [])
+
   const actions: ExplorerActions = useMemo(
     () => ({
       open: () => {
@@ -845,9 +1032,22 @@ export function FileTable({
       remove: () => {
         const target = selectedRef.current
         if (target.paths.length === 0) return
-        setConfirmDelete({ paths: target.paths, label: selectionLabel(target) })
+
+        // One file and no folders goes straight to the trash with nothing asked, and that
+        // is deliberate - do not put the prompt back. It is reversible, it is the most
+        // common thing anyone does in this app, and a dialog on it is the dialog people
+        // learn to dismiss without reading, which is what would disarm the one below for
+        // the deletes that are actually expensive. The trash and undo are the safety net
+        // here; confirmation is for scale and for what cannot be undone.
+        if (target.dirs.length === 0 && target.tracks.length === 1) {
+          void useLibrary.getState().trashPaths(target.paths)
+          return
+        }
+
+        setConfirmDelete(describeDeletion(target, rowsRef.current))
       },
       newFolder: promptNewFolder,
+      newFolderWithSelection: promptNewFolderWithSelection,
       moveTo: (destination) => {
         const { paths } = selectedRef.current
         if (paths.length > 0) void moveAndFollow(paths, destination)
@@ -920,7 +1120,10 @@ export function FileTable({
 
           if (failure) store.notify(failure, 'error')
           else if (renamed === 0) store.notify('Nothing here has a key or tempo to add yet.')
-          else store.notify(`Renamed ${items(renamed)}.`)
+          // Undoable, though only the last rename is: main keeps one record, and each call
+          // above replaced the one before it. The label says "(1 file)" for that reason, so
+          // the button never claims more than it can put back.
+          else store.notify(`Renamed ${items(renamed)}.`, 'info', true)
         })()
       },
 
@@ -935,6 +1138,13 @@ export function FileTable({
         // The file name without its extension is the beat's name, which is what a contract
         // calls a Master - nobody sells "kansai jazz.wav".
         useContracts.getState().draft(tracks.map((track) => stemOf(track.name)))
+      },
+      makeVideo: () => {
+        const track = selectedRef.current.tracks.find((entry) => entry.playable)
+        if (!track) return
+        // The name without its extension, for the same reason the contract uses it: the
+        // caption on a reel is the beat's name, not "kansai jazz.wav".
+        useVideos.getState().startFor(track.path, stemOf(track.name))
       },
       togglePinned: () => {
         const dirs = selectedRef.current.dirs
@@ -967,7 +1177,7 @@ export function FileTable({
         )
       }
     }),
-    [promptRename, promptNewFolder]
+    [promptRename, promptNewFolder, promptNewFolderWithSelection]
   )
 
   /* ---------------------------------------------------------------- keyboard */
@@ -1009,97 +1219,190 @@ export function FileTable({
     [selectRange, virtualizer, play]
   )
 
+  /**
+   * The clipboard and selection keys, which the whole window shares.
+   *
+   * Lifted out of `onKeyDown` and published through `lib/explorer-shortcuts.ts` so `App` can
+   * run the same code for a press that landed anywhere else - see that file for why they
+   * were dead outside this table. The table keeps calling it first, so nothing about having
+   * focus here changed.
+   */
+  /**
+   * Rating from the number row: 1-5 stars, 0 to clear.
+   *
+   * It rates **what is playing**, not what is selected. Rating is a judgement about a sound,
+   * and by the time you have one the selection has usually moved on - the dice lands you
+   * somewhere new, arrowing through a folder walks past the thing you were still listening
+   * to, and a click to look at something else takes the selection with it. Rating the row
+   * your eyes are on meant the stars landed on a file you had not heard.
+   *
+   * The selection is the fallback, and only when nothing is playing at all: the keys would
+   * otherwise be dead in a fresh window, and marking up a folder you already know without
+   * auditioning it is a real thing to want.
+   *
+   * Either way it says what it rated. The target is no longer necessarily on screen, so a
+   * silent star is a star you cannot check.
+   */
+  const rateFromKey = useCallback((event: ShortcutEvent, rating: number): boolean => {
+    const store = useLibrary.getState()
+    const playing = usePlayer.getState().current
+
+    if (playing) {
+      event.preventDefault()
+      store.setRating(playing.path, rating)
+      store.notify(
+        rating === 0
+          ? `Cleared the rating on ${playing.name}.`
+          : `${playing.name} ${'★'.repeat(rating)}`
+      )
+      return true
+    }
+
+    const { tracks } = selectedRef.current
+    if (tracks.length === 0) return false
+    event.preventDefault()
+    for (const track of tracks) store.setRating(track.path, rating)
+    store.notify(
+      rating === 0
+        ? `Cleared the rating on ${items(tracks.length)}.`
+        : `Rated ${items(tracks.length)} ${'★'.repeat(rating)}`
+    )
+    return true
+  }, [])
+
+  const clipboardKeys = useCallback(
+    (event: ShortcutEvent): boolean => {
+      if (!(event.ctrlKey || event.metaKey)) {
+        if (event.altKey) return false
+
+        if (event.key >= '0' && event.key <= '5') {
+          return rateFromKey(event, Number(event.key))
+        }
+
+        /**
+         * The rebindable keys - see `shared/shortcuts.ts`.
+         *
+         * Here rather than in the table's own handler, which is where they started and where
+         * they were dead the moment anything else had focus: pressing the dice moves focus
+         * off the table, and `T` then did nothing with a row plainly selected and playing.
+         * Every one of these acts on the selection or the view, both of which live in the
+         * store, so none of them has any business needing the table to be focused.
+         *
+         * The list-movement keys and Enter are deliberately *not* here. Those only mean
+         * anything against a list that is on screen and under the pointer, and binding them
+         * to the window would have them fighting whatever else is showing.
+         */
+        if (matchesShortcut(event, shortcuts, 'rename')) {
+          event.preventDefault()
+          actions.rename()
+          return true
+        }
+        if (matchesShortcut(event, shortcuts, 'tag')) {
+          // Tagging is the other thing you do while walking a folder, so it gets a key
+          // rather than a trip through the menu.
+          event.preventDefault()
+          actions.editTags()
+          return true
+        }
+        if (matchesShortcut(event, shortcuts, 'trash')) {
+          event.preventDefault()
+          actions.remove()
+          return true
+        }
+        if (matchesShortcut(event, shortcuts, 'clearSelection')) {
+          event.preventDefault()
+          useLibrary.getState().clearSelection()
+          return true
+        }
+        if (matchesShortcut(event, shortcuts, 'up')) {
+          // Up one level, the way Backspace works in a file manager. Left/right are the
+          // transport's - they scrub the playing track from anywhere in the app.
+          const here = useLibrary.getState().view
+          if (here.mode !== 'folder' || !here.dir) return false
+          event.preventDefault()
+          setView({ mode: 'folder', dir: here.dir.split('/').slice(0, -1).join('/') })
+          return true
+        }
+        return false
+      }
+
+      /**
+       * Rename, for a keyboard that has no usable F2.
+       *
+       * `F2` stays exactly where it was and is still what the Windows menu names. It is the
+       * Mac side that had nothing: renaming on a MacBook costs `fn+F2`, and Return - which is
+       * what Finder renames with - is already open/play here, so a Mac friend's first two
+       * instincts both miss. `⌘↩` reads as "Enter, but the other thing you do to a row", and
+       * it was free: the fall-through has always refused every modifier combination it does
+       * not know. Bound on both platforms rather than behind an `isMac` check, because a
+       * shortcut that exists on one machine and not the other is one nobody can be told
+       * about; only the menu's hint differs.
+       */
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        actions.rename()
+        return true
+      }
+
+      switch (event.key.toLowerCase()) {
+        case 'a':
+          event.preventDefault()
+          actions.selectAll()
+          return true
+        case 'c':
+          event.preventDefault()
+          if (event.shiftKey) actions.copyPath()
+          else actions.copy()
+          return true
+        case 'x':
+          event.preventDefault()
+          actions.cut()
+          return true
+        case 'v': {
+          event.preventDefault()
+          const dir = currentDirRef.current
+          if (dir !== null) actions.paste(dir)
+          return true
+        }
+        case 'd':
+          event.preventDefault()
+          actions.duplicate()
+          return true
+        case 'n': {
+          // Ctrl+N on its own is not ours; only Shift makes it New Folder.
+          if (!event.shiftKey) return false
+          event.preventDefault()
+          const dir = currentDirRef.current
+          if (dir !== null) actions.newFolder(dir)
+          return true
+        }
+        default:
+          return false
+      }
+    },
+    [actions, rateFromKey, shortcuts, setView]
+  )
+
+  // Only ever one explorer table on screen, and it deregisters on the way out so the
+  // settings and stats pages - which have no selection to act on - answer nothing.
+  useEffect(() => {
+    setExplorerShortcuts(clipboardKeys)
+    return () => setExplorerShortcuts(null)
+  }, [clipboardKeys])
+
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey
       const key = event.key
 
-      if (mod) {
-        switch (key.toLowerCase()) {
-          case 'a':
-            event.preventDefault()
-            actions.selectAll()
-            return
-          case 'c':
-            event.preventDefault()
-            if (event.shiftKey) actions.copyPath()
-            else actions.copy()
-            return
-          case 'x':
-            event.preventDefault()
-            actions.cut()
-            return
-          case 'v': {
-            event.preventDefault()
-            const dir = currentDirRef.current
-            if (dir !== null) actions.paste(dir)
-            return
-          }
-          case 'd':
-            event.preventDefault()
-            actions.duplicate()
-            return
-          case 'n': {
-            if (!event.shiftKey) break
-            event.preventDefault()
-            const dir = currentDirRef.current
-            if (dir !== null) actions.newFolder(dir)
-            return
-          }
-          default:
-            break
-        }
-        // Any other combination with the modifier down is not one of ours - falling
-        // through handed Ctrl+T the tag editor, Ctrl+Enter the open action and
-        // Ctrl+Delete a delete. Navigation keys still pass, Ctrl+Home being an ordinary
-        // way to jump to the top.
-        if (!['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(key)) {
-          return
-        }
-      }
+      // The clipboard chords and the rating digits, both of which `App` also runs from the
+      // window - one implementation, called from whichever side saw the key first.
+      if (clipboardKeys(event)) return
 
-      /**
-       * Rating from the number row: 1-5 stars, 0 to clear.
-       *
-       * It rates **what is playing**, not what is selected. Rating is a judgement about a
-       * sound, and by the time you have one the selection has usually moved on - the random
-       * button lands you somewhere new, arrowing through a folder walks past the thing you
-       * were still listening to, and a click to look at something else takes the selection
-       * with it. Rating the row your eyes are on meant the stars landed on a file you had
-       * not heard.
-       *
-       * The selection is the fallback, and only when nothing is playing at all: the keys
-       * would otherwise be dead in a fresh window, and marking up a folder you already know
-       * without auditioning it is a real thing to want.
-       *
-       * Either way it says what it rated. The target is no longer necessarily on screen, so
-       * a silent star is a star you cannot check.
-       */
-      if (!mod && !event.altKey && key >= '0' && key <= '5') {
-        const rating = Number(key)
-        const store = useLibrary.getState()
-        const playing = usePlayer.getState().current
-
-        if (playing) {
-          event.preventDefault()
-          store.setRating(playing.path, rating)
-          store.notify(
-            rating === 0
-              ? `Cleared the rating on ${playing.name}.`
-              : `${playing.name} ${'★'.repeat(rating)}`
-          )
-          return
-        }
-
-        const { tracks } = selectedRef.current
-        if (tracks.length === 0) return
-        event.preventDefault()
-        for (const track of tracks) store.setRating(track.path, rating)
-        store.notify(
-          rating === 0
-            ? `Cleared the rating on ${items(tracks.length)}.`
-            : `Rated ${items(tracks.length)} ${'★'.repeat(rating)}`
-        )
+      // Any other combination with the modifier down is not one of ours - falling through
+      // handed Ctrl+T the tag editor and Ctrl+Delete a delete. Navigation keys still pass,
+      // Ctrl+Home being an ordinary way to jump to the top.
+      if (mod && !['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End'].includes(key)) {
         return
       }
 
@@ -1132,40 +1435,14 @@ export function FileTable({
           event.preventDefault()
           actions.open()
           break
-        case 'F2':
-          event.preventDefault()
-          actions.rename()
-          break
-        case 't':
-        case 'T':
-          // Tagging is the other thing you do while walking a folder, so it gets a key
-          // next to the ratings rather than a trip through the menu.
-          event.preventDefault()
-          actions.editTags()
-          break
-        case 'Delete':
-          event.preventDefault()
-          actions.remove()
-          break
-        case 'Escape':
-          event.preventDefault()
-          useLibrary.getState().clearSelection()
-          break
-        case 'Backspace': {
-          // Up one level, the way Backspace works in a file manager. Left/right are the
-          // transport's - they scrub the playing track from anywhere in the app.
-          if (view.mode !== 'folder' || !view.dir) break
-          event.preventDefault()
-          setView({ mode: 'folder', dir: view.dir.split('/').slice(0, -1).join('/') })
-          break
-        }
         default:
           break
       }
     },
-    // Space is not bound here: the app-level transport shortcut already sees it, and
-    // binding it in both places toggled playback twice for one keypress.
-    [actions, moveSelection, view, setView]
+    // Everything except the list movement and Enter now lives in `clipboardKeys` above, so
+    // it works whether or not this table has focus. Space and the dice are `App.tsx`'s, on
+    // the window - binding one in two places fires it twice for a single press.
+    [actions, clipboardKeys, moveSelection]
   )
 
   /* ---------------------------------------------------------------- menu */
@@ -1230,6 +1507,9 @@ export function FileTable({
       if (row?.type !== 'file') continue
       requestFileIcon(row.track.ext, row.track.path)
       onScreen.add(row.track.path)
+      // Nothing to decode: the file is the thing that has gone. Queuing it would fill the
+      // analysis lane with certain failures and spin the row's BPM cell while they fail.
+      if (unreachable.has(row.track.path)) continue
       requestAnalysis(row.track)
     }
     // Anything scrolled past that hasn't started yet is dropped, the way queued peaks are.
@@ -1343,16 +1623,21 @@ export function FileTable({
                     )
                   }
                   const isCurrent = currentPath === row.track.path
+                  // Tags, ratings, notes and the detected values are keyed by the composed
+                  // path. It is a field read rather than a `pathKey` call because this runs
+                  // per visible row per scroll frame.
+                  const key = row.track.pathKey ?? row.track.path
                   return (
                     <FileRow
                       key={row.track.path}
                       track={row.track}
                       meta={metaSignature(row.track)}
                       analysing={analysing.has(row.track.path)}
+                      unreachable={unreachable.has(row.track.path)}
                       splitting={stemJob?.path === row.track.path}
-                      keyDetected={detectedKey[row.track.path] !== undefined}
-                      keyUnsure={(detectedKeyFit[row.track.path] ?? 1) < UNSURE_KEY_FIT}
-                      note={notes[row.track.path] ?? ''}
+                      keyDetected={detectedKey[key] !== undefined}
+                      keyUnsure={(detectedKeyFit[key] ?? 1) < UNSURE_KEY_FIT}
+                      note={notes[key] ?? ''}
                       waveformTint={waveformTint}
                       wave={wave}
                       columns={visible}
@@ -1362,8 +1647,8 @@ export function FileTable({
                       renders={row.renders}
                       selected={selection.has(row.track.path)}
                       cut={cutPaths?.has(row.track.path) ?? false}
-                      tags={tags[row.track.path]}
-                      rating={ratings[row.track.path] ?? 0}
+                      tags={tags[key]}
+                      rating={ratings[key] ?? 0}
                       isCurrent={isCurrent}
                       isPlaying={playing && isCurrent}
                       showFolder={showFolder}
@@ -1424,8 +1709,8 @@ export function FileTable({
 
       {confirmDelete && (
         <ConfirmDialog
-          title={`Delete ${confirmDelete.paths.length === 1 ? confirmDelete.label : items(confirmDelete.paths.length)}?`}
-          description={`${confirmDelete.paths.length === 1 ? 'It goes' : 'They go'} to the ${trashLabel}, so you can put ${confirmDelete.paths.length === 1 ? 'it' : 'them'} back.`}
+          title={`Delete ${confirmDelete.label}?`}
+          description={deletionMessage(confirmDelete, trashLabel)}
           confirmLabel="Delete"
           destructive
           onConfirm={() => {
@@ -1560,6 +1845,11 @@ interface FileCellContext {
   analysing: boolean
   /** Stems are being separated for this file right now. */
   splitting: boolean
+  /**
+   * The file is not where umakbang left it - moved or deleted outside the app, or on
+   * something that stopped answering. The row stays and dims; see `applyFolder`.
+   */
+  unreachable: boolean
   /** The key was worked out from the audio rather than read off the file. */
   keyDetected: boolean
   /** That reading was a close call. Resolved by the table so a row holds a boolean. */
@@ -1613,6 +1903,8 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
         />
       )
     case 'waveform':
+      // No bytes to draw from, and asking for them is a `fetch` per row that can only 404.
+      if (ctx.unreachable) return <span />
       return track.playable ? (
         <RowWaveform
           path={track.path}
@@ -1628,10 +1920,23 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
       )
     case 'name':
       return (
-        <div className="flex min-w-0 items-center gap-1.5 pr-2">
+        <div
+          className="flex min-w-0 items-center gap-1.5 pr-2"
+          /* The whole explanation, on the row it is about. The dim says something is
+             wrong; only this says what, and where else to look for the file. */
+          title={
+            ctx.unreachable
+              ? `${track.name} is not where umakbang left it. It was moved or deleted outside the app, or whatever it lives on has stopped answering. Click it to look again.`
+              : undefined
+          }
+        >
           {/* The playing track takes over the same slot rather than adding a second
               glyph, so names stay on one vertical line whatever is playing. */}
-          {ctx.splitting ? (
+          {ctx.unreachable ? (
+            // Ahead of every other state: a file that has gone is not splitting, and it is
+            // not what is playing either, whatever the transport still thinks.
+            <FileX2 className="h-3.5 w-3.5 shrink-0 text-destructive/80" />
+          ) : ctx.splitting ? (
             // The row says so too: the toolbar spinner is easy to miss when the thing you
             // are watching is the file itself.
             <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
@@ -1646,7 +1951,17 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
               className={typeIconClass(track)}
             />
           )}
-          <span className={cn('truncate', ctx.isCurrent && 'font-medium text-foreground')}>
+          <span
+            className={cn(
+              'truncate',
+              ctx.isCurrent && 'font-medium text-foreground',
+              // Struck through on the name alone rather than across the row: the size, the
+              // tempo and the date are all still true of the file, and striking them says
+              // the app has forgotten them - which is the opposite of the point. It is the
+              // name, as a way of reaching the thing, that no longer leads anywhere.
+              ctx.unreachable && 'line-through decoration-destructive/60'
+            )}
+          >
             {track.name}
           </span>
           {/* The renders this row is standing in for, in the folder count's muted style: it
@@ -1912,6 +2227,7 @@ const FileRow = memo(function FileRow({
   track,
   analysing,
   splitting,
+  unreachable,
   keyDetected,
   keyUnsure,
   note,
@@ -1944,6 +2260,12 @@ const FileRow = memo(function FileRow({
   analysing: boolean
   /** Stems are being separated for this file right now. */
   splitting: boolean
+  /**
+   * The file is no longer where umakbang left it. A plain boolean resolved by the table from
+   * one subscription, so `memo` compares it the way it compares everything else - a mutable
+   * field on `track` would need folding into `meta` above before a row noticed at all.
+   */
+  unreachable: boolean
   /** The key was worked out from the audio rather than read off the file. */
   keyDetected: boolean
   /** That reading was a close call. Resolved by the table so a row holds a boolean. */
@@ -1980,6 +2302,7 @@ const FileRow = memo(function FileRow({
     showFolder,
     analysing,
     splitting,
+    unreachable,
     keyDetected,
     keyUnsure,
     note,
@@ -2012,6 +2335,11 @@ const FileRow = memo(function FileRow({
         'group absolute inset-x-0 grid items-center border-b border-border/40 pl-2 pr-3 text-[12.5px]',
         isCurrent ? 'bg-primary/12' : selected ? 'bg-accent' : 'hover:bg-accent/50',
         cut && 'opacity-45',
+        // Dimmed rather than removed - the reasoning is in `applyFolder`. The same 45% a cut
+        // row uses, deliberately: both mean "this is not somewhere to act right now", and a
+        // second faded value would be a shade the user has to learn to tell from the first.
+        // What separates them is the struck name and the icon in the Name column.
+        unreachable && 'opacity-45',
         !track.playable && 'text-muted-foreground'
       )}
       style={{

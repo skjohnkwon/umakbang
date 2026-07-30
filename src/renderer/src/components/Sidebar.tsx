@@ -4,11 +4,10 @@ import { AnimatePresence, motion } from 'motion/react'
 import {
   BarChart3,
   ChevronRight,
-  Download,
+  Clapperboard,
   FileSignature,
   Folder,
   FolderOpen,
-  Library,
   LocateFixed,
   Pin,
   Plus,
@@ -38,6 +37,18 @@ import { cn } from '@/lib/utils'
 const MIN_WIDTH = 150
 const DEFAULT_WIDTH = 220
 
+/**
+ * How far the tag strip can be dragged, and where a double-click puts it back.
+ *
+ * The floor is one row of chips plus its scrollbar - below that the strip says less than the
+ * "Tags" label above it, and dragging it to nothing is what the section's own emptiness is
+ * for. The ceiling is generous rather than a fraction of the window, because the half below
+ * carries `min-h-0` and scrolls: the tree can be squeezed hard without ever being unreachable.
+ */
+const MIN_TAGS_HEIGHT = 28
+const MAX_TAGS_HEIGHT = 520
+const DEFAULT_TAGS_HEIGHT = 92
+
 /** One star to five, along the visualizer ramp. Matches the table's stars exactly. */
 function ratingColor(wave: readonly string[], stars: number): string | undefined {
   if (wave.length === 0) return undefined
@@ -52,8 +63,6 @@ export function Sidebar(): React.JSX.Element {
   const ratings = useLibrary((s) => s.ratings)
   const totalCount = useLibrary((s) => s.tracks.length)
   const lastFolderDir = useLibrary((s) => s.lastFolderDir)
-  const downloads = useLibrary((s) => s.downloads)
-  const refreshDownloads = useLibrary((s) => s.refreshDownloads)
   const playing = usePlayer((s) => s.current)
   const wave = usePalette().wave
 
@@ -152,6 +161,52 @@ export function Sidebar(): React.JSX.Element {
     [patchSettings]
   )
 
+  /**
+   * The tag strip's height, dragged the same way the sidebar's width is: tracked locally
+   * while the pointer is down and only written to settings on release, so a drag is one IPC
+   * round-trip rather than one per frame.
+   */
+  const savedTagsHeight = useLibrary((s) => s.settings.tagsHeight)
+  const [dragTagsHeight, setDragTagsHeight] = useState<number | null>(null)
+  const dragTagsRef = useRef<number | null>(null)
+  dragTagsRef.current = dragTagsHeight
+  const savedTagsRef = useRef(savedTagsHeight)
+  savedTagsRef.current = savedTagsHeight
+  const tagsHeight = dragTagsHeight ?? savedTagsHeight
+  const draggingTags = dragTagsHeight !== null
+
+  const beginTagsResize = useCallback(
+    (event: React.PointerEvent) => {
+      event.preventDefault()
+      const startY = event.clientY
+      const startHeight = savedTagsRef.current
+
+      const onMove = (move: PointerEvent): void => {
+        setDragTagsHeight(
+          Math.max(
+            MIN_TAGS_HEIGHT,
+            Math.min(MAX_TAGS_HEIGHT, Math.round(startHeight + (move.clientY - startY)))
+          )
+        )
+      }
+      const onUp = (): void => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+        const settled = dragTagsRef.current
+        setDragTagsHeight(null)
+        if (settled !== null) patchSettings({ tagsHeight: settled })
+      }
+
+      document.body.style.cursor = 'row-resize'
+      document.body.style.userSelect = 'none'
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [patchSettings]
+  )
+
   // Top-level folders start open so the library isn't a single collapsed row.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']))
 
@@ -192,9 +247,19 @@ export function Sidebar(): React.JSX.Element {
       {/* Every row below carries its own height, so each one needs `shrink-0`: a flex
           column squashes its children to fit before it will let them overflow, and a
           squashed tree is one that silently refuses to scroll. */}
-      <nav className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto bg-card/40 py-1.5">
-      {/* Above the library rather than inside it: it is a page about the work, not another
-          way of listing files, and sitting under the saved views it read as one. */}
+      {/* Sizes to its contents rather than filling the pane - the tree below takes what is
+          left. `shrink` with `min-h-0` so a short window makes this half give way and scroll
+          instead of pushing the tree off the bottom. */}
+      <nav className="scroll-thin flex min-h-0 shrink flex-col overflow-y-auto bg-card/40 pt-1.5">
+      {/* The primary explorer destination stays first; the pages below describe or act on it. */}
+      <SidebarRow
+        icon={<FolderOpen className="h-3.5 w-3.5" />}
+        label="Files"
+        count={totalCount}
+        active={view.mode === 'folder'}
+        depth={0}
+        onClick={() => setView({ mode: 'folder', dir: lastFolderDir })}
+      />
       <SidebarRow
         icon={<BarChart3 className="h-3.5 w-3.5" />}
         label="Stats"
@@ -211,19 +276,17 @@ export function Sidebar(): React.JSX.Element {
         depth={0}
         onClick={() => setView({ mode: 'contracts' })}
       />
-
-      <SectionLabel>Library</SectionLabel>
-
-      {/* Returns to browsing at the folder you left, rather than dumping every file in
-          one flat list. */}
+      {/* Beside contracts rather than in the library: both are things you do *with* a
+          finished beat rather than another way of listing files. */}
       <SidebarRow
-        icon={<Library className="h-3.5 w-3.5" />}
-        label="Files"
-        count={totalCount}
-        active={view.mode === 'folder'}
+        icon={<Clapperboard className="h-3.5 w-3.5" />}
+        label="Videos"
+        count={0}
+        active={view.mode === 'videos'}
         depth={0}
-        onClick={() => setView({ mode: 'folder', dir: lastFolderDir })}
+        onClick={() => setView({ mode: 'videos' })}
       />
+
       <SidebarRow
         icon={<Star className={cn('h-3.5 w-3.5', ratedTotal > 0 && 'fill-current')} />}
         label="Rated"
@@ -261,19 +324,6 @@ export function Sidebar(): React.JSX.Element {
         />
       ))}
 
-      <SidebarRow
-        icon={<Download className="h-3.5 w-3.5" />}
-        label="Downloads"
-        count={downloads.length}
-        active={view.mode === 'downloads'}
-        depth={0}
-        onClick={() => {
-          void refreshDownloads()
-          setView({ mode: 'downloads' })
-        }}
-      />
-
-
       {/* Under the saved views and above the tree: the folders you actually work in,
           reachable without scrolling a tree that runs to thousands of rows. Absent
           entirely when nothing is pinned, so it costs nothing until it's used. */}
@@ -282,10 +332,35 @@ export function Sidebar(): React.JSX.Element {
       {/* Between the saved views and the tree: tags narrow whatever you're already
           looking at, so they belong with the other ways of choosing what to look at
           rather than stranded under a folder list that can run for thousands of rows. */}
-      <TagBar />
+      <TagBar height={tagsHeight} />
 
+      </nav>
+
+      {/* The split, dragged to move the line the tags cut off at.
+
+          The two halves scroll separately on purpose. With one scroll for the whole pane,
+          growing the tag strip only pushed the tree further down the same scroll - which is
+          not more room for tags, it is the same room further away. Split, the drag genuinely
+          trades space between the two, which is the thing being asked for when somebody wants
+          "more tags visible". */}
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize tags"
+        onPointerDown={beginTagsResize}
+        onDoubleClick={() => patchSettings({ tagsHeight: DEFAULT_TAGS_HEIGHT })}
+        className="group relative z-20 h-[7px] shrink-0 cursor-row-resize"
+      >
+        <div
+          className={cn(
+            'absolute inset-x-0 top-[3px] h-px transition-colors',
+            draggingTags ? 'bg-primary' : 'bg-border group-hover:bg-primary/60'
+          )}
+        />
+      </div>
+
+      <nav className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto bg-card/40 pb-1.5">
       <SectionLabel
-        className="mt-3"
         action={
           <span className="flex items-center gap-0.5">
             <LocatePlayingButton onLocate={revealPlayingFolder} enabled={playing !== null} />
@@ -518,16 +593,32 @@ function FolderRows({
  */
 function QuickAccess(): React.JSX.Element | null {
   const pinned = useLibrary((s) => s.settings.quickMove)
+  const downloadsQuickAccess = useLibrary((s) => s.settings.downloadsQuickAccess)
+  const downloadsDir = useLibrary((s) => s.platform?.downloadsDir ?? '')
+  const refreshDownloads = useLibrary((s) => s.refreshDownloads)
   const roots = useLibrary((s) => s.roots)
   const view = useLibrary((s) => s.view)
   const setView = useLibrary((s) => s.setView)
   const patchSettings = useLibrary((s) => s.patchSettings)
 
-  if (pinned.length === 0) return null
+  if (pinned.length === 0 && !downloadsQuickAccess) return null
 
   return (
     <>
       <SectionLabel className="mt-3">Quick access</SectionLabel>
+      {downloadsQuickAccess && (
+        <PinnedRow
+          label="Downloads"
+          path={downloadsDir}
+          dir={null}
+          active={view.mode === 'downloads'}
+          onOpen={() => {
+            void refreshDownloads()
+            setView({ mode: 'downloads' })
+          }}
+          onUnpin={() => patchSettings({ downloadsQuickAccess: false })}
+        />
+      )}
       {pinned.map((target) => {
         // Null for a folder outside the library - a filing destination on another drive.
         // It still belongs in the list; it just can't be browsed to.

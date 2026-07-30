@@ -56,6 +56,19 @@ macOS and Linux from the same source.
 - **Shrinks to a mini player** - a 300px square parked at the top of the display and kept
   above everything else, with the name, a scrubbable waveform and the transport. For when
   umakbang is what's playing while you work in the DAW. One button back to the library.
+- **Makes the reel.** Right-click a beat and pick "Make video…", or open Videos in the
+  sidebar. There is a **built-in screen recorder** - pick a monitor or just your DAW's
+  window from a thumbnail picker, with what the machine is playing, a microphone, and the
+  webcam captured as its own separate file so where the face-cam sits is decided afterwards
+  rather than burned in. Then build the post out of layers: the capture, cropped and zoomed
+  to whatever part of the playlist you want on screen; a waveform or spectrum driven by the
+  track itself; artwork; captions. Presets set up the two shapes these usually take - the
+  capture filling a 9:16 frame with a caption and a camera box over it, or the whole window
+  across the top with a waveform band underneath. Exports **MP4 (H.264/AAC)** at 9:16, 4:5,
+  1:1 or 16:9, which is what Instagram and TikTok take. No ffmpeg, no other binary: the
+  encoder is the one already inside Electron. Recordings and exports are both re-indexed on
+  the way out, so they seek properly in Windows Media Player, a DAW's video track or anything
+  else - the browser's own recorder writes a format that plays but cannot be scrubbed.
 - **Production stats** read from FL Studio's per-project time tracking: hours actually
   spent, when you work, and where the time goes.
 
@@ -195,10 +208,18 @@ Selection and file actions, in the explorer:
 | `Ctrl/⌘ D` | Duplicate as "name (2)" |
 | `Ctrl/⌘ ⇧ C` | Copy full paths |
 | `Ctrl/⌘ ⇧ N` | New folder |
-| `F2` | Rename |
+| `F2` · `Ctrl/⌘ ↩` | Rename - `F2` needs `fn` on a MacBook, so both work |
+| `Ctrl/⌘ Z` | Undo the last file operation |
+| `Ctrl/⌘ Y` · `Ctrl/⌘ ⇧ Z` | Redo |
 | `Del` | Delete, after a confirmation |
-| `1`–`5` | Rate · `0` clears |
+| `1`–`5` | Rate what's playing · `0` clears |
 | `T` | Tag the selection |
+| `R` | Play a random beat and go to it |
+
+The keys umakbang invented - play/pause, the dice, tagging, rename, up, delete, clear
+selection - can be rebound in Settings → Shortcuts. The `Ctrl/⌘` combinations deliberately
+cannot: they come from the system, every other application agrees about them, and several are
+claimed by the application menu before the page ever sees the key.
 
 Copy also puts the paths on the system clipboard, so a paste outside umakbang - a DAW's file
 dialog, a terminal - gets something useful. Pasting *into* umakbang uses its own clipboard.

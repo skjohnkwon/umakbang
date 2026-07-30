@@ -10,6 +10,13 @@ import type {
   ContractRecord
 } from '../shared/contracts'
 import type {
+  CaptureSettings,
+  CaptureSource,
+  Recording,
+  VideoData,
+  VideoProject
+} from '../shared/video'
+import type {
   LibraryRoot,
   MetadataPatch,
   PlatformInfo,
@@ -19,6 +26,9 @@ import type {
   TransferMode,
   TransferResult,
   TrashResult,
+  UndoOutcome,
+  UndoProgress,
+  UndoSummary,
   UserData,
   StemOptions as StemSplitOptions,
   StemOutcome,
@@ -155,6 +165,54 @@ const api = {
   ): Promise<{ record?: ContractRecord; error?: string; data: ContractData }> =>
     ipcRenderer.invoke('contracts:generate', input),
 
+  /* --- videos --- */
+  videoData: (): Promise<VideoData> => ipcRenderer.invoke('videos:get'),
+  saveVideoProject: (project: VideoProject): Promise<VideoData> =>
+    ipcRenderer.invoke('videos:saveProject', project),
+  deleteVideoProject: (id: string): Promise<VideoData> =>
+    ipcRenderer.invoke('videos:deleteProject', id),
+  saveCaptureSettings: (patch: Partial<CaptureSettings>): Promise<VideoData> =>
+    ipcRenderer.invoke('videos:saveCapture', patch),
+  setVideoOutputDir: (dir: string): Promise<VideoData> =>
+    ipcRenderer.invoke('videos:setOutputDir', dir),
+  pickVideoOutputDir: (): Promise<string | null> => ipcRenderer.invoke('videos:pickOutputDir'),
+  /** Forgets a take. `deleteFile` also removes it from disk, which is asked separately. */
+  removeRecording: (id: string, deleteFile: boolean): Promise<VideoData> =>
+    ipcRenderer.invoke('videos:removeRecording', id, deleteFile),
+  /** Screens and windows, each with a thumbnail, for the capture picker. */
+  captureSources: (): Promise<CaptureSource[]> => ipcRenderer.invoke('videos:sources'),
+  /** Asks for audio, video or an image to bring in as a layer. */
+  pickMedia: (kind: 'audio' | 'video' | 'image'): Promise<string | null> =>
+    ipcRenderer.invoke('videos:pickMedia', kind),
+  /**
+   * Opens a file and streams to it.
+   *
+   * Three calls rather than one because a recording is hundreds of megabytes arriving as a
+   * stream of chunks: it is appended to an open handle as it comes, so neither process ever
+   * holds a whole video. `finishVideoWrite` renames the `.part` into place and, for a
+   * recording, lists it.
+   */
+  beginVideoWrite: (
+    kind: 'recording' | 'export',
+    name: string,
+    ext: string
+  ): Promise<{ id: string; path: string } | { error: string }> =>
+    ipcRenderer.invoke('videos:beginWrite', kind, name, ext),
+  writeVideoChunk: (id: string, bytes: Uint8Array): Promise<boolean> =>
+    ipcRenderer.invoke('videos:writeChunk', id, bytes),
+  finishVideoWrite: (
+    id: string,
+    meta: {
+      durationMs: number
+      width: number
+      height: number
+      source: 'screen' | 'window' | 'camera'
+      sourceName: string
+    } | null
+  ): Promise<{ path?: string; size?: number; recording?: Recording; error?: string }> =>
+    ipcRenderer.invoke('videos:finishWrite', id, meta),
+  abortVideoWrite: (id: string): void => ipcRenderer.send('videos:abortWrite', id),
+
   /* --- library --- */
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('library:pickFolder'),
   openLibrary: (path: string): Promise<string | null> => ipcRenderer.invoke('library:open', path),
@@ -239,6 +297,58 @@ const api = {
     bytes: Uint8Array
   ): Promise<{ path?: string; error?: string }> =>
     ipcRenderer.invoke('fs:saveTrim', source, name, bytes),
+
+  /* --- undo --- */
+  /**
+   * The last file operation, ready to be reversed, or null when there is nothing.
+   *
+   * Asked for on mount as well as subscribed to: the record lives in main and survives a
+   * renderer reload, so a page that only listened would show nothing until the next
+   * operation. `label` is composed in main so the menu, the toolbar and the notice cannot
+   * word the same fact three different ways.
+   */
+  undoState: (): Promise<UndoSummary | null> => ipcRenderer.invoke('undo:current'),
+  /**
+   * Runs it backwards. Resolves with the reverse operation as an ordinary `TransferResult`,
+   * for `applyTransfer`, and an outcome saying how much of it landed.
+   *
+   * The record is spent either way, including on a partial failure - so this is called once
+   * per press and the outcome is the only report there will be.
+   */
+  runUndo: (
+    id: string
+  ): Promise<{ result: TransferResult; outcome: UndoOutcome }> =>
+    ipcRenderer.invoke('undo:run', id),
+  /** Asks a running undo to stop. It stops between files, never inside one. */
+  cancelUndo: (): Promise<void> => ipcRenderer.invoke('undo:cancel'),
+  onUndoState: (handler: (summary: UndoSummary | null) => void): (() => void) =>
+    subscribe('undo:state', handler),
+  onUndoProgress: (handler: (progress: UndoProgress) => void): (() => void) =>
+    subscribe('undo:progress', handler),
+
+  /** What has been undone and can be put forward again, or null. Same shape as `undoState`. */
+  redoState: (): Promise<UndoSummary | null> => ipcRenderer.invoke('redo:current'),
+  /** Runs it forwards. Reports on `onUndoProgress`, which serves whichever is running. */
+  runRedo: (
+    id: string
+  ): Promise<{ result: TransferResult; outcome: UndoOutcome }> =>
+    ipcRenderer.invoke('redo:run', id),
+  onRedoState: (handler: (summary: UndoSummary | null) => void): (() => void) =>
+    subscribe('redo:state', handler),
+  /** The Edit menu's Redo, which owns Ctrl/⌘+Y for the same reason Undo owns Ctrl/⌘+Z. */
+  onMenuRedo: (handler: () => void): (() => void) => subscribe('menu:redo', handler),
+  /**
+   * The Edit menu's Undo, which owns Ctrl/⌘+Z whether or not there is a file operation to
+   * reverse - an application menu accelerator is claimed before the page sees the key, so
+   * the renderer has to decide which undo was meant rather than letting the field have it.
+   */
+  onMenuUndo: (handler: () => void): (() => void) => subscribe('menu:undo', handler),
+  /**
+   * Chromium's own text undo, for when a text field has focus. There is no way for a page
+   * to trigger it - `document.execCommand('undo')` does nothing in a modern Chromium - so it
+   * goes through `webContents.undo()` in main.
+   */
+  textUndo: (): Promise<void> => ipcRenderer.invoke('edit:textUndo'),
 
   /**
    * The path behind a dropped File. Chromium stopped exposing `File.path` in Electron 32,
