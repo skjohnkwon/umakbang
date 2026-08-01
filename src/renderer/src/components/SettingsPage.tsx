@@ -88,7 +88,8 @@ const SECTIONS = [
   { id: 'stems', label: 'Stems' },
   { id: 'backup', label: 'Backup' },
   { id: 'window', label: 'Window' },
-  { id: 'updates', label: 'Updates' }
+  { id: 'updates', label: 'Updates' },
+  { id: 'developer', label: 'Developer' }
 ] as const
 
 /**
@@ -111,6 +112,8 @@ export function SettingsPage(): React.JSX.Element {
     settings.visualizerStops.length > 0
       ? settings.visualizerStops
       : [...DEFAULT_VISUALIZER_STOPS]
+
+  const noLibrary = useLibrary((s) => s.roots.length === 0)
 
   const [active, setActive] = useState<string>('appearance')
 
@@ -507,9 +510,20 @@ export function SettingsPage(): React.JSX.Element {
                 }}
               />
             </Row>
-            <Row label="Visualizers only" hint="Hide the library and fill the window.">
+            {/* Off the table until there is a library, like the title bar's own toggle. The
+                cog is reachable from the welcome screen, so without this the mode was still
+                one click away on the one screen that cannot draw it or get back out of it. */}
+            <Row
+              label="Visualizers only"
+              hint={
+                noLibrary
+                  ? 'Open a folder first - there is nothing to visualize yet.'
+                  : 'Hide the library and fill the window.'
+              }
+            >
               <Switch
                 checked={settings.visualizerOnly}
+                disabled={noLibrary}
                 onChange={(visualizerOnly) => patchSettings({ visualizerOnly })}
               />
             </Row>
@@ -518,6 +532,10 @@ export function SettingsPage(): React.JSX.Element {
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('updates'))}>
           <UpdateSection />
+        </div>
+
+        <div className={cn('mx-auto max-w-[560px] space-y-4', show('developer'))}>
+          <DeveloperSection />
         </div>
       </div>
     </div>
@@ -585,6 +603,90 @@ function UpdateSection(): React.JSX.Element {
 
       <ChangelogList running={status.version} />
     </Section>
+  )
+}
+
+/**
+ * The switches that are for working on umakbang rather than for using it.
+ *
+ * The section is always in the nav and its contents are not: what sits behind the gate
+ * throws this machine's settings, tags and ratings away on the next launch, and an option
+ * that destructive should be one somebody deliberately turned on and can see is on. A hidden
+ * key sequence would hide it from the person who set it as well.
+ *
+ * The tour replay is outside the gate, since wanting the introduction again is an ordinary
+ * thing to want and nothing about it is dangerous.
+ */
+function DeveloperSection(): React.JSX.Element {
+  const settings = useLibrary((s) => s.settings)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const setView = useLibrary((s) => s.setView)
+  const lastFolderDir = useLibrary((s) => s.lastFolderDir)
+  const noLibrary = useLibrary((s) => s.roots.length === 0)
+
+  return (
+    <>
+      <Section title="Developer" hint="For testing umakbang, not for using it.">
+        <Row
+          label="Developer mode"
+          hint="Shows the switches below. Never travels in a backup."
+        >
+          <Switch
+            checked={settings.developerMode}
+            onChange={(developerMode) =>
+              // The reset goes off with it. Leaving it armed behind a gate that is now shut
+              // is a wipe on the next launch with nothing on screen saying so.
+              patchSettings(
+                developerMode ? { developerMode } : { developerMode, resetOnLaunch: false }
+              )
+            }
+          />
+        </Row>
+
+        {settings.developerMode && (
+          <Row
+            label="Start fresh on next launch"
+            hint={
+              settings.resetOnLaunch
+                ? 'On. Every launch opens on the welcome screen with no library, no tags and default settings. Turn this off and the next launch puts your real library, tags and ratings back exactly as they were - nothing has been deleted, only moved aside.'
+                : 'Next launch comes up as a brand-new install: welcome screen, no library, default settings. Reversible - your real profile is moved aside, and switching this back off restores it on the following launch.'
+            }
+          >
+            <Switch
+              checked={settings.resetOnLaunch}
+              onChange={(resetOnLaunch) => patchSettings({ resetOnLaunch })}
+            />
+          </Row>
+        )}
+      </Section>
+
+      <Section title="Tour">
+        <Row
+          label="Show the tutorial again"
+          hint={
+            noLibrary
+              ? 'Open a folder first - the tour points at things in the library.'
+              : 'Twenty seconds, seven steps, stoppable at any point.'
+          }
+        >
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={noLibrary}
+            onClick={() => {
+              patchSettings({ tutorialSeen: false })
+              // Back to the explorer, because every step points at something that is only on
+              // screen there. The tour starts itself once this page is gone.
+              setView({ mode: 'folder', dir: lastFolderDir })
+            }}
+            className="gap-1.5"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Replay
+          </Button>
+        </Row>
+      </Section>
+    </>
   )
 }
 
@@ -1590,21 +1692,25 @@ function SegmentedControl({
 
 function Switch({
   checked,
-  onChange
+  onChange,
+  disabled = false
 }: {
   checked: boolean
   onChange: (checked: boolean) => void
+  disabled?: boolean
 }): React.JSX.Element {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
         'relative h-[18px] w-[32px] shrink-0 rounded-full transition-colors',
         'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-        checked ? 'bg-primary' : 'bg-input'
+        checked ? 'bg-primary' : 'bg-input',
+        disabled && 'cursor-not-allowed opacity-40'
       )}
     >
       {/* `left-0` is load-bearing: a button centres its content, so without it the knob's

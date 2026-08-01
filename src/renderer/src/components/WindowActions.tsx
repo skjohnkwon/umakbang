@@ -28,15 +28,28 @@ export function WindowActions({
   const settings = useLibrary((s) => s.settings)
   const patchSettings = useLibrary((s) => s.patchSettings)
   const setMiniPlayer = useLibrary((s) => s.setMiniPlayer)
+  // Neither shrunken mode is somewhere to be before there is a library.
+  //
+  // Visualizers-only has nothing to plot, and since the stage is what carries the hover
+  // overlay that turns it back off, nowhere to put its own way out either - `App` already
+  // refuses to enter it without roots, which left this button as a switch that visibly
+  // latched and did nothing at all. The mini player does enter, and strands you: it keeps
+  // the transport and the way back and nothing else, so the Choose folder button - the only
+  // thing there is to do on that screen - is not on it.
+  const noLibrary = useLibrary((s) => s.roots.length === 0)
 
   return (
     <div className="app-no-drag flex items-center gap-0.5">
       {!stage && (
-      <Hint label="Mini player" side={side}>
+      <Hint
+        label={noLibrary ? 'Open a folder first - there is nothing to play yet' : 'Mini player'}
+        side={side}
+      >
         <Button
           variant="ghost"
           size="icon-sm"
           aria-label="Mini player"
+          disabled={noLibrary}
           onClick={() => setMiniPlayer(true)}
         >
           <PictureInPicture2 className="h-3.5 w-3.5" />
@@ -44,12 +57,22 @@ export function WindowActions({
       </Hint>
       )}
 
-      <Hint label={settings.visualizerOnly ? 'Show library' : 'Visualizers only'} side={side}>
+      <Hint
+        label={
+          noLibrary
+            ? 'Open a folder first - there is nothing to visualize yet'
+            : settings.visualizerOnly
+              ? 'Show library'
+              : 'Visualizers only'
+        }
+        side={side}
+      >
         <Button
           variant="ghost"
           size="icon-sm"
           aria-label="Visualizers only"
           aria-pressed={settings.visualizerOnly}
+          disabled={noLibrary}
           onClick={() => patchSettings({ visualizerOnly: !settings.visualizerOnly })}
           className={cn(settings.visualizerOnly && 'bg-primary/15 text-primary')}
         >
@@ -97,6 +120,7 @@ export function WindowActions({
             <Button
               variant="ghost"
               size="icon-sm"
+              data-tour="settings"
               aria-label="Settings"
               title="Settings"
               onClick={() => useLibrary.getState().setView({ mode: 'settings' })}

@@ -177,7 +177,7 @@ export function TitleBar(): React.JSX.Element {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <div className="app-no-drag relative mx-auto w-full max-w-[420px]">
+      <div data-tour="search" className="app-no-drag relative mx-auto w-full max-w-[420px]">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           id={SEARCH_INPUT_ID}

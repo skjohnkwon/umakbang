@@ -204,6 +204,7 @@ export function NowPlayingBar(): React.JSX.Element {
 
   return (
     <section
+      data-tour="transport"
       className="relative flex shrink-0 items-center gap-3 overflow-hidden border-t bg-card/50 px-3"
       style={{ height: effectiveHeight }}
       aria-label="Now playing"

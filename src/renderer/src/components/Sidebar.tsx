@@ -243,7 +243,10 @@ export function Sidebar(): React.JSX.Element {
     })
 
   return (
-    <div className="relative flex shrink-0 flex-col border-r" style={{ width }}>
+    /* `data-tour` is what the first-run tour points at. An attribute rather than a class or
+       an aria-label: it says out loud that something else depends on this element, so it
+       survives a restyle and a reworded label. */
+    <div data-tour="sidebar" className="relative flex shrink-0 flex-col border-r" style={{ width }}>
       {/* Every row below carries its own height, so each one needs `shrink-0`: a flex
           column squashes its children to fit before it will let them overflow, and a
           squashed tree is one that silently refuses to scroll. */}

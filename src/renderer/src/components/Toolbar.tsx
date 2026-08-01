@@ -12,9 +12,11 @@ import {
   ExternalLink,
   FolderInput,
   FolderPlus,
+  FolderTree,
   Download,
   FilterX,
   Layers,
+  List,
   ListFilter,
   Loader2,
   MousePointerClick,
@@ -320,6 +322,7 @@ export function Toolbar({
       <RecalculateButton rows={rows} />
       <RandomBeatButton />
       <AudioOnlyToggle />
+      <FoldersToggle />
       <CollapseRendersToggle />
       <TypeFilterMenu />
       <ColumnsButton />
@@ -477,6 +480,7 @@ function RandomBeatButton(): React.JSX.Element {
       <Button
         variant="ghost"
         size="icon-sm"
+        data-tour="random"
         aria-label="Play a random beat"
         disabled={empty}
         onClick={playRandom}
@@ -533,11 +537,6 @@ function ClearFiltersButton(): React.JSX.Element | null {
 }
 
 /**
- * Hide everything that isn't audio - the common case when you're digging for a sound and
- * the library is full of project files. Shares the type filter's state, so it stays in
- * sync with the Audio entry in the menu next to it.
- */
-/**
  * The two switches that decide how browsing and playback interact.
  *
  * They belong here rather than only in Settings because they are changed *while*
@@ -585,21 +584,84 @@ function PlaybackToggles(): React.JSX.Element {
   )
 }
 
+/**
+ * Keeps only the audio file types - the common case when you're digging for a sound and
+ * the folder is full of `.flp` projects and MIDI. Shares the type filter's state, so it
+ * stays in sync with the Audio entry in the menu next to it.
+ *
+ * It is a question about *file types*, and deliberately nothing else: folder rows are the
+ * business of the toggle beside it, so "audio files, no folders, everything beneath here"
+ * is the two of them pressed rather than one button quietly doing both.
+ */
 function AudioOnlyToggle(): React.JSX.Element {
   const typeFilter = useLibrary((s) => s.typeFilter)
   const toggleKindFilter = useLibrary((s) => s.toggleKindFilter)
   const active = typeFilter.kinds.includes('audio')
 
   return (
-    <Hint label={active ? 'Showing audio only' : 'Show audio files only'} side="bottom">
+    <Hint
+      label={active ? 'Showing audio file types only' : 'Show audio file types only'}
+      side="bottom"
+    >
       <Button
         variant="ghost"
         size="icon-sm"
         aria-pressed={active}
+        aria-label="Audio files only"
         onClick={() => toggleKindFilter('audio')}
         className={cn(active && 'bg-primary/15 text-primary')}
       >
         <AudioLines className="h-3.5 w-3.5" />
+      </Button>
+    </Hint>
+  )
+}
+
+/**
+ * Folders, or no folders at all.
+ *
+ * With folders off the explorer stops being a file manager and becomes one flat list of
+ * every file at or beneath where you are standing, whatever its path - so at the top level
+ * that is the whole library. The store has always been able to do this (`recursive`, which
+ * is also what a search switches on) and nothing has ever been wired to it: the only way to
+ * see a folder's whole subtree was to type something into the search box, which then also
+ * filtered it.
+ *
+ * The icon changes rather than only lighting up, unlike the toggles beside it. Those switch
+ * a behaviour on or off; this one picks between two shapes for the list, and a tree against
+ * a flat list is that difference drawn.
+ *
+ * Off in the saved views, which are already flat - there is no folder structure in "Rated"
+ * to fold away.
+ */
+function FoldersToggle(): React.JSX.Element {
+  const recursive = useLibrary((s) => s.recursive)
+  const setRecursive = useLibrary((s) => s.setRecursive)
+  const view = useLibrary((s) => s.view)
+  const inFolder = view.mode === 'folder'
+  const atRoot = inFolder && view.dir === ''
+
+  return (
+    <Hint
+      label={
+        !inFolder
+          ? 'This view is already a flat list of files'
+          : recursive
+            ? `Showing every file beneath ${atRoot ? 'the library' : 'this folder'}, no folder rows`
+            : `Drop the folders - show every file beneath ${atRoot ? 'the library' : 'this folder'}`
+      }
+      side="bottom"
+    >
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-pressed={recursive}
+        aria-label="Show every file, no folders"
+        disabled={!inFolder}
+        onClick={() => setRecursive(!recursive)}
+        className={cn(recursive && 'bg-primary/15 text-primary')}
+      >
+        {recursive ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
       </Button>
     </Hint>
   )

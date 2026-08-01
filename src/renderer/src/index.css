@@ -216,3 +216,21 @@
     animation: none;
   }
 }
+
+/**
+ * How long the first-run tour is going to hold on this step.
+ *
+ * A CSS animation rather than a measured elapsed time in React: the bar is the only thing
+ * moving, and driving it from state would re-render the whole overlay sixty times a second
+ * to fill a three-pixel strip. Deliberately *not* silenced under reduced motion - it is a
+ * progress readout rather than decoration, and a bar that never moves would say the tour
+ * had hung.
+ */
+@keyframes tour-step {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}

@@ -224,41 +224,58 @@ export function useVisibleRows(): Row[] {
     // the subtree per folder - which on a 300k library is a scan per row - this works from
     // the tagged paths themselves, of which there are only ever as many as were typed by
     // hand. A folder survives if it is tagged, or if anything tagged lives beneath it.
-    const taggedUnder: string[] | null =
+    //
+    // One entry per selected tag rather than one pooled list, because the tags are ANDed:
+    // a row has to answer *each* of them, and a pooled list cannot say which tag a path
+    // answered for. `tagFilter` is a handful of entries, so this is a handful of passes
+    // over the tagged paths and nothing near the index.
+    const reach: Array<{ tag: string; paths: string[]; dirs: string[] }> | null =
       tagFilter.length === 0 || roots.length === 0
         ? null
-        : Object.entries(tags).flatMap(([path, applied]) => {
-            if (!applied.some((tag) => tagFilter.includes(tag))) return []
-            const rel = relativePath(roots, path)
-            return rel === null ? [] : [rel]
+        : tagFilter.map((tag) => {
+            const paths = Object.entries(tags).flatMap(([path, applied]) => {
+              if (!applied.includes(tag)) return []
+              const rel = relativePath(roots, path)
+              return rel === null ? [] : [rel]
+            })
+            // Which of those are folders: anything the tree knows by that path. A tagged
+            // file's relative path is never a node, so this separates the two without a
+            // second lookup.
+            return { tag, paths, dirs: paths.filter((path) => index.has(path)) }
           })
-    // Which of those are folders: anything the tree knows by that path. A tagged file's
-    // relative path is never a node, so this separates the two without a second lookup.
-    const taggedDirs = (taggedUnder ?? []).filter((path) => index.has(path))
-    const keepFolder = (path: string): boolean =>
-      taggedUnder === null ||
-      taggedUnder.some((hit) => samePath(hit, path) || hit.toLowerCase().startsWith(`${path.toLowerCase()}/`)) ||
-      // A folder *inside* a tagged folder inherits the tag the same way its files do in
-      // `narrowed` below - without this the tagged folder opened onto its files and none
-      // of its subfolders, making their contents unreachable.
-      isUnderAnyDir(path, taggedDirs)
 
+    const keepFolder = (path: string): boolean =>
+      reach === null ||
+      reach.every(
+        ({ paths, dirs }) =>
+          paths.some(
+            (hit) => samePath(hit, path) || hit.toLowerCase().startsWith(`${path.toLowerCase()}/`)
+          ) ||
+          // A folder *inside* a tagged folder inherits the tag the same way its files do in
+          // `narrowed` below - without this the tagged folder opened onto its files and none
+          // of its subfolders, making their contents unreachable.
+          isUnderAnyDir(path, dirs)
+      )
 
     const { kinds, exts } = typeFilter
-    // Within a list the entries are ORed; the lists are ANDed with each other, so
-    // "audio" + "wav/aiff" + tagged "keeper" narrows the way you'd expect.
+    // Within the type lists the entries are ORed, and everything else is ANDed: "audio" +
+    // "wav/aiff" + tagged "keeper" + tagged "flip" is a wav or an aiff that is both a keeper
+    // and a flip. Each list narrows what the one before it left.
     const narrowed = (files: Track[]): Track[] => {
-      if (kinds.length === 0 && exts.length === 0 && tagFilter.length === 0) return files
+      if (kinds.length === 0 && exts.length === 0 && reach === null) return files
       return files.filter(
         (t) =>
           (kinds.length === 0 || kinds.includes(t.kind)) &&
           (exts.length === 0 || exts.includes(t.ext)) &&
-          (tagFilter.length === 0 ||
-            tagFilter.some((tag) => tags[t.pathKey ?? t.path]?.includes(tag)) ||
-            // A tag on a folder is a statement about what's in it, so its files answer to
-            // it too. Without this, filtering by a tag you only ever put on a folder
-            // showed the folder and then nothing at all once you opened it.
-            isUnderAnyDir(t.relDir, taggedDirs))
+          (reach === null ||
+            reach.every(
+              ({ tag, dirs }) =>
+                tags[t.pathKey ?? t.path]?.includes(tag) ||
+                // A tag on a folder is a statement about what's in it, so its files answer to
+                // it too. Without this, filtering by a tag you only ever put on a folder
+                // showed the folder and then nothing at all once you opened it.
+                isUnderAnyDir(t.relDir, dirs)
+            ))
       )
     }
 
@@ -582,4 +599,39 @@ export function useAllTags(): Array<{ tag: string; count: number }> {
       .map(([tag, count]) => ({ tag, count }))
       .sort((a, b) => b.count - a.count || COLLATOR.compare(a.tag, b.tag))
   }, [tags])
+}
+
+/**
+ * The same tags, with `available` being what the strip actually needs to say: how much is
+ * left if you click this one, given what is already selected.
+ *
+ * The library-wide number is a constant, and a constant is not an answer to the question
+ * being asked while a filter is on. With the tags ANDed, `available` on an unselected chip
+ * is exactly the size of the list that clicking it would produce - which is why a zero can
+ * be drawn as a dead end rather than as a chip that empties the table when pressed. On a
+ * selected chip it is the size of the current result, since everything shown carries it.
+ *
+ * The order is deliberately still the library-wide one, so nothing moves under the pointer
+ * when a chip is clicked. Sorting by availability would re-lay-out the whole strip on every
+ * press, which for the common gesture - narrowing with a second tag - means aiming twice.
+ *
+ * It counts tagged *paths*, like `useAllTags` above, so a tag put on a folder counts once
+ * however many files sit under it. That is the number the strip has always shown, and the
+ * alternative is a subtree walk per tag per keystroke.
+ */
+export function useTagFacets(): Array<{ tag: string; count: number; available: number }> {
+  const all = useAllTags()
+  const tags = useLibrary((s) => s.tags)
+  const tagFilter = useLibrary((s) => s.tagFilter)
+
+  return useMemo(() => {
+    if (tagFilter.length === 0) return all.map((entry) => ({ ...entry, available: entry.count }))
+
+    const counts = new Map<string, number>()
+    for (const applied of Object.values(tags)) {
+      if (!tagFilter.every((tag) => applied.includes(tag))) continue
+      for (const tag of applied) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+    return all.map((entry) => ({ ...entry, available: counts.get(entry.tag) ?? 0 }))
+  }, [all, tags, tagFilter])
 }

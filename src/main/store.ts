@@ -7,7 +7,15 @@
  */
 
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
 import { labelForRoot } from '../shared/roots'
@@ -56,6 +64,12 @@ export function initStore(): void {
   userData = readJson(userDataFile, userData)
   // Merge rather than replace so settings added in later versions get their defaults.
   userData.settings = { ...DEFAULT_SETTINGS, ...userData.settings }
+
+  // The developer switch that puts the app back to a first launch, and the restore that
+  // undoes it. Before anything else, because everything below seeds defaults into whatever
+  // survives them.
+  if (userData.settings.resetOnLaunch) userData = enterFirstRun()
+  else if (existsSync(stashFile())) userData = leaveFirstRun()
 
   // Always open on the library, never on the stage.
   //
@@ -122,6 +136,105 @@ export function initStore(): void {
 }
 
 /**
+ * Where the real profile waits while the app pretends to be a fresh install.
+ *
+ * One fixed name rather than a stamped one, because this is not a rescue copy - it is the
+ * live document, moved out of the way, and the app has to be able to find it again. Its mere
+ * existence is the flag that says a reset is in force.
+ */
+function stashFile(): string {
+  return join(dataDir, 'umakbang-data.stashed.json')
+}
+
+/**
+ * Puts the app into a first launch: no library, no tags, default settings, welcome screen.
+ *
+ * The first run is the hardest state in the app to get back to and the one most worth being
+ * able to look at, which before this meant deleting a file in `%APPDATA%` by hand and hoping
+ * it was the right one.
+ *
+ * **Reversible, and that is the whole design.** The real document is *moved*, never copied
+ * and never overwritten, and `leaveFirstRun` moves it back the moment the switch goes off -
+ * so "turn it off and the next start loads like normal" means the library, the tags and the
+ * ratings are all there again, not merely that it stops wiping. It is stashed exactly once,
+ * on the launch that enters the mode: every launch after that is already running on a
+ * throwaway document, and stashing that one over the top would destroy the real thing on the
+ * second reboot, which is the one accident this switch must not be able to cause.
+ *
+ * Every armed launch does start over, though. Testing a first run is something you do more
+ * than once, and having to disarm and rearm between attempts is the friction the switch
+ * exists to remove.
+ *
+ * `developerMode` and `resetOnLaunch` are carried across on purpose. Without them the switch
+ * that did this would be invisible on the screen it lands you on, and every launch after it
+ * would reset the app again with nothing on screen able to stop it.
+ *
+ * The scanner's index files are left alone: they are keyed by the hash of a root's path, so
+ * re-adding the same folder replays them in a second rather than costing a full walk. They
+ * describe the disk, not the user, and there is nothing about them to reset.
+ */
+function enterFirstRun(): UserData {
+  const stash = stashFile()
+  try {
+    if (!existsSync(stash)) {
+      if (existsSync(userDataFile)) renameSync(userDataFile, stash)
+      console.log(`[store] first-run mode: real profile stashed at ${stash}`)
+    } else {
+      console.log('[store] first-run mode: already stashed, starting over from defaults')
+    }
+  } catch (error) {
+    // A profile that could not be set aside is a reason not to proceed: the whole reason
+    // this is safe to offer is that the real one is still there afterwards.
+    console.error('[store] refusing to reset - could not set the real profile aside', error)
+    return userData
+  }
+
+  const fresh: UserData = {
+    settings: { ...DEFAULT_SETTINGS, developerMode: true, resetOnLaunch: true },
+    tags: {},
+    ratings: {},
+    notes: {},
+    detectedBpm: {},
+    detectedKey: {},
+    detectedKeyFit: {}
+  }
+  // Written now rather than left to the first patch, so what is on disk matches what is on
+  // screen even if the session is killed rather than quit.
+  writeJsonAtomic(userDataFile, fresh)
+  return fresh
+}
+
+/**
+ * Takes the app back out of the first-run pretence and returns the real profile.
+ *
+ * Reached when the switch is off and a stash is sitting there, which is exactly the state the
+ * user creates by turning it off inside the temporary session. The throwaway document is kept
+ * under one fixed name rather than deleted - it should never hold anything that matters, and
+ * "should never" is not a reason to be the one thing here that destroys a file.
+ *
+ * `resetOnLaunch` is forced off in what comes back, because the profile was stashed *with the
+ * switch on* and restoring it verbatim would arm the next launch all over again.
+ */
+function leaveFirstRun(): UserData {
+  const stash = stashFile()
+  try {
+    if (existsSync(userDataFile)) {
+      renameSync(userDataFile, join(dataDir, 'umakbang-data.discarded-first-run.json'))
+    }
+    renameSync(stash, userDataFile)
+  } catch (error) {
+    console.error('[store] could not restore the stashed profile', error)
+    return userData
+  }
+
+  const restored = readJson<UserData>(userDataFile, userData)
+  restored.settings = { ...DEFAULT_SETTINGS, ...restored.settings, resetOnLaunch: false }
+  writeJsonAtomic(userDataFile, restored)
+  console.log('[store] first-run mode off: real profile restored')
+  return restored
+}
+
+/**
  * Not every Linux setup defines a music directory, and `getPath` throws when one doesn't.
  * Thrown here it would take `initStore` - and with it the whole first launch - down, so
  * fall back to the conventional place instead.
@@ -165,6 +278,75 @@ function scheduleWrite(file: string, getValue: () => unknown, delayMs = 400): vo
   // Don't hold the process open just to flush a cache.
   timer.unref?.()
   pendingWrites.set(file, timer)
+  // One hook for all seven callers, rather than a call beside each of them that the eighth
+  // would forget. The peaks cache is regenerable and enormous; only the document nobody can
+  // rebuild gets snapshots.
+  if (file === userDataFile) scheduleDataBackup()
+}
+
+/**
+ * Rolling snapshots of the one file nobody can rebuild.
+ *
+ * `umakbang-data.json` holds months of tagging, rating and notes, and every write to it is a
+ * write *over* it - the atomic rename means a corrupt or wrong version replaces the good one
+ * with nothing left behind. The daily `.umak` bundle covers the disaster case, but a day is a
+ * long time to lose an afternoon's work in, and it is skipped entirely while a scan is
+ * running.
+ *
+ * Debounced five minutes from the last change rather than written per change: tagging is a
+ * burst of thirty edits in a minute, and thirty copies of a 300KB document says nothing that
+ * one copy afterwards doesn't. The timer is reset by each new edit, so a working session
+ * writes one snapshot five minutes after it stops.
+ *
+ * Bounded at `MAX_DATA_BACKUPS`, oldest first. Unbounded, this is a 300KB file every five
+ * minutes of a working day, and a backup scheme that fills the disk is a bug rather than a
+ * safety net.
+ */
+// Five minutes, or five seconds under the same flag `auto-backup.ts` already answers to -
+// otherwise finding out whether any of this works costs five minutes a run.
+const BACKUP_DEBOUNCE_MS = process.env.UMAKBANG_BACKUP_NOW === '1' ? 5_000 : 5 * 60_000
+const MAX_DATA_BACKUPS = 12
+const BACKUP_PREFIX = 'umakbang-data.backup-'
+let backupTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleDataBackup(): void {
+  if (backupTimer) clearTimeout(backupTimer)
+  const timer = setTimeout(writeDataBackup, BACKUP_DEBOUNCE_MS)
+  // Same as the writes above: a pending snapshot must not be a reason the process stays up.
+  // `flushStore` takes the last one on the way out, which is the case this would have missed.
+  timer.unref?.()
+  backupTimer = timer
+}
+
+function writeDataBackup(): void {
+  backupTimer = null
+  // Sortable and second-resolution, matching the name older builds already left here so
+  // there is one convention and the trim below sweeps both.
+  const now = new Date()
+  const stamp =
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+    `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  writeJsonAtomic(join(dataDir, `${BACKUP_PREFIX}${stamp}.json`), userData)
+  trimDataBackups()
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function trimDataBackups(): void {
+  try {
+    const kept = readdirSync(dataDir)
+      .filter((name) => name.startsWith(BACKUP_PREFIX) && name.endsWith('.json'))
+      // The stamp is fixed-width and big-endian, so lexical order is chronological order.
+      .sort()
+    for (const stale of kept.slice(0, Math.max(0, kept.length - MAX_DATA_BACKUPS))) {
+      rmSync(join(dataDir, stale), { force: true })
+    }
+  } catch {
+    // Trimming is housekeeping. A directory that could not be read is not a reason to lose
+    // the snapshot that has just been written.
+  }
 }
 
 /** Flushes every debounced write immediately. Called on quit. */
@@ -175,6 +357,12 @@ export function flushStore(): void {
     else if (file === peaksFile) writeJsonAtomic(file, peaksCache)
   }
   pendingWrites.clear()
+  // A session shorter than the debounce is the one this would otherwise have no snapshot of,
+  // and quitting is exactly when the last edit stops being re-editable.
+  if (backupTimer) {
+    clearTimeout(backupTimer)
+    writeDataBackup()
+  }
 }
 
 /* ------------------------------------------------------------------ user data */
@@ -369,7 +557,13 @@ const LOCAL_ONLY = [
   // matches nothing on the importing one. Carried across, it would put the receiving app
   // into the one state this setting is built to explain - asked for a device that does not
   // exist - on a machine where nobody had chosen anything.
-  'outputDevice'
+  'outputDevice',
+  // Whether *this* install is being worked on, and whether it is due to throw itself away on
+  // the next launch. A backup is a file people send each other, and an imported setting that
+  // silently wipes the receiving machine's library on its next start is the worst thing in
+  // this file by a distance.
+  'developerMode',
+  'resetOnLaunch'
 ] as const
 
 export function exportBackup(): SettingsBackup {

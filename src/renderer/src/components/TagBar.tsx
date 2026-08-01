@@ -2,7 +2,7 @@ import type React from 'react'
 import { useMemo, useState } from 'react'
 import { Hash, Search, X } from 'lucide-react'
 import { useLibrary } from '@/state/library'
-import { useAllTags } from '@/hooks/useLibraryView'
+import { useTagFacets } from '@/hooks/useLibraryView'
 import { cn } from '@/lib/utils'
 
 /**
@@ -14,7 +14,8 @@ import { cn } from '@/lib/utils'
  * ways of choosing what to look at, and are reached without scrolling past a few thousand
  * folders. Clicking one narrows whatever you're already looking at rather than throwing
  * you into a separate list: the folder you're browsing, minus everything not tagged that
- * way.
+ * way. A second chip narrows again - the tags are ANDed - so the number on each one is what
+ * clicking it would leave, not a library-wide total that never moves.
  */
 /**
  * Above how many tags a search field is worth the two lines it costs.
@@ -25,7 +26,7 @@ import { cn } from '@/lib/utils'
 const SEARCH_FROM = 10
 
 export function TagBar({ height }: { height: number }): React.JSX.Element {
-  const tags = useAllTags()
+  const tags = useTagFacets()
   const tagFilter = useLibrary((s) => s.tagFilter)
   const toggleTagFilter = useLibrary((s) => s.toggleTagFilter)
   const clearTagFilter = useLibrary((s) => s.clearTagFilter)
@@ -43,7 +44,7 @@ export function TagBar({ height }: { height: number }): React.JSX.Element {
   }, [tags, query, tagFilter])
 
   return (
-    <div className="shrink-0 px-2 pt-3">
+    <div data-tour="tags" className="shrink-0 px-2 pt-3">
       <div className="flex items-center justify-between px-1 pb-1">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
           Tags
@@ -96,25 +97,48 @@ export function TagBar({ height }: { height: number }): React.JSX.Element {
           {shown.length === 0 && (
             <p className="px-1 text-[11px] text-muted-foreground/60">No tag matches that.</p>
           )}
-          {shown.map(({ tag, count }) => {
+          {shown.map(({ tag, count, available }) => {
             const active = tagFilter.includes(tag)
+            // Nothing carries this as well as everything already selected, so pressing it
+            // could only empty the table. Faded and dead rather than removed: which tags
+            // exist is the other thing this strip is for, and a chip that vanished when you
+            // narrowed would look like the tag had been lost.
+            const dead = !active && available === 0
             return (
               <button
                 key={tag}
                 type="button"
-                title={`${count} ${count === 1 ? 'file' : 'files'} tagged ${tag}`}
+                title={
+                  dead
+                    ? `Nothing tagged ${tag} is also tagged ${tagFilter.join(' and ')} - ${count} in the library`
+                    : active
+                      ? `${available} ${available === 1 ? 'file' : 'files'} - ${count} tagged ${tag} in the library`
+                      : `${available} of the ${count} tagged ${tag}`
+                }
                 aria-pressed={active}
+                disabled={dead}
                 onClick={() => toggleTagFilter(tag)}
                 className={cn(
                   'flex items-center gap-0.5 rounded border px-1.5 py-px text-[11px] transition-colors',
                   active
                     ? 'border-primary bg-primary/20 text-foreground'
-                    : 'border-border/60 bg-secondary/50 text-muted-foreground hover:bg-accent hover:text-foreground'
+                    : dead
+                      ? 'border-border/30 bg-secondary/20 text-muted-foreground/40'
+                      : 'border-border/60 bg-secondary/50 text-muted-foreground hover:bg-accent hover:text-foreground'
                 )}
               >
                 <Hash className={cn('h-2.5 w-2.5', active ? 'text-primary' : 'opacity-50')} />
                 <span className="max-w-[10rem] truncate">{tag}</span>
-                <span className="tnum pl-0.5 text-[10px] text-muted-foreground/60">{count}</span>
+                {/* What clicking it leaves, not what the library holds. With nothing
+                    selected the two are the same number. */}
+                <span
+                  className={cn(
+                    'tnum pl-0.5 text-[10px]',
+                    dead ? 'text-muted-foreground/30' : 'text-muted-foreground/60'
+                  )}
+                >
+                  {available}
+                </span>
               </button>
             )
           })}

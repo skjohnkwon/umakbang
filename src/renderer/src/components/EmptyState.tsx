@@ -10,9 +10,33 @@ export function NoLibrary(): React.JSX.Element {
   // user doesn't have yet. The wizard renders over this screen; it maps folders, it
   // doesn't open one, so choosing a folder is still the next step either way.
   const beginImport = useLibrary((s) => s.beginImport)
+  const resetArmed = useLibrary((s) => s.settings.resetOnLaunch)
+  const patchSettings = useLibrary((s) => s.patchSettings)
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+      {/* Why this screen is showing, when it is showing because a developer switch put it
+          here rather than because the app is new. Without it, arriving at the welcome screen
+          with a library you know you have reads as the app having lost it - and the switch
+          that did it stays on, so it would happen again on the next launch too. */}
+      {resetArmed && (
+        <div className="mb-1 max-w-[420px] rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-left">
+          <p className="text-[12px] font-medium">Started fresh, on purpose</p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            &ldquo;Start fresh on next launch&rdquo; is on in Settings &rarr; Developer, so this
+            launch came up as a new install. Nothing was deleted: your real library, tags and
+            ratings are set aside, and they come back on the launch after you turn this off.
+          </p>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="mt-1.5"
+            onClick={() => patchSettings({ resetOnLaunch: false })}
+          >
+            Turn it off and restore on next launch
+          </Button>
+        </div>
+      )}
       <Logo className="h-9 w-9 text-primary/70" />
       <div>
         <h2 className="text-[15px] font-medium">Point umakbang at your music folder</h2>

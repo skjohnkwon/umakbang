@@ -430,6 +430,34 @@ export interface Settings {
   /** Which separation model to ask for, and what container to get back. */
   stemSplitter: string
   stemFormat: string
+
+  /**
+   * Whether the guided first run has already happened.
+   *
+   * Set the moment the tour ends, however it ends - finished or skipped - because a tour
+   * somebody skipped is a tour they have decided about, and asking again on the next launch
+   * is the same intrusion a second time.
+   */
+  tutorialSeen: boolean
+  /**
+   * Shows the switches that are for testing umakbang rather than for using it.
+   *
+   * A gate rather than a hidden key sequence: the thing behind it throws this machine's
+   * settings away, and an option that destructive should be one somebody deliberately turned
+   * on and can see is on.
+   */
+  developerMode: boolean
+  /**
+   * Come up on the next launch as though nothing had ever been set: no library, default
+   * settings, the welcome screen.
+   *
+   * The first run is the hardest state to get back to and the one most worth testing, and
+   * the alternative is deleting a file in `%APPDATA%` by hand and hoping it was the right
+   * one. The current data file is copied aside before anything is thrown away, and both this
+   * and `developerMode` survive the reset - without that the switch would be invisible on the
+   * screen you land on and every launch after it would wipe the machine again.
+   */
+  resetOnLaunch: boolean
 }
 
 /** One entry in the "Move to" menu. */
@@ -738,7 +766,13 @@ export const DEFAULT_SETTINGS: Settings = {
   bundleExportDir: '',
   stemOutputDir: '',
   stemSplitter: 'lynx',
-  stemFormat: 'mp3'
+  stemFormat: 'mp3',
+  // False, so a fresh install gets the tour once a folder is open. An install that predates
+  // the tour gets it too, which is the right way round: it is twenty seconds and it can be
+  // stopped at any point.
+  tutorialSeen: false,
+  developerMode: false,
+  resetOnLaunch: false
 }
 
 /* ------------------------------------------------------------------ stems */

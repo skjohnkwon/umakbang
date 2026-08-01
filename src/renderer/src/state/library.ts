@@ -253,7 +253,14 @@ interface LibraryState {
    * sight would read as the app having broken.
    */
   miniPlayer: boolean
-  /** Folder view shows every descendant rather than just direct children. */
+  /**
+   * Folder view shows every descendant rather than just direct children, and no folder
+   * rows at all. The toolbar's folders toggle, and what a search switches on by itself.
+   *
+   * Not persisted, unlike `typeFilter`. At the top level this is every file in the library
+   * - 326k rows to sort before the first paint - and launching into that because of a
+   * toggle pressed days ago is indistinguishable from the app hanging.
+   */
   recursive: boolean
   /**
    * Quick filters from the Type menu. Empty arrays mean "everything"; within a list the
@@ -261,9 +268,16 @@ interface LibraryState {
    */
   typeFilter: { kinds: TrackKind[]; exts: string[] }
   /**
-   * Tags to narrow the view to, ORed together. Deliberately *not* persisted: the type
-   * filter is a mode you leave switched on, but a tag filter is a question you asked
-   * once, and finding the library apparently empty after a restart is no way to answer it.
+   * Tags to narrow the view to, ANDed together: a file has to carry all of them.
+   *
+   * They used to be ORed, and that was wrong in the one way a filter cannot afford to be -
+   * lighting a second chip made the list *longer*. Every other control in the app narrows,
+   * so two tags selected and 85 files on screen reads as the filter having stopped working
+   * rather than as a union. Either tag on its own is still one click.
+   *
+   * Deliberately *not* persisted: the type filter is a mode you leave switched on, but a tag
+   * filter is a question you asked once, and finding the library apparently empty after a
+   * restart is no way to answer it.
    */
   tagFilter: string[]
 
@@ -894,9 +908,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     const passesType =
       (typeFilter.kinds.length === 0 || typeFilter.kinds.includes(track.kind)) &&
       (typeFilter.exts.length === 0 || typeFilter.exts.includes(track.ext))
+    // Every selected tag, matching the filter itself. A file that answers only some of them
+    // is one the filter would hide, so the filter goes rather than the reveal failing.
     const passesTags =
       tagFilter.length === 0 ||
-      tagFilter.some((tag) => tags[keyOf(track)]?.includes(tag))
+      tagFilter.every((tag) => tags[keyOf(track)]?.includes(tag))
 
     const view: ViewMode = { mode: 'folder', dir: track.relDir }
 
@@ -1418,6 +1434,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   dismissNotice: () => set({ notice: null }),
 
   setMiniPlayer: (mini) => {
+    // Never into a 300px transport with no library behind it. There is nothing to play, and
+    // the mini player carries only the way back and the transport - so the welcome screen's
+    // Choose folder button, which is the one thing there is to do, is not on screen. The
+    // title bar's button is disabled for the same reason; this is the guard, so the menu and
+    // anything added later cannot get in either.
+    if (mini && get().roots.length === 0) return
     // The two shrunken modes fight over the same stashed window bounds, so entering one
     // leaves the other.
     if (mini && get().settings.visualizerOnly) get().patchSettings({ visualizerOnly: false })

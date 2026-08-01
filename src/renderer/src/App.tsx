@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MotionConfig } from 'motion/react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SEARCH_INPUT_ID, TitleBar } from '@/components/TitleBar'
@@ -23,6 +23,7 @@ import { ContractsPage } from '@/components/contracts/ContractsPage'
 import { VideosPage } from '@/components/videos/VideosPage'
 import { ContractDialog } from '@/components/ContractDialog'
 import { ImportWizard } from '@/components/ImportWizard'
+import { Tutorial } from '@/components/Tutorial'
 import { useContracts } from '@/state/contracts'
 import { useVideos } from '@/state/videos'
 import { connectLibraryEvents, useLibrary } from '@/state/library'
@@ -99,6 +100,32 @@ export default function App(): React.JSX.Element {
     !ready || (!arrived.current && roots.length > 0 && (scanning || progress === null))
 
   useEffect(() => connectLibraryEvents(), [])
+
+  /**
+   * The guided first run, once there is something to point at.
+   *
+   * It waits for the library rather than firing on the welcome screen: every step frames a
+   * real element, and five of the seven do not exist until a folder is open. So this is
+   * "after the first folder is added, when the app has finished arriving" expressed as the
+   * conditions that make it true, rather than as a hook into the add itself - which would
+   * also miss the launch after the one where the folder was chosen.
+   *
+   * `tutorialSeen` is the whole of the gate, so the Replay button in Settings works by
+   * clearing it: this fires again the moment it goes false, which is why the condition is
+   * not latched in a ref.
+   */
+  const tutorialSeen = useLibrary((s) => s.settings.tutorialSeen)
+  const [tourOpen, setTourOpen] = useState(false)
+  useEffect(() => {
+    if (tutorialSeen || !ready || loading || roots.length === 0) return
+    // Not over the stage, the mini player or a page with none of the anchors on it.
+    if (visualizerOnly || miniPlayer || view.mode !== 'folder') return
+    // A beat after the page swap, so the first spotlight measures a laid-out window rather
+    // than one mid-animation - the frame would land in the right place and then visibly
+    // jump.
+    const timer = setTimeout(() => setTourOpen(true), 700)
+    return () => clearTimeout(timer)
+  }, [tutorialSeen, ready, loading, roots.length, visualizerOnly, miniPlayer, view.mode])
 
   // The updater installs on quit rather than interrupting, so the only thing it needs
   // from the UI is to say that it will. One notice per downloaded version.
@@ -407,7 +434,14 @@ export default function App(): React.JSX.Element {
                toggling back is instant and playback never stops. */
             <VisualizerOnlyView />
           ) : roots.length === 0 ? (
-            <NoLibrary />
+            /* Settings is reachable before there is a library, because the cog is on screen
+               before there is one and a button that visibly does nothing is worse than no
+               button. It is also the way out of a trap: the developer reset lands here with
+               the switch still armed, and if the only route to that switch ran through a
+               library the user no longer has, arming it once would mean every later launch
+               wiping the machine again with nothing on screen able to stop it. The page is
+               self-contained - its own nav, its own way back - so it stands alone here. */
+            view.mode === 'settings' ? <SettingsPage /> : <NoLibrary />
           ) : (
             <div className="flex min-h-0 flex-1">
               <Sidebar />
@@ -463,6 +497,9 @@ export default function App(): React.JSX.Element {
               onClose={cancelImport}
             />
           )}
+
+          {/* Over everything, and only ever over the explorer - see the effect above. */}
+          {tourOpen && <Tutorial onDone={() => setTourOpen(false)} />}
 
           <Notice />
         </div>

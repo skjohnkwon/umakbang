@@ -1545,6 +1545,7 @@ export function FileTable({
         <ContextMenuTrigger asChild>
           <div
             ref={scrollRef}
+            data-tour="table"
             tabIndex={0}
             onKeyDown={onKeyDown}
             onContextMenu={onContextMenu}
