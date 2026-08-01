@@ -321,6 +321,12 @@ export function Stage({
         onPointerDown={(event) => { if (event.target === event.currentTarget) select(null) }}
         className="relative flex min-h-[180px] flex-1 items-center justify-center overflow-hidden p-3"
       >
+        {/* Named to match the Layers strip below it, in the same 9px uppercase the timeline
+            header uses. Absolute and non-interactive, so it labels the area without taking a
+            row of height from the picture or a click from the canvas. */}
+        <span className="pointer-events-none absolute left-3 top-1.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Frame
+        </span>
         <div
           ref={frameRef}
           onPointerDown={onPointerDown}
@@ -713,7 +719,11 @@ function Timeline({
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
         <div className="flex h-5 border-b text-[9px] text-muted-foreground">
-          <div className="w-[116px] shrink-0 border-r px-2 py-0.5 font-semibold uppercase tracking-wide">Timeline</div>
+          {/* "Layers" rather than "Timeline": the column underneath is one row per layer,
+              and it is the same set the Layers panel lists. Naming the two halves of the
+              editor after what is in them - Frame above, Layers below - says which one an
+              edit is going to land in. */}
+          <div className="w-[116px] shrink-0 border-r px-2 py-0.5 font-semibold uppercase tracking-wide">Layers</div>
           <div className="relative min-w-0 flex-1 cursor-ew-resize" onPointerDown={beginTimelineScrub}>
             {ticks.map((tick) => (
               <span key={tick} className="absolute top-0 -translate-x-1/2 font-mono" style={{ left: `${(tick / duration) * 100}%` }}>

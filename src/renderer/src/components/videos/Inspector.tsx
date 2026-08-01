@@ -25,6 +25,7 @@ import {
   ASPECT_ORDER,
   ASPECTS,
   FONT_FAMILIES,
+  FULL_FRAME,
   createLayer,
   type AudioLayer,
   type ImageLayer,
@@ -587,9 +588,21 @@ function CropFields({
   const ratio = outputAspect / sourceAspect
   const crop = layer.crop
 
-  function largestCrop(): VideoLayer['crop'] {
-    if (ratio >= 1) return { x: 0, y: (1 - 1 / ratio) / 2, w: 1, h: 1 / ratio }
-    return { x: (1 - ratio) / 2, y: 0, w: ratio, h: 1 }
+  /**
+   * Reset is the whole source, undistorted: the crop goes back to the entire recording *and* the
+   * layer box is reshaped to the source's own aspect, centred and as large as the frame allows.
+   * Resetting the crop on its own kept the box's shape, so a 16:9 capture in a 9:16 project reset
+   * to the largest centred slice that box could hold - still a crop, and never the clip itself.
+   */
+  function resetPatch(): Partial<Layer> {
+    // The box is in frame fractions, so the shape it needs is the source aspect over the frame's.
+    const boxAspect = sourceAspect / (spec.width / spec.height)
+    const w = Math.min(1, boxAspect)
+    const h = w / boxAspect
+    return {
+      crop: { ...FULL_FRAME },
+      frame: { x: (1 - w) / 2, y: (1 - h) / 2, w, h }
+    } as Partial<Layer>
   }
 
   function pointerMove(event: React.PointerEvent<HTMLElement>): void {
@@ -740,11 +753,15 @@ function CropFields({
         variant="outline"
         size="sm"
         className="w-full"
-        onClick={() => set({ crop: largestCrop() } as Partial<Layer>)}
+        onClick={() => set(resetPatch())}
       >
         <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
         Reset {layer.kind === 'video' ? 'video' : 'image'} crop
       </Button>
+      <p className="text-[10.5px] text-muted-foreground">
+        Puts the whole {layer.kind === 'video' ? 'clip' : 'image'} back, at its own aspect ratio,
+        centred in the frame.
+      </p>
     </>
   )
 }

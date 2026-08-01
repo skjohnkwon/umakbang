@@ -6,6 +6,7 @@ import {
   Clapperboard,
   Download,
   FolderOpen,
+  Loader2,
   PanelBottomClose,
   PanelBottomOpen,
   Pencil,
@@ -14,6 +15,7 @@ import {
   X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Hint } from '@/components/ui/tooltip'
 import { useLibrary } from '@/state/library'
@@ -254,10 +256,18 @@ function ProjectRow({ entry }: { entry: VideoProject }): React.JSX.Element {
 
 /* --- the editor -------------------------------------------------------------------- */
 
+/**
+ * Export is deliberately not among these.
+ *
+ * It is the one thing in the editor that is not an edit: everything else here changes what
+ * the frame looks like and is watched while it is changed, where export is a decision you
+ * make once and then wait on. As a third of a 330px side panel it also had to fold the
+ * quality picker, the progress bar and the whole history of past renders into a column
+ * narrower than the file paths it was listing.
+ */
 const TABS = [
   { id: 'layers', label: 'Layers' },
-  { id: 'project', label: 'Frame' },
-  { id: 'export', label: 'Export' }
+  { id: 'project', label: 'Frame' }
 ] as const
 
 function Editor(): React.JSX.Element {
@@ -268,6 +278,7 @@ function Editor(): React.JSX.Element {
   const [tab, setTab] = useState<string>('layers')
   const [pendingDelete, setPendingDelete] = useState<string[]>([])
   const [panelWidth, setPanelWidth] = useState(330)
+  const [exportOpen, setExportOpen] = useState(false)
 
   // One stage for the life of the editor. Rebuilding it per render would re-decode the track
   // and reload every video element, which is seconds of work and a black frame each time.
@@ -332,6 +343,10 @@ function Editor(): React.JSX.Element {
           <EditorVideoName project={project} />
           <SaveState />
           <PlayerToggle />
+          {/* The way out of the editor, next to the other thing you do when you have
+              finished: it sits at the end of the header rather than in the panel, because
+              it is the one control here that is about the file rather than the frame. */}
+          <ExportButton onOpen={() => setExportOpen(true)} />
         </div>
         <Stage stage={stage} onRequestRemove={(id) => setPendingDelete([id])} />
       </div>
@@ -368,9 +383,10 @@ function Editor(): React.JSX.Element {
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
           {tab === 'layers' && <LayerList onRequestRemove={(id) => setPendingDelete([id])} />}
           {tab === 'project' && <ProjectFields />}
-          {tab === 'export' && <ExportPanel stage={stage} />}
         </div>
       </div>
+
+      <ExportDialog stage={stage} open={exportOpen} onOpenChange={setExportOpen} />
 
       {pendingDelete.length > 0 && (
         <ConfirmDialog
@@ -495,21 +511,75 @@ const BITRATES = [
   { value: 20_000_000, label: 'Very high (20 Mbps)' }
 ]
 
-function ExportPanel({ stage }: { stage: VideoStage }): React.JSX.Element {
+/**
+ * The header button, which also has to be the one place that says an export is running.
+ *
+ * The dialog can be closed while a render carries on - it is minutes of work on a long
+ * project, and trapping the user in a modal to watch a progress bar is the reason people
+ * alt-tab away and lose track of it. So the button carries the percentage when the dialog
+ * is shut, and pressing it puts the dialog back.
+ */
+function ExportButton({ onOpen }: { onOpen: () => void }): React.JSX.Element {
+  const live = useSyncExternalStore(subscribeStage, stageState)
+  const running = live.exporting
+
+  return (
+    <Button
+      variant={running ? 'secondary' : 'default'}
+      size="sm"
+      className="ml-auto"
+      onClick={onOpen}
+    >
+      {running ? (
+        <>
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Rendering {Math.round(running.progress * 100)}%
+        </>
+      ) : (
+        <>
+          <Download className="h-3 w-3" /> Export
+        </>
+      )}
+    </Button>
+  )
+}
+
+function ExportDialog({
+  stage,
+  open,
+  onOpenChange
+}: {
+  stage: VideoStage
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
   const project = useVideos((s) => s.project)
   const save = useVideos((s) => s.save)
   const recordExport = useVideos((s) => s.recordExport)
   const notify = useLibrary((s) => s.notify)
   const live = useSyncExternalStore(subscribeStage, stageState)
   const [bitrate, setBitrate] = useState(12_000_000)
+  /** Wall clock of the last run, so what it costs is measured rather than promised. */
+  const [took, setTook] = useState(0)
 
   if (!project) return <></>
   const container = VideoStage.container()
   const duration = projectDuration(project)
+  const exports = project.exports ?? []
+  const hasMedia = project.layers.some((layer) => layer.kind === 'audio' || layer.kind === 'video')
 
   async function run(): Promise<void> {
     await save()
-    const result = await stage.exportVideo(bitrate)
+    // A local, not state: `setBegan(...)` then reading `began` in the same closure reads the
+    // value from *before* the render, which is zero on the first run - so the elapsed time
+    // came out as however long the window had been open. It reported 22 seconds for a render
+    // that took one and a half.
+    const startedAt = performance.now()
+    setTook(0)
+    const result = await stage.renderVideo(bitrate)
+    const elapsed = performance.now() - startedAt
+    // Stopping it was the user's own doing and needs no notice.
+    if (result.cancelled) return
     if (result.error) {
       notify(result.error, 'error')
       return
@@ -518,105 +588,149 @@ function ExportPanel({ stage }: { stage: VideoStage }): React.JSX.Element {
       notify('The export finished but did not return a file location.', 'error')
       return
     }
+    setTook(elapsed)
     await recordExport(result.path)
     notify(`Video written to ${result.path}.`)
   }
 
+  const progress = live.exporting
+
   return (
-    <div className="space-y-2.5 px-3 py-2.5">
-      <label className="block">
-        <span className="mb-0.5 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
-          Quality
-        </span>
-        <select
-          value={bitrate}
-          onChange={(event) => setBitrate(Number(event.target.value))}
-          className="h-7 w-full rounded-md border border-input bg-background px-1.5 text-[12.5px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          {BITRATES.map((entry) => (
-            <option key={entry.value} value={entry.value}>
-              {entry.label}
-            </option>
-          ))}
-        </select>
-      </label>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="max-w-[760px]">
+        <header className="border-b px-4 py-3">
+          <DialogTitle>Export video</DialogTitle>
+          <DialogDescription>
+            {project.aspect} at {project.fps}fps, {formatTime(duration)},{' '}
+            {container.ext.slice(1).toUpperCase()}.{' '}
+            {container.ext === '.mp4'
+              ? 'H.264 and AAC, which is what Instagram and TikTok take.'
+              : 'This build has no MP4 encoder, so it writes WebM. Most platforms refuse that; convert it before posting.'}
+          </DialogDescription>
+        </header>
 
-      <p className="text-[11px] text-muted-foreground">
-        {project.aspect} at {project.fps}fps, {container.ext.slice(1).toUpperCase()}.{' '}
-        {container.ext === '.mp4'
-          ? 'H.264 and AAC, which is what Instagram and TikTok take.'
-          : 'This build has no MP4 encoder, so it writes WebM. Most platforms will refuse that; convert it before posting.'}
-      </p>
+        <div className="grid gap-4 px-4 py-3 sm:grid-cols-[1fr_320px]">
+          <section className="min-w-0 space-y-3">
+            <label className="block">
+              <span className="mb-1 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                Quality
+              </span>
+              <select
+                value={bitrate}
+                disabled={Boolean(progress)}
+                onChange={(event) => setBitrate(Number(event.target.value))}
+                className="h-8 w-full rounded-md border border-input bg-background px-2 text-[12.5px] outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                {BITRATES.map((entry) => (
+                  <option key={entry.value} value={entry.value}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-      {live.exporting ? (
-        <>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full bg-primary transition-[width] duration-200"
-              style={{ width: `${Math.round(live.exporting.progress * 100)}%` }}
-            />
-          </div>
-          <p className="text-[11.5px] text-muted-foreground">
-            {Math.round(live.exporting.progress * 100)}% · {formatSize(live.exporting.bytes)}{' '}
-            written
-          </p>
-          <Button variant="outline" size="sm" onClick={() => stage.cancelExport()}>
-            Stop
-          </Button>
-        </>
-      ) : (
-        <Button onClick={() => void run()} disabled={!project.layers.some((layer) => layer.kind === 'audio' || layer.kind === 'video')}>
-          <Download className="h-3 w-3" /> Export {formatTime(duration)}
-        </Button>
-      )}
-
-      {/* Said out loud rather than discovered. The export plays the video through once while
-          it is encoded, so it takes as long as the video is - see `stage.ts` for why that is
-          the trade rather than an oversight. */}
-      <p className="text-[11px] text-muted-foreground">
-        Exporting plays the video through while it records, so it takes about{' '}
-        {formatTime(duration)}. Leave it be while it runs.
-      </p>
-
-      <section className="border-t pt-2.5">
-        <div className="mb-1.5 flex items-center justify-between">
-          <span className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">
-            Project exports
-          </span>
-          <span className="text-[10.5px] tabular-nums text-muted-foreground/60">
-            {(project.exports ?? []).length}
-          </span>
-        </div>
-        {(project.exports ?? []).length === 0 ? (
-          <p className="rounded-md border border-dashed px-2 py-3 text-center text-[11px] text-muted-foreground">
-            Exports from this project will appear here.
-          </p>
-        ) : (
-          <div className="scroll-thin max-h-64 space-y-1.5 overflow-y-auto pr-1">
-            {(project.exports ?? []).map((entry) => (
-              <div key={entry.id} className="rounded-md border px-2 py-1.5">
-                <p className="truncate text-[11.5px] font-medium" title={entry.name}>
-                  {entry.name}
+            {progress ? (
+              <div className="space-y-2 rounded-md border bg-card/50 p-3">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-primary transition-[width] duration-200"
+                    style={{ width: `${Math.round(progress.progress * 100)}%` }}
+                  />
+                </div>
+                <p className="text-[11.5px] tabular-nums text-muted-foreground">
+                  {Math.round(progress.progress * 100)}% · {formatSize(progress.bytes)} written
                 </p>
-                <p className="mt-0.5 text-[10.5px] text-muted-foreground">
-                  {formatDateTime(entry.createdAt)}
+                <p className="truncate font-mono text-[10px] text-muted-foreground/70" title={progress.path}>
+                  {progress.path}
                 </p>
-                <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/70" title={entry.path}>
-                  {entry.path}
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-1.5 w-full"
-                  onClick={() => void window.umakbang.reveal(entry.path)}
-                >
-                  <FolderOpen className="h-3 w-3" /> Open file location
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => stage.cancelExport()}>
+                    Stop
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+                    Leave it running
+                  </Button>
+                </div>
               </div>
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
+            ) : (
+              <div className="space-y-2">
+                <Button className="w-full" disabled={!hasMedia} onClick={() => void run()}>
+                  <Download className="h-3.5 w-3.5" /> Render {formatTime(duration)}
+                </Button>
+                {!hasMedia && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Add an audio or video layer first - there is nothing to render yet.
+                  </p>
+                )}
+                {took > 0 && (
+                  <p className="text-[11px] text-primary">
+                    {/* Seconds with a decimal below a minute. A render that beat real time by
+                        4x rounded to "0:01" says nothing about how much faster it now is. */}
+                    Last render took{' '}
+                    {took < 60_000
+                      ? `${(took / 1000).toFixed(1)}s`
+                      : formatTime(Math.round(took / 1000))}{' '}
+                    for {formatTime(duration)} of video.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Said out loud rather than discovered, the way the old real-time note was.
+                What it says has changed: the render is no longer paced by the clock, so how
+                long it takes is a property of the machine and of what is in the project. */}
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Rendered as fast as this machine can draw and encode it, not by playing it
+              through, and silently - nothing comes out of the speakers. A beat over
+              visualizers goes many times faster than real time; a project built on video
+              layers is paced by seeking them, so it takes longer.
+            </p>
+          </section>
+
+          <section className="min-w-0 border-t pt-3 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+                Project exports
+              </span>
+              <span className="text-[10.5px] tabular-nums text-muted-foreground/60">
+                {exports.length}
+              </span>
+            </div>
+            {exports.length === 0 ? (
+              <p className="rounded-md border border-dashed px-2 py-6 text-center text-[11px] text-muted-foreground">
+                Exports from this project will appear here.
+              </p>
+            ) : (
+              <div className="scroll-thin max-h-[320px] space-y-1.5 overflow-y-auto pr-1">
+                {exports.map((entry) => (
+                  <div key={entry.id} className="rounded-md border px-2 py-1.5">
+                    <p className="truncate text-[11.5px] font-medium" title={entry.name}>
+                      {entry.name}
+                    </p>
+                    <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+                      {formatDateTime(entry.createdAt)}
+                    </p>
+                    <p
+                      className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/70"
+                      title={entry.path}
+                    >
+                      {entry.path}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-1.5 w-full"
+                      onClick={() => void window.umakbang.reveal(entry.path)}
+                    >
+                      <FolderOpen className="h-3 w-3" /> Open file location
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

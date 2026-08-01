@@ -20,6 +20,7 @@
  */
 
 import { drawFrame, frameSize, type Sources } from './compositor'
+import { buildMp4, type EncodedSample } from './mp4'
 import { analyseBuffer, emptyAnalysis, type ClipAnalysis } from './analysis'
 import {
   projectDuration,
@@ -134,6 +135,88 @@ function videoClipAt(layer: VideoLayer, time: number): ActiveVideoClip | null {
   return time >= from && time < to ? { from, to, offset: layer.offset } : null
 }
 
+/**
+ * Moves a paused element to an exact time and waits for the frame to be there.
+ *
+ * The timeout is not defensive tidiness: a seek past the end of a slightly mis-declared
+ * duration, or into a gap in a recovered file, never fires `seeked` at all, and one frame
+ * that never resolves would hang a render with a progress bar sitting still. Drawing a
+ * slightly stale frame is the better failure.
+ */
+function seekTo(element: HTMLVideoElement, to: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (): void => {
+      if (settled) return
+      settled = true
+      element.removeEventListener('seeked', done)
+      window.clearTimeout(timer)
+      resolve()
+    }
+    const timer = window.setTimeout(done, 2000)
+    element.addEventListener('seeked', done)
+    try {
+      element.currentTime = to
+    } catch {
+      done()
+    }
+  })
+}
+
+/** What the AAC track is encoded at, and what the sample description has to declare. */
+const AUDIO_BITRATE = 192_000
+
+/**
+ * The first H.264 profile and level this build will encode the frame at.
+ *
+ * A level is a ceiling on frame size as much as on bitrate, so the obvious `avc1.42E01E` -
+ * baseline 3.0, which half the web copies from an example - is *not supported at 1080x1920*:
+ * measured, it is refused outright, and a portrait reel is exactly the case this feature is
+ * for. High profile at 4.0 takes 8192 macroblocks where a 1080x1920 frame needs 8100.
+ * Descending from there so an unusually large frame still finds something, and returning null
+ * rather than guessing, since the caller has a real-time path to fall back to.
+ */
+async function supportedAvcCodec(
+  width: number,
+  height: number,
+  bitrate: number,
+  framerate: number
+): Promise<string | null> {
+  if (typeof VideoEncoder === 'undefined') return null
+  for (const codec of ['avc1.640034', 'avc1.640032', 'avc1.640028', 'avc1.4D0032', 'avc1.42E032']) {
+    try {
+      const support = await VideoEncoder.isConfigSupported({
+        codec,
+        width,
+        height,
+        bitrate,
+        framerate,
+        avc: { format: 'avc' }
+      })
+      if (support.supported) return codec
+    } catch {
+      // An unparseable codec string on this build. Try the next.
+    }
+  }
+  return null
+}
+
+/**
+ * Gives every sample the duration of the gap to the next one.
+ *
+ * The encoder reports a duration per chunk, but only the gaps actually tile the timeline: a
+ * rounded 33333µs frame duration repeated 1800 times drifts a full frame away from where the
+ * timestamps say the samples are, and a container whose sample table disagrees with itself is
+ * a video that slowly desynchronises from its own sound. The last sample has no successor, so
+ * it takes the nominal duration.
+ */
+function spanDurations(samples: EncodedSample[], nominal: number): EncodedSample[] {
+  return samples.map((sample, index) => {
+    const next = samples[index + 1]
+    return { ...sample, duration: next ? Math.max(1, next.time - sample.time) : nominal }
+  })
+}
+
 interface LoadedAudio {
   source: string
   buffer: AudioBuffer
@@ -189,6 +272,11 @@ export class VideoStage {
   private playRequest = 0
 
   private recorder: MediaRecorder | null = null
+  /** The fast render is running. Separate from `recorder`, which is the real-time path. */
+  private rendering = false
+  private cancelled = false
+  /** A video layer's sound, decoded once. `null` means "looked, and it has none". */
+  private videoAudioBuffers = new Map<string, AudioBuffer | null>()
   private writeId = ''
   private exportBytes = 0
   /** Last progress paint; export encoding must not compete with React sixty times a second. */
@@ -548,9 +636,23 @@ export class VideoStage {
     else this.play()
   }
 
-  private startAudio(from: number): void {
+  /**
+   * Puts every audio layer on a context, with its trim, its gain and its fades.
+   *
+   * One implementation, used by live playback and by the offline render - `origin` is the
+   * context time that project time `from` lands on, which is `currentTime` when playing and
+   * zero when rendering. Two copies of this would be two answers to "when does the fade
+   * start", and the export disagreeing with the preview about a fade is the exact class of
+   * bug the "export is the preview" rule exists to prevent.
+   */
+  private scheduleAudioLayers(
+    ctx: BaseAudioContext,
+    destination: AudioNode,
+    from: number,
+    origin: number,
+    onScheduled?: (layerId: string, source: AudioBufferSourceNode, gain: GainNode) => void
+  ): void {
     if (!this.project) return
-    const ctx = audio()
     const projectEnd = projectDuration(this.project)
     for (const layer of this.project.layers) {
       if (layer.kind !== 'audio' || layer.hidden) continue
@@ -566,7 +668,7 @@ export class VideoStage {
       const remaining = Math.min(timelineEnd - playAt, loaded.buffer.duration - sourceOffset)
       if (remaining <= 0) continue
       const startsIn = Math.max(0, playAt - from)
-      const now = ctx.currentTime + startsIn
+      const now = origin + startsIn
       const source = ctx.createBufferSource()
       source.buffer = loaded.buffer
       const gain = ctx.createGain()
@@ -584,15 +686,23 @@ export class VideoStage {
         gain.gain.linearRampToValueAtTime(0.0001, now + remaining)
       }
       source.connect(gain)
-      gain.connect(this.masterGain())
+      gain.connect(destination)
       source.start(now, sourceOffset, remaining)
+      onScheduled?.(layer.id, source, gain)
+    }
+  }
+
+  private startAudio(from: number): void {
+    if (!this.project) return
+    const ctx = audio()
+    this.scheduleAudioLayers(ctx, this.masterGain(), from, ctx.currentTime, (id, source, gain) => {
       this.playheads.add(source)
-      this.audioGains.set(layer.id, gain)
+      this.audioGains.set(id, gain)
       source.onended = () => {
         this.playheads.delete(source)
-        this.audioGains.delete(layer.id)
+        this.audioGains.delete(id)
       }
-    }
+    })
   }
 
   private async startVideos(from: number): Promise<void> {
@@ -797,6 +907,371 @@ export class VideoStage {
     return { mimeType: 'video/webm;codecs=vp9,opus', ext: '.webm' }
   }
 
+  /* --- the fast path ----------------------------------------------------------------- */
+
+  /**
+   * Renders the project as fast as the machine can draw and encode it, rather than by
+   * playing it through.
+   *
+   * **This is the same picture, produced the same way**, which is what makes it safe to
+   * prefer: it calls `drawFrame` with the project time set to each frame's exact moment, on
+   * the same canvas the editor draws into - so the render is still the preview, it is simply
+   * no longer paced by a clock. The old real-time recorder is kept below and is still used
+   * for the one case this cannot serve.
+   *
+   * It encodes with `VideoEncoder` and `AudioEncoder` and containerises with `lib/video/mp4.ts`.
+   * That is deliberate and was arrived at the hard way. Driving `MediaRecorder` from a
+   * `MediaStreamTrackGenerator` looks like it works - it accepts frames as fast as you push
+   * them - but it muxes by *arrival*, not by the timestamps the frames carry, and drops
+   * whatever it cannot consume live. Measured on a 30 second project rendered in 12.6s: the
+   * audio came out 29.932s and correct, the video came out **12.576s** with sample deltas
+   * from 6.5ms to 580ms. A five second test did not show it, because five seconds fits inside
+   * the buffers being overrun. The encoders have neither problem: they queue rather than
+   * drop, `encodeQueueSize` is real backpressure, and a chunk's timestamp is the one that was
+   * put on it.
+   *
+   * The audio is mixed in one `OfflineAudioContext` pass, which is likewise as fast as the
+   * CPU allows, through the same `scheduleAudioLayers` live playback uses. Nothing is played
+   * out loud at any point: there is no monitor path here to mute, because nothing is playing.
+   */
+  async renderVideo(
+    bitrate: number
+  ): Promise<{ path?: string; error?: string; cancelled?: boolean }> {
+    if (!this.canvas || !this.project) return { error: 'Nothing to export.' }
+    if (this.recorder || this.rendering) return { error: 'An export is already running.' }
+
+    // A live camera has no timeline to seek: its frames exist only as they arrive, so the
+    // only way to record one is in real time. Rare, and worth one honest fallback rather
+    // than a feature that silently drops the layer.
+    for (const loaded of this.videos.values()) {
+      if (loaded.stream) return this.exportVideo(bitrate)
+    }
+    const project = this.project
+    const canvas = this.canvas
+    const fps = Math.max(1, project.fps)
+    const duration = projectDuration(project)
+    const total = Math.max(1, Math.round(duration * fps))
+
+    const codec = await supportedAvcCodec(canvas.width, canvas.height, bitrate, fps)
+    if (!codec) return this.exportVideo(bitrate)
+
+    const opened = await window.umakbang.beginVideoWrite('export', project.name, '.mp4')
+    if ('error' in opened) return { error: opened.error }
+
+    this.rendering = true
+    this.cancelled = false
+    this.writeId = opened.id
+    this.exportBytes = 0
+    this.pause()
+    publish({ exporting: { progress: 0, path: opened.path, bytes: 0 }, error: null })
+
+    let videoEncoder: VideoEncoder | null = null
+    let audioEncoder: AudioEncoder | null = null
+
+    try {
+      const mix = await this.renderAudioOffline(duration)
+
+      const videoSamples: EncodedSample[] = []
+      const audioSamples: EncodedSample[] = []
+      let videoDescription: Uint8Array | null = null
+      let audioDescription: Uint8Array | null = null
+      let failure: string | null = null
+
+      // Timestamps are microseconds on the way in and stay microseconds in the container, so
+      // nothing is rounded twice on its way to a frame duration.
+      videoEncoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+          if (metadata?.decoderConfig?.description && !videoDescription) {
+            videoDescription = new Uint8Array(metadata.decoderConfig.description as ArrayBuffer)
+          }
+          const data = new Uint8Array(chunk.byteLength)
+          chunk.copyTo(data)
+          videoSamples.push({
+            data,
+            time: chunk.timestamp,
+            duration: chunk.duration ?? Math.round(1e6 / fps),
+            key: chunk.type === 'key'
+          })
+        },
+        error: (error) => {
+          failure = error.message
+        }
+      })
+      videoEncoder.configure({
+        codec,
+        width: canvas.width,
+        height: canvas.height,
+        bitrate,
+        framerate: fps,
+        // `avc` rather than `annexb`, because the description this yields is the `avcC` the
+        // sample entry needs. In annex-B there is no description at all and the parameter
+        // sets are inline, which no ordinary MP4 player looks for.
+        avc: { format: 'avc' }
+      })
+
+      const rate = mix.sampleRate
+      audioEncoder = new AudioEncoder({
+        output: (chunk, metadata) => {
+          if (metadata?.decoderConfig?.description && !audioDescription) {
+            audioDescription = new Uint8Array(metadata.decoderConfig.description as ArrayBuffer)
+          }
+          const data = new Uint8Array(chunk.byteLength)
+          chunk.copyTo(data)
+          audioSamples.push({
+            data,
+            time: chunk.timestamp,
+            duration: chunk.duration ?? Math.round((1024 * 1e6) / rate),
+            key: true
+          })
+        },
+        error: (error) => {
+          failure = error.message
+        }
+      })
+      audioEncoder.configure({
+        codec: 'mp4a.40.2',
+        sampleRate: rate,
+        numberOfChannels: 2,
+        bitrate: AUDIO_BITRATE
+      })
+
+      this.encodeAudio(audioEncoder, mix)
+
+      for (let index = 0; index < total && !this.cancelled && !failure; index++) {
+        const at = Math.min(duration, index / fps)
+        this.time = at
+        await this.positionVideos(at)
+        this.draw()
+        const frame = new VideoFrame(canvas, {
+          timestamp: Math.round((index * 1e6) / fps),
+          duration: Math.round(1e6 / fps)
+        })
+        // A keyframe every two seconds, so the result can be scrubbed. Left to the encoder
+        // alone, a static visualizer over a still background yields one keyframe at the top
+        // of the file and nothing to seek to afterwards.
+        videoEncoder.encode(frame, { keyFrame: index % Math.max(1, Math.round(fps * 2)) === 0 })
+        frame.close()
+
+        // The backpressure `MediaRecorder` never had. The encoder queues rather than drops,
+        // so all this decides is how far ahead the drawing gets - but letting it run away
+        // means a decoded frame per queued entry sitting in memory.
+        while (videoEncoder.encodeQueueSize > 12 && !this.cancelled) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+
+        if (index % 5 === 0 || index === total - 1) {
+          publish({
+            time: at,
+            // Encoding and muxing are still to come, so the frame loop is not the whole job.
+            // Nine tenths of the bar for the part that takes nine tenths of the time.
+            exporting: {
+              progress: ((index + 1) / total) * 0.9,
+              path: opened.path,
+              bytes: this.exportBytes
+            }
+          })
+          // The loop is a tight await chain that never yields to paint. Without this the
+          // progress bar arrives in one jump at the end.
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+      }
+
+      if (this.cancelled) {
+        window.umakbang.abortVideoWrite(this.writeId)
+        // A distinct answer rather than an empty error string: the caller has to be able to
+        // tell "the user stopped this" from "it finished without telling me where", and an
+        // empty message reads as the second one all the way to a notice saying so.
+        return { cancelled: true }
+      }
+
+      await videoEncoder.flush()
+      await audioEncoder.flush()
+      if (failure) return { error: `The encoder stopped: ${failure}` }
+      if (!videoDescription) return { error: 'The encoder never described the video track.' }
+      if (videoSamples.length === 0) return { error: 'The encoder produced no frames.' }
+
+      publish({ exporting: { progress: 0.95, path: opened.path, bytes: this.exportBytes } })
+
+      const parts = buildMp4(
+        {
+          timescale: 1_000_000,
+          description: videoDescription,
+          samples: spanDurations(videoSamples, Math.round(1e6 / fps)),
+          width: canvas.width,
+          height: canvas.height
+        },
+        {
+          timescale: 1_000_000,
+          description: audioDescription ?? new Uint8Array(0),
+          samples: spanDurations(audioSamples, Math.round((1024 * 1e6) / rate)),
+          sampleRate: rate,
+          channels: 2
+        },
+        AUDIO_BITRATE
+      )
+
+      for (const part of parts) {
+        if (part.length === 0) continue
+        this.exportBytes += part.length
+        await window.umakbang.writeVideoChunk(this.writeId, part)
+      }
+
+      const id = this.writeId
+      this.writeId = ''
+      const result = await window.umakbang.finishVideoWrite(id, null)
+      if (result.error) return { error: result.error }
+      return { path: result.path }
+    } catch (error) {
+      window.umakbang.abortVideoWrite(this.writeId)
+      this.writeId = ''
+      return { error: `The render failed: ${(error as Error).message}` }
+    } finally {
+      this.rendering = false
+      this.cancelled = false
+      // `close()` throws on an encoder that has already errored, and there is nothing left to
+      // do about it by here.
+      try {
+        videoEncoder?.close()
+      } catch {
+        /* already closed */
+      }
+      try {
+        audioEncoder?.close()
+      } catch {
+        /* already closed */
+      }
+      publish({ exporting: null })
+      this.draw()
+    }
+  }
+
+  /**
+   * The whole soundtrack, mixed in one offline pass.
+   *
+   * Audio layers go through `scheduleAudioLayers`, the same code live playback uses. Video
+   * layers cannot: their sound comes out of a `<video>` element, which has no offline
+   * counterpart, so each one's file is decoded and its clips are scheduled to match what the
+   * element would have played. Returns null when the project is silent, and a silent project
+   * still gets a silent track - a file with no audio track at all is one some platforms
+   * reject outright.
+   */
+  private async renderAudioOffline(duration: number): Promise<AudioBuffer> {
+    const rate = 48_000
+    const frames = Math.max(1, Math.ceil(duration * rate))
+    const ctx = new OfflineAudioContext(2, frames, rate)
+
+    this.scheduleAudioLayers(ctx, ctx.destination, 0, 0)
+
+    for (const layer of this.project?.layers ?? []) {
+      if (layer.kind !== 'video' || layer.hidden || layer.volume <= 0) continue
+      const buffer = await this.videoAudio(layer.source)
+      if (!buffer) continue
+      const clips: ActiveVideoClip[] = layer.clips?.length
+        ? layer.clips.map((clip) => ({ from: clip.from, to: clip.to, offset: clip.offset }))
+        : [
+            {
+              from: layer.from ?? 0,
+              to: layer.to ?? (layer.from ?? 0) + Math.max(0, (layer.sourceDuration ?? 0) - layer.offset),
+              offset: layer.offset
+            }
+          ]
+      for (const clip of clips) {
+        const from = Math.max(0, clip.from)
+        const to = Math.min(duration, clip.to)
+        if (to <= from) continue
+        const offset = clip.offset + (from - clip.from)
+        if (offset >= buffer.duration) continue
+        const source = ctx.createBufferSource()
+        source.buffer = buffer
+        const gain = ctx.createGain()
+        gain.gain.value = layer.volume
+        source.connect(gain)
+        gain.connect(ctx.destination)
+        source.start(from, offset, Math.min(to - from, buffer.duration - offset))
+      }
+    }
+
+    return ctx.startRendering()
+  }
+
+  /** A video file's sound as a buffer, decoded once and kept. Null when it has none. */
+  private async videoAudio(source: string): Promise<AudioBuffer | null> {
+    if (!source || source === 'camera') return null
+    const held = this.videoAudioBuffers.get(source)
+    if (held !== undefined) return held
+    let decoded: AudioBuffer | null = null
+    try {
+      const response = await fetch(window.umakbang.fileUrl(source))
+      if (response.ok) decoded = await audio().decodeAudioData(await response.arrayBuffer())
+    } catch {
+      // A video with no audio track, or one this build cannot decode. Silence is the right
+      // answer either way: the alternative is failing an export over a layer nobody can hear.
+      decoded = null
+    }
+    this.videoAudioBuffers.set(source, decoded)
+    return decoded
+  }
+
+  /**
+   * Hands the mixed buffer to the encoder in blocks, timestamped in microseconds.
+   *
+   * Synchronous and up front: an `AudioEncoder` queues what it is given, a minute of stereo
+   * is a few megabytes of float, and encoding it is a fraction of what drawing the frames
+   * costs. Doing it here also means the audio is complete before the first frame is drawn,
+   * so a cancelled render never leaves a half-encoded track to reason about.
+   */
+  private encodeAudio(encoder: AudioEncoder, buffer: AudioBuffer): void {
+    const rate = buffer.sampleRate
+    const channels = Math.min(2, buffer.numberOfChannels)
+    const block = 4800
+    const left = buffer.getChannelData(0)
+    const right = channels > 1 ? buffer.getChannelData(1) : left
+    for (let at = 0; at < buffer.length; at += block) {
+      const count = Math.min(block, buffer.length - at)
+      const data = new Float32Array(count * 2)
+      data.set(left.subarray(at, at + count), 0)
+      data.set(right.subarray(at, at + count), count)
+      const chunk = new AudioData({
+        format: 'f32-planar',
+        sampleRate: rate,
+        numberOfFrames: count,
+        numberOfChannels: 2,
+        timestamp: Math.round((at * 1e6) / rate),
+        data
+      })
+      encoder.encode(chunk)
+      chunk.close()
+    }
+  }
+
+  /**
+   * Puts every video layer on the exact frame the given project time wants.
+   *
+   * A real seek per frame, awaited, which is the whole cost of rendering a project that has
+   * video in it - a beat over visualizers has none of this and renders many times faster
+   * than a screen capture does. Nudging the playback rate, which is what live playback does,
+   * is meaningless here: nothing is playing and every frame has to be the right one rather
+   * than approximately right.
+   */
+  private async positionVideos(time: number): Promise<void> {
+    if (!this.project) return
+    const waits: Promise<void>[] = []
+    for (const layer of this.project.layers) {
+      if (layer.kind !== 'video') continue
+      const loaded = this.videos.get(layer.id)
+      if (!loaded || loaded.stream || loaded.element.readyState < 1) continue
+      const clip = videoClipAt(layer, time)
+      if (!clip) continue
+      const length = loaded.element.duration
+      let want = clip.offset + Math.max(0, time - clip.from)
+      if (layer.loop && Number.isFinite(length) && length > 0) want %= length
+      if (Number.isFinite(length)) want = Math.min(want, Math.max(0, length - 0.001))
+      if (Math.abs(loaded.element.currentTime - want) < 0.0005) continue
+      waits.push(seekTo(loaded.element, want))
+    }
+    await Promise.all(waits)
+  }
+
   async exportVideo(bitrate: number): Promise<{ path?: string; error?: string }> {
     if (!this.canvas || !this.project) return { error: 'Nothing to export.' }
     if (this.recorder) return { error: 'An export is already running.' }
@@ -913,6 +1388,12 @@ export class VideoStage {
 
   /** Stops an export where it is and throws away the partial file. */
   cancelExport(): void {
+    // The fast render owns its own teardown - it is inside an await chain that has to unwind
+    // in order, so all it needs from here is to be told to stop at the next frame.
+    if (this.rendering) {
+      this.cancelled = true
+      return
+    }
     if (!this.recorder) return
     const recorder = this.recorder
     this.recorder = null
@@ -931,7 +1412,7 @@ export class VideoStage {
   }
 
   isExporting(): boolean {
-    return this.recorder !== null
+    return this.recorder !== null || this.rendering
   }
 
   /** Frees the elements and the camera. The AudioContext is deliberately kept. */
