@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,7 +27,9 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
   const [formats, setFormats] = useState<Set<string>>(() => new Set())
   const [picked, setPicked] = useState<Set<string>>(() => new Set())
   const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  /** `bad` is a refusal rather than a result, and is coloured so it reads as one. */
+  const [note, setNote] = useState<{ text: string; bad?: boolean } | null>(null)
   /** Per side, so a shift-range in one column cannot reach into the other. */
   const anchors = useRef<{ favourite: number | null; other: number | null }>({
     favourite: null,
@@ -39,10 +41,19 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
     setCatalog(result.plugins)
     setFrom(result.from)
     setMissing(Boolean(result.missing))
+    setRunning(Boolean(result.running))
   }, [])
 
   useEffect(() => {
     void load()
+  }, [load])
+
+  // Closing FL happens in the other window, so the answer is stale the moment somebody acts
+  // on it. Coming back to umakbang is exactly when they have.
+  useEffect(() => {
+    const again = (): void => void load()
+    window.addEventListener('focus', again)
+    return () => window.removeEventListener('focus', again)
   }, [load])
 
   const matching = useMemo(() => {
@@ -73,8 +84,8 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
         const result = await window.umakbang.flSetFavourites(names, wanted)
         setNote(
           result.failures.length > 0
-            ? result.failures[0]
-            : `${wanted ? 'Favourited' : 'Unfavourited'} ${result.changed}.`
+            ? { text: result.failures[0], bad: true }
+            : { text: `${wanted ? 'Favourited' : 'Unfavourited'} ${result.changed}.` }
         )
         await load()
         // Those rows have crossed to the other column; a selection about where they were is
@@ -121,6 +132,24 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
             a time; this does not.
           </p>
         </DialogDescription>
+
+        {running && (
+          <div className="mt-2 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1.5 text-[11.5px]">
+            <span>
+              FL Studio is open. It rewrites the plugin database when it quits, so anything
+              changed now would be thrown away - close it first.
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="ml-auto h-6 shrink-0 gap-1 text-[11px]"
+              onClick={() => void load()}
+            >
+              <RefreshCw className="h-3 w-3" />
+              Check again
+            </Button>
+          </div>
+        )}
 
         <div className="mt-2 flex items-center gap-1.5">
           <Input
@@ -198,7 +227,7 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
           <div className="flex shrink-0 flex-col items-center justify-center gap-1.5">
             <Button
               size="sm"
-              disabled={busy || toFavourite.length === 0}
+              disabled={busy || running || toFavourite.length === 0}
               onClick={() => void apply(toFavourite, true)}
               className="gap-1"
             >
@@ -208,7 +237,7 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy || toRemove.length === 0}
+              disabled={busy || running || toRemove.length === 0}
               onClick={() => void apply(toRemove, false)}
               className="gap-1"
             >
@@ -242,8 +271,14 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
         </div>
 
         <div className="mt-2 flex items-center gap-2">
-          <span className="text-[11px] text-muted-foreground/70">
-            {note ?? `${(catalog ?? []).filter((p) => p.favourite).length} favourites of ${catalog?.length ?? 0}`}
+          <span
+            className={cn(
+              'text-[11px]',
+              note?.bad ? 'text-primary' : 'text-muted-foreground/70'
+            )}
+          >
+            {note?.text ??
+              `${(catalog ?? []).filter((p) => p.favourite).length} favourites of ${catalog?.length ?? 0}`}
           </span>
           <Button variant="secondary" size="sm" className="ml-auto" onClick={onClose}>
             Done

@@ -487,6 +487,8 @@ const api = {
     }>
     from: string
     missing?: boolean
+    /** FL is open, so nothing here can be changed until it is closed. */
+    running?: boolean
   }> => ipcRenderer.invoke('fl:catalog'),
   /** Adds or removes favourites in bulk. Refuses while FL is running. */
   flSetFavourites: (

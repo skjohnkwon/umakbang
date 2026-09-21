@@ -1889,8 +1889,12 @@ function registerIpc(): void {
   /* --- FL's plugin database --- */
   ipcMain.handle('fl:catalog', async () => {
     const inventory = await readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
-    if (inventory.missing) return { plugins: [], from: inventory.from, missing: true }
-    return readFlCatalog(inventory.from)
+    // Reported with the catalogue so the window can say so before anybody picks anything.
+    // Every write refuses while FL is open, and finding that out by pressing a button that
+    // appears to do nothing is the worst way to learn it.
+    const running = await flIsRunning()
+    if (inventory.missing) return { plugins: [], from: inventory.from, missing: true, running }
+    return { ...(await readFlCatalog(inventory.from)), running }
   })
   ipcMain.handle('fl:setFavourites', async (_event, names: string[], wanted: boolean) => {
     if (await flIsRunning()) {
