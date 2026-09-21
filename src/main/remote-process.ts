@@ -23,7 +23,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createGzip } from 'node:zlib'
 import type { RemoteHello, RemoteLibrary, RemoteRequestLog, RemoteStats } from '../shared/types'
 import { indexFileFor, initIndexStore, patchFileFor } from './index-store'
-import { parseRange, relativeToLibrary, resolveInLibrary } from './remote-routes'
+import { flRelative, parseRange, relativeToLibrary, resolveInLibrary, resolveUnder } from './remote-routes'
 import { collectFlpContents } from './flp'
 import { readPluginInventory } from './plugins'
 import { readFileSync } from 'node:fs'
@@ -353,9 +353,22 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
     }
 
     case '/hash': {
-      const library = libraryOf(params)
       const rel = params.get('rel')
-      if (!library || !rel) {
+      if (!rel) {
+        fail(response, 404)
+        return
+      }
+      if (params.get('scope') === 'fl') {
+        const inFl = resolveUnder(current.flUserData, rel)
+        if (!inFl) {
+          fail(response, 404)
+          return
+        }
+        sendHash(response, inFl)
+        return
+      }
+      const library = libraryOf(params)
+      if (!library) {
         fail(response, 404)
         return
       }
@@ -436,9 +449,37 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
         return
       }
 
-      const samples: Array<{ rel: string; name: string; size: number }> = []
+      const samples: Array<{ rel: string; name: string; size: number; scope?: 'fl' }> = []
       const elsewhere: string[] = []
       for (const recorded of contents.samples) {
+        /*
+         * `%FLStudioUserData%` is FL's own variable, not a path.
+         *
+         * It is where consolidated tracks are written - real audio the project cannot play
+         * without - and it sits in the FL user data folder rather than the library, so it
+         * used to be reported as outside and left out of packages. A project would arrive
+         * with silent tracks and a line blaming factory content.
+         */
+        const fl = flRelative(recorded)
+        if (fl !== null) {
+          const file = resolveUnder(current.flUserData, fl)
+          if (file) {
+            try {
+              samples.push({
+                rel: fl,
+                name: fl.split('/').pop() ?? fl,
+                size: statSync(file).size,
+                scope: 'fl'
+              })
+              continue
+            } catch {
+              // Falls through to being reported as one that cannot come.
+            }
+          }
+          elsewhere.push(recorded)
+          continue
+        }
+
         const within = relativeToLibrary(library, recorded)
         const resolved = within === null ? null : resolveInLibrary(library, within)
         if (!within || !resolved) {
@@ -468,9 +509,25 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
     }
 
     case '/file': {
-      const library = libraryOf(params)
       const rel = params.get('rel')
-      if (!library || !rel) {
+      if (!rel) {
+        fail(response, 404)
+        return
+      }
+      // `scope=fl` reads from the FL user data folder rather than a library - the one place
+      // outside it a project's own audio can live. Resolved and contained exactly as a
+      // library path is; it is a different root, not a looser rule.
+      if (params.get('scope') === 'fl') {
+        const inFl = resolveUnder(current.flUserData, rel)
+        if (!inFl) {
+          fail(response, 404)
+          return
+        }
+        sendFile(request, response, inFl)
+        return
+      }
+      const library = libraryOf(params)
+      if (!library) {
         fail(response, 404)
         return
       }

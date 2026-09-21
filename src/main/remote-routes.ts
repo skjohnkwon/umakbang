@@ -102,6 +102,41 @@ export function relativeToLibrary(library: RemoteLibrary, absolute: string): str
 }
 
 /**
+ * The path inside FL's user data folder, or null when this is not one of those.
+ *
+ * FL records `%FLStudioUserData%\Audio\Rendered\...` for consolidated tracks - a variable
+ * rather than a path, because the folder moves and FL knows where it put it. Everything
+ * under it is the project's own audio, so it has to come with a package, and it is the one
+ * place outside a library that does.
+ */
+export function flRelative(recorded: string): string | null {
+  const match = /^%FLStudioUserData%[\\/]*(.*)$/i.exec(recorded)
+  if (!match) return null
+  return match[1].split('\\').join('/')
+}
+
+/**
+ * A path within a given root, or null - the same containment `resolveInLibrary` does.
+ *
+ * Both sides realpath'd, because the check has to hold against symlinks: a link inside the
+ * folder pointing at `/etc` is a real path out of it, and comparing what was asked for
+ * would never see that.
+ */
+export function resolveUnder(root: string, rel: string): string | null {
+  if (!root || !rel || rel.includes('\0')) return null
+  const within = rel.split('\\').join('/').replace(/^\/+/, '')
+  const candidate = resolve(root, within)
+  try {
+    const base = realpathSync(root)
+    const real = realpathSync(candidate)
+    if (real !== base && !real.startsWith(base + sep)) return null
+    return real
+  } catch {
+    return null
+  }
+}
+
+/**
  * The byte range a request asked for, clamped to the file.
  *
  * Only the single `bytes=a-b` form, which is what a media element sends. Multipart ranges

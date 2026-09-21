@@ -1809,13 +1809,24 @@ function packWarning(preview: PackPreview): string {
     )
   }
   if (preview.elsewhere.length > 0) {
+    // Not guessed at any more. It used to say "factory content, most likely" and was wrong
+    // in the case that matters: a project's own consolidated tracks live in FL's folder,
+    // and calling them factory content is how somebody would decide not to worry.
     parts.push(
       `${preview.elsewhere.length} sample${preview.elsewhere.length === 1 ? '' : 's'} ` +
-        'live outside that library - factory content, most likely - and cannot be packed.'
+        `could not be found: ${listNames(preview.elsewhere.map(leafOf).slice(0, 3))}` +
+        `${preview.elsewhere.length > 3 ? ' and others' : ''}. ` +
+        'The project will open without them.'
     )
   }
   parts.push(`${preview.sampleCount} samples will come over.`)
   return parts.join(' ')
+}
+
+/** The file's own name, whichever platform's separators the path uses. */
+function leafOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
+  return cut === -1 ? path : path.slice(cut + 1)
 }
 
 function listNames(names: string[]): string {

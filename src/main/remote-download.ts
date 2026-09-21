@@ -121,8 +121,15 @@ const CHUNK_BYTES = 2 * 1024 * 1024
  */
 const agent = new Agent({ keepAlive: true, maxSockets: PARALLEL_CHUNKS })
 
-function urlFor(remote: NonNullable<LibraryRoot['remote']>, rel: string): string {
-  return `/file?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(rel)}`
+function urlFor(
+  remote: NonNullable<LibraryRoot['remote']>,
+  rel: string,
+  scope?: 'fl'
+): string {
+  // `scope=fl` reads from the peer's FL user data folder - where a project's consolidated
+  // tracks live - rather than from a library.
+  const where = scope ? `&scope=${scope}` : ''
+  return `/file?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(rel)}${where}`
 }
 
 /**
@@ -132,13 +139,17 @@ function urlFor(remote: NonNullable<LibraryRoot['remote']>, rel: string): string
  * size arrives without a byte of the file. Zero means it would not say, and the caller
  * falls back to one stream and an indeterminate bar.
  */
-function remoteSize(remote: NonNullable<LibraryRoot['remote']>, rel: string): Promise<number> {
+function remoteSize(
+  remote: NonNullable<LibraryRoot['remote']>,
+  rel: string,
+  scope?: 'fl'
+): Promise<number> {
   return new Promise((resolve) => {
     const request = httpGet(
       {
         host: remote.host,
         port: REMOTE_PORT,
-        path: urlFor(remote, rel),
+        path: urlFor(remote, rel, scope),
         headers: { Range: 'bytes=0-0' },
         agent
       },
@@ -161,9 +172,11 @@ function remoteSize(remote: NonNullable<LibraryRoot['remote']>, rel: string): Pr
  */
 function remoteHash(
   remote: NonNullable<LibraryRoot['remote']>,
-  rel: string
+  rel: string,
+  scope?: 'fl'
 ): Promise<string | null> {
-  const path = `/hash?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(rel)}`
+  const where = scope ? `&scope=${scope}` : ''
+  const path = `/hash?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(rel)}${where}`
   return new Promise((resolve) => {
     const request = httpGet({ host: remote.host, port: REMOTE_PORT, path, agent }, (response) => {
       if (response.statusCode !== 200) {
@@ -208,14 +221,15 @@ function fetchChunk(
   part: string,
   start: number,
   end: number,
-  onBytes: (count: number) => void
+  onBytes: (count: number) => void,
+  scope?: 'fl'
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = httpGet(
       {
         host: remote.host,
         port: REMOTE_PORT,
-        path: urlFor(remote, rel),
+        path: urlFor(remote, rel, scope),
         headers: { Range: `bytes=${start}-${end}` },
         agent
       },
@@ -245,12 +259,13 @@ async function fetchTo(
   root: LibraryRoot,
   rel: string,
   part: string,
-  onProgress: (received: number, total: number, bps: number) => void
+  onProgress: (received: number, total: number, bps: number) => void,
+  scope?: 'fl'
 ): Promise<void> {
   const remote = root.remote
   if (!remote) throw new Error('not a remote root')
 
-  const total = await remoteSize(remote, rel)
+  const total = await remoteSize(remote, rel, scope)
 
   let received = 0
   let last = 0
@@ -274,7 +289,7 @@ async function fetchTo(
     // One stream, and the whole file: no range header, nothing to preallocate.
     await new Promise<void>((resolve, reject) => {
       const request = httpGet(
-        { host: remote.host, port: REMOTE_PORT, path: urlFor(remote, rel), agent },
+        { host: remote.host, port: REMOTE_PORT, path: urlFor(remote, rel, scope), agent },
         (response) => {
           if (response.statusCode !== 200) {
             response.resume()
@@ -308,7 +323,7 @@ async function fetchTo(
       const index = next++
       if (index >= ranges.length) return
       const [start, end] = ranges[index]
-      await fetchChunk(remote, rel, part, start, end, onBytes)
+      await fetchChunk(remote, rel, part, start, end, onBytes, scope)
     }
   }
 
@@ -396,7 +411,8 @@ async function copyOne(
   root: LibraryRoot,
   within: string,
   target: string,
-  onProgress: (received: number, total: number, bps: number, verifying?: boolean) => void
+  onProgress: (received: number, total: number, bps: number, verifying?: boolean) => void,
+  scope?: 'fl'
 ): Promise<void> {
   const remote = root.remote
   if (!remote) throw new Error('not a remote root')
@@ -406,7 +422,7 @@ async function copyOne(
     // rather than appearing only once it lands. Until the rename there is nothing on disk
     // but a `.part`, which is not an indexable extension and so cannot be listed.
     onProgress(0, 0, 0)
-    await fetchTo(root, within, part, (received, total, bps) => onProgress(received, total, bps))
+    await fetchTo(root, within, part, (received, total, bps) => onProgress(received, total, bps), scope)
 
     /*
      * Checked before the rename, never after.
@@ -419,7 +435,7 @@ async function copyOne(
     // Said out loud: hashing both ends of a large file is a pause at exactly the moment
     // a progress bar reaches the end, which is when a pause looks most like a hang.
     onProgress(0, 0, 0, true)
-    const expected = await remoteHash(remote, within)
+    const expected = await remoteHash(remote, within, scope)
     if (expected) {
       const actual = await hashFile(part)
       if (actual !== expected) {
@@ -436,8 +452,8 @@ async function copyOne(
 }
 
 export interface PackManifest {
-  flp: { rel: string; name: string; size: number }
-  samples: Array<{ rel: string; name: string; size: number }>
+  flp: { rel: string; name: string; size: number; scope?: 'fl' }
+  samples: Array<{ rel: string; name: string; size: number; scope?: 'fl' }>
   /** Sample paths the project uses that are not in that library - factory content, mostly. */
   elsewhere: string[]
   plugins: string[]
@@ -540,11 +556,17 @@ export async function packRemote(
     // will not be able to find, and the flat copy beside the project is what it can.
     const target = await freeName(dir, item.name)
     try {
-      await copyOne(root, item.rel, target, (received, total, bps, verifying) =>
+      await copyOne(
+        root,
+        item.rel,
+        target,
+        (received, total, bps, verifying) =>
         // `row: false` - the files of a package are not rows anybody wants to watch. Drawn,
         // they appear and vanish one at a time inside a folder that is still being built,
         // and the whole thing is replaced by the zip a moment later anyway.
-        onProgress(flpPath, received, total, target, bps, verifying, false)
+          onProgress(flpPath, received, total, target, bps, verifying, false),
+        // The project's own consolidated audio comes from FL's folder, not the library.
+        item.scope
       )
     } catch (error) {
       failures.push(`${item.name}: ${(error as Error).message}`)
