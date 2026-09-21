@@ -20,6 +20,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.2.0',
+    date: '2026-09-21',
+    changes: [
+      'Your other machine\'s library, in this window. Link a computer under Settings, Remote and its folders appear in the sidebar beside your own - browse them, search them, play from them, scrub them. Nothing is copied to get there: the audio streams as you listen, and a library of 327,000 files opens in about a second because the other machine sends what it already knows rather than being walked over the network.',
+      'A library on another machine is read-only, and looks it. Everything that would change a file is simply absent from the menu rather than greyed out, because it is not a thing you can do here rather than a thing you cannot do yet.',
+      'Copy anything over with one click, at about 26 MB/s - a 104MB pack in under four seconds. Files arrive as several pieces at once over one pooled connection, which on a link with any distance in it is the difference between that and two minutes. Every file is checked against the original before it takes its name, so a copy is either right or it is not there.',
+      '"Pack & copy" on a project brings the beat and every sample it plays, flat inside a zip - the same shape as FL\'s own loop packages, and the shape that opens anywhere. Samples recorded under a drive letter that was reassigned years ago are found anyway.',
+      'It says which plugins you are missing before you pack, not after you have opened the project and saved over its settings. Settings, Plugins compares what FL has found on each machine, both directions, so you can also see what the other one would be missing from you.',
+      'Archives are part of the library now. `.zip` and `.rar` files are listed, searched and counted like anything else - 872 of them here that the explorer had never shown - and "Extract here" unpacks one into a folder beside it.',
+      'Every FL project reads to the end. Two events in the format carry more bytes than the rule says, and a walk that believed the rule lost its place at the first one - measured across 2,796 projects here, it now reaches the end of all of them, which is what makes packing a project trustworthy at all.',
+      'Refresh takes away what is gone. A file deleted outside umakbang used to dim and stay dimmed until a full rescan; asking for a re-read now settles it, while the background watcher still only dims - it cannot tell a deleted file from a folder it could not open.',
+      'Your machines are listed under Settings, Developer, Tailnet, with what each is serving and what it has been asked for.'
+    ]
+  },
+  {
     version: '0.1.2',
     date: '2026-07-29',
     changes: [
