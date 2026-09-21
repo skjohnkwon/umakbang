@@ -1,25 +1,13 @@
 import type React from 'react'
-import { useMemo, useState } from 'react'
-import { ChevronDown, FolderOpen, RefreshCw, Search, X } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { useState } from 'react'
+import { Search, X } from 'lucide-react'
 import { Input } from '@/components/ui/input'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
 import { WindowActions } from '@/components/WindowActions'
 import { MiniPlayerExit } from '@/components/MiniPlayer'
 import { Logo } from '@/components/Logo'
 import { AboutDialog } from '@/components/AboutDialog'
 import { useLibrary } from '@/state/library'
-import { baseName } from '@/lib/format'
-import { samePath } from '@/lib/paths'
 import { useUpdateStatus } from '@/lib/updates'
-import { cn } from '@/lib/utils'
 
 export const SEARCH_INPUT_ID = 'umakbang-search'
 
@@ -27,12 +15,7 @@ export function TitleBar(): React.JSX.Element {
   const platform = useLibrary((s) => s.platform)
   const settings = useLibrary((s) => s.settings)
   const roots = useLibrary((s) => s.roots)
-  // This machine's folders. What the button counts has to be what the menu lists, or it
-  // says "2 folders" over a menu offering one.
-  const local = useMemo(() => roots.filter((root) => !root.remote), [roots])
-  const ready = useLibrary((s) => s.ready)
   const query = useLibrary((s) => s.query)
-  const scanning = useLibrary((s) => s.scanning)
   const miniPlayer = useLibrary((s) => s.miniPlayer)
   const setQuery = useLibrary((s) => s.setQuery)
   const { version } = useUpdateStatus()
@@ -108,83 +91,6 @@ export function TitleBar(): React.JSX.Element {
 
       {aboutOpen && <AboutDialog version={version} onClose={() => setAboutOpen(false)} />}
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className="app-no-drag max-w-[240px] gap-1 px-1.5">
-            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">
-              {/* Blank rather than "No library" until settings have hydrated. Saying there
-                  is no library while the loading screen says otherwise is the same mistake
-                  the welcome-screen flash was, just in less space: nobody has been asked
-                  anything yet, so there is nothing true to say. */}
-              {!ready
-                ? ''
-                : roots.length === 0
-                  ? 'No library'
-                  : local.length === 1
-                    ? local[0].label
-                    : `${local.length} folders`}
-            </span>
-            <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-[16rem]">
-          <DropdownMenuItem onSelect={() => void window.umakbang.pickFolder()}>
-            <FolderOpen className="h-3.5 w-3.5" />
-            Add a folder…
-          </DropdownMenuItem>
-          {/* Every open folder of this machine's, so the one you want to drop is named
-              rather than described. Removing one leaves the files on disk untouched.
-
-              A library served by another machine is not listed: it is not a folder anybody
-              added here, it is a machine that is reachable, and it belongs with the others
-              under Devices rather than among this library's own folders. */}
-          {roots
-            .filter((entry) => !entry.remote)
-            .map((entry) => (
-            <DropdownMenuItem
-              key={entry.label}
-              title={entry.path}
-              onSelect={() => void window.umakbang.removeLibraryFolder(entry.label)}
-            >
-              <X className="h-3.5 w-3.5" />
-              <span className="truncate">Remove {entry.label}</span>
-            </DropdownMenuItem>
-            ))}
-          <DropdownMenuItem
-            onSelect={() => void window.umakbang.rescan()}
-            disabled={roots.length === 0}
-          >
-            <RefreshCw className={cn('h-3.5 w-3.5', scanning && 'animate-spin')} />
-            Rescan library
-          </DropdownMenuItem>
-          {(() => {
-            // Filtered before the section is gated, or a list whose every entry is
-            // already open rendered a separator and a "Recent" label over nothing.
-            // Compared with samePath like every other path in the app - a root
-            // re-opened with different casing is still the same folder.
-            const recents = settings.recentRoots.filter(
-              (recent) => !roots.some((entry) => samePath(entry.path, recent))
-            )
-            if (recents.length === 0) return null
-            return (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel>Recent</DropdownMenuLabel>
-                {recents.map((recent) => (
-                  <DropdownMenuItem
-                    key={recent}
-                    onSelect={() => void window.umakbang.openLibrary(recent)}
-                    title={recent}
-                  >
-                    <span className="truncate">{baseName(recent)}</span>
-                  </DropdownMenuItem>
-                ))}
-              </>
-            )
-          })()}
-        </DropdownMenuContent>
-      </DropdownMenu>
 
       <div data-tour="search" className="app-no-drag relative mx-auto w-full max-w-[420px]">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
