@@ -1267,6 +1267,13 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   patchSettings: (patch) => {
+    // Standing on a page that has just been switched off. Done here rather than at the
+    // control, because the switch is not the only thing that can change a setting - a
+    // settings import or a sync from another machine can too.
+    if (patch.showStats === false && get().view.mode === 'stats') {
+      get().setView({ mode: 'folder', dir: get().lastFolderDir })
+    }
+
     // Changing which folders are in scope has to reconsider files already passed over,
     // or narrowing and then widening the scope would leave a permanent hole.
     if (patch.analysisTag !== undefined && patch.analysisTag !== get().settings.analysisTag) {

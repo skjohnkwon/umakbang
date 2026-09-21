@@ -1240,6 +1240,18 @@ function DeveloperSection(): React.JSX.Element {
 
       <TailnetSection />
 
+      <Section title="Pages">
+        <Row
+          label="Stats"
+          hint="Off takes it out of the sidebar. Nothing is worked out for it either - every figure on that page is derived on the page and nowhere else."
+        >
+          <Switch
+            checked={settings.showStats}
+            onChange={(showStats) => patchSettings({ showStats })}
+          />
+        </Row>
+      </Section>
+
       <Section title="Tour">
         <Row
           label="Show the tutorial again"

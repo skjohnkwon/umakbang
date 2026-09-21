@@ -9,6 +9,7 @@ import {
   Folder,
   FolderOpen,
   LocateFixed,
+  MonitorSmartphone,
   Pin,
   Plus,
   Star,
@@ -65,6 +66,47 @@ export function Sidebar(): React.JSX.Element {
   // This machine's files. A peer's library is listed in the tree below with its own count;
   // folding it into the total would make "Library" a number about two computers.
   const totalCount = useLocalTracks().length
+  const showStats = useLibrary((s) => s.settings.showStats)
+  const roots = useLibrary((s) => s.roots)
+
+  /**
+   * The tree split in two: this machine's folders, and everybody else's by machine.
+   *
+   * One pass over the top level rather than two filters, because the same label decides
+   * both - a root's label is the first segment of every path beneath it, so a top-level
+   * node and a root are the same thing under different names.
+   */
+  const { localTree, devices } = useMemo(() => {
+    const byLabel = new Map(roots.map((root) => [root.label.toLowerCase(), root]))
+    const mine: FolderNode[] = []
+    const machines = new Map<
+      string,
+      { id: string; name: string; os: string; libraries: FolderNode[] }
+    >()
+    for (const node of tree.children) {
+      const root = byLabel.get(node.name.toLowerCase())
+      const remote = root?.remote
+      if (!remote) {
+        mine.push(node)
+        continue
+      }
+      const existing = machines.get(remote.deviceId)
+      if (existing) existing.libraries.push(node)
+      else {
+        machines.set(remote.deviceId, {
+          id: remote.deviceId,
+          name: remote.deviceName,
+          // The node knows nothing about the machine; the root it came from does.
+          os: '',
+          libraries: [node]
+        })
+      }
+    }
+    return {
+      localTree: { ...tree, children: mine },
+      devices: [...machines.values()].sort((a, b) => a.name.localeCompare(b.name))
+    }
+  }, [tree, roots])
   const lastFolderDir = useLibrary((s) => s.lastFolderDir)
   const playing = usePlayer((s) => s.current)
   const wave = usePalette().wave
@@ -266,14 +308,16 @@ export function Sidebar(): React.JSX.Element {
         depth={0}
         onClick={() => setView({ mode: 'folder', dir: lastFolderDir })}
       />
-      <SidebarRow
-        icon={<BarChart3 className="h-3.5 w-3.5" />}
-        label="Stats"
-        count={0}
-        active={view.mode === 'stats'}
-        depth={0}
-        onClick={() => setView({ mode: 'stats' })}
-      />
+      {showStats && (
+        <SidebarRow
+          icon={<BarChart3 className="h-3.5 w-3.5" />}
+          label="Stats"
+          count={0}
+          active={view.mode === 'stats'}
+          depth={0}
+          onClick={() => setView({ mode: 'stats' })}
+        />
+      )}
       <SidebarRow
         icon={<FileSignature className="h-3.5 w-3.5" />}
         label="Contracts"
@@ -388,13 +432,37 @@ export function Sidebar(): React.JSX.Element {
       >
         Folders
       </SectionLabel>
+      {/* This machine's folders only. A library served by another computer is somebody
+          else's filing, and listing it here made "Library" a heading about two machines. */}
       <FolderRows
-        node={tree}
+        node={localTree}
         depth={0}
         expanded={expanded}
         onToggle={toggle}
         isRoot
       />
+
+      {/* Their folders, under the machine they are on - which is the thing worth knowing
+          about them, and the thing a row buried in the tree above could not say. */}
+      {devices.length > 0 && (
+        <>
+          <SectionLabel>Devices</SectionLabel>
+          {devices.map((device) => (
+            <div key={device.id}>
+              <DeviceRow name={device.name} os={device.os} />
+              {device.libraries.map((library) => (
+                <FolderRows
+                  key={library.path}
+                  node={library}
+                  depth={1}
+                  expanded={expanded}
+                  onToggle={toggle}
+                />
+              ))}
+            </div>
+          ))}
+        </>
+      )}
 
       </nav>
 
@@ -415,6 +483,23 @@ export function Sidebar(): React.JSX.Element {
           )}
         />
       </div>
+    </div>
+  )
+}
+
+/**
+ * A machine, as a heading over the libraries it is serving.
+ *
+ * Not a folder row: there is nothing to open and nothing to count - a machine is not a
+ * place files are, it is who has them - so it does not take the chevron, the click or the
+ * number that every row beneath it does.
+ */
+function DeviceRow({ name, os }: { name: string; os?: string }): React.JSX.Element {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-[3px] text-[12px] text-muted-foreground">
+      <MonitorSmartphone className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+      <span className="truncate">{name}</span>
+      {os && <span className="text-[10.5px] text-muted-foreground/50">{os}</span>}
     </div>
   )
 }

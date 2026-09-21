@@ -292,6 +292,15 @@ export interface Settings {
    * 'accent' is the plain single-colour shape.
    */
   waveformTint: 'accent' | 'spectrum'
+  /**
+   * Whether the Stats page exists at all.
+   *
+   * Off takes the nav entry with it and stops the page being reachable, so nothing is
+   * computed for it either - the figures are derived on the page and nowhere else. For
+   * somebody who does not want their library counted back at them, a switch is a better
+   * answer than a page they learn to skip past.
+   */
+  showStats: boolean
   /** Type filters survive restarts - "audio only" is a mode, not a momentary action. */
   typeFilter: { kinds: TrackKind[]; exts: string[] }
   /**
@@ -864,6 +873,7 @@ export interface UpdateStatus {
 export const DEFAULT_SETTINGS: Settings = {
   roots: [],
   recentRoots: [],
+  showStats: true,
   queueSource: 'folder',
   // Newest first: the thing you were working on last is the thing you want next.
   sortKey: 'mtimeMs',
