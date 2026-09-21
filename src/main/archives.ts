@@ -46,6 +46,42 @@ async function freeDir(archive: string): Promise<string> {
   }
 }
 
+/**
+ * Zips a folder's *contents*, so the archive opens flat.
+ *
+ * Flat is the whole point: FL finds a project's samples by looking in the folder the
+ * project is in, so a zip whose entries are nested one folder deep unpacks into something
+ * that cannot find its own sounds. FL's own loop packages put every file at the root of the
+ * archive, and this matches them.
+ */
+export async function zipDir(dir: string, target: string): Promise<string | null> {
+  try {
+    if (process.platform === 'win32') {
+      await run(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Compress-Archive -LiteralPath ${quotePs(join(dir, '*'))} -DestinationPath ${quotePs(target)} -Force`
+        ],
+        { timeout: EXTRACT_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+      )
+    } else {
+      // `-r .` from inside the folder, so entries are named `beat.flp` rather than
+      // `beat/beat.flp`. `-X` leaves out the resource forks macOS would otherwise add.
+      await run('zip', ['-q', '-r', '-X', target, '.'], {
+        cwd: dir,
+        timeout: EXTRACT_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024
+      })
+    }
+    return null
+  } catch (error) {
+    return `Could not zip it: ${describe(error)}`
+  }
+}
+
 export interface ExtractResult {
   /** Where it landed. Absent when it did not. */
   dir?: string
