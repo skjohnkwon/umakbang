@@ -800,6 +800,22 @@ function registerIpc(): void {
       setUndoLimit(settings.undoDepth)
       publishUndo()
     }
+    /*
+     * The server is handed its config when it starts, so a setting it reads has to be given
+     * to it again or it keeps answering with the old one.
+     *
+     * Which is not a stale cache somewhere harmless: the peer would go on telling other
+     * machines about the plugins at a folder nobody is pointing at any more, and the window
+     * in front of you would disagree with it - one saying the database is missing while the
+     * other serves a list read from it.
+     *
+     * The roots matter for the same reason. A library added or removed changes what `/hello`
+     * should be offering, and a peer that learned the old set would offer a library this
+     * machine has stopped opening.
+     */
+    if (patch.flUserData !== undefined || patch.roots !== undefined) {
+      void startRemoteServer()
+    }
     return settings
   })
 
