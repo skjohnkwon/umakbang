@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { GithubMark } from '@/components/GithubMark'
 import { Logo } from '@/components/Logo'
 import { Button } from '@/components/ui/button'
 
@@ -60,7 +61,7 @@ export function AboutDialog({
 }): React.JSX.Element {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[440px] p-4">
+      <DialogContent className="max-w-[320px] p-4">
         <div className="flex items-center gap-2.5">
           <Logo className="h-7 w-7 shrink-0 text-primary" />
           <div className="min-w-0">
@@ -75,33 +76,19 @@ export function AboutDialog({
 
         <DialogDescription asChild>
           <div className="mt-3 space-y-2.5 text-[12px] leading-relaxed text-muted-foreground">
-            <p>The premium music production file explorer.</p>
-            <p>
-              On Windows, using File Explorer to navigate through my work in progress was a
-              pain. Mac was a little better, but not great either. So this is the solution: a
-              key and BPM detecting, stem splitting, audio visualizing, tagging, searching,
-              customizable way to work on your music.
-            </p>
-            <p>
-              Right now this is only for FL users, because the stats page only reads
-              <code className="mx-1 rounded bg-secondary px-1 py-px text-[11px]">.flp</code>
-              projects. But who knows - if someone wants to help build Ableton support, this is
-              an open source project, so contribute away.
-            </p>
             <p className="text-foreground">Make listening to your music enjoyable.</p>
           </div>
         </DialogDescription>
 
-        <div className="mt-4 flex justify-end gap-1.5">
+        <div className="mt-4 flex justify-end">
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
+            title="View the source"
+            aria-label="View the source"
             onClick={() => void window.umakbang.openExternally(REPOSITORY)}
           >
-            View the source
-          </Button>
-          <Button size="sm" onClick={onClose}>
-            Close
+            <GithubMark className="h-4 w-4" />
           </Button>
         </div>
       </DialogContent>

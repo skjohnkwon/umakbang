@@ -1,7 +1,7 @@
 /** Types shared between the main process, the preload bridge and the renderer. */
 
 /** What sort of file this is. Not what it's for - that's what tags are for. */
-export type TrackKind = 'audio' | 'midi' | 'project'
+export type TrackKind = 'audio' | 'midi' | 'project' | 'archive'
 
 /** One file in the library. Metadata fields are filled in by the background probe pass. */
 export interface Track {
@@ -466,6 +466,107 @@ export interface Settings {
    * screen you land on and every launch after it would wipe the machine again.
    */
   resetOnLaunch: boolean
+
+  /**
+   * This install's identity on the tailnet, generated once and never shown.
+   *
+   * Its job is continuity rather than discovery - finding a machine is a knock on
+   * `/hello`, not a stored id. Having pulled a remote library's index once, this is what
+   * lets the puller know *this is the library I already cached* and ask for patches from
+   * where it left off rather than fetching a third of a million rows again.
+   *
+   * In `LOCAL_ONLY` for the same reason as `bundleExportDir`: it describes this install and
+   * not a preference. Carried in a settings export, a restored backup would make the
+   * receiving machine claim to *be* the exporting one - one identity on two machines, and
+   * an index cache quietly wrong from then on.
+   */
+  deviceId: string
+  /**
+   * Whether this machine answers for its library on the tailnet.
+   *
+   * On by default: the tailnet is already the trust boundary, what is served is read-only,
+   * and the appeal of the whole feature is that your own machines are simply there. Visible
+   * and switchable rather than implicit, because "my library is reachable from elsewhere" is
+   * not something to be true without having been said.
+   */
+  shareLibrary: boolean
+}
+
+/** One machine in the tailnet, as `tailscale status` describes it. */
+export interface TailnetNode {
+  id: string
+  /** MagicDNS name, trailing dot removed - what a URL should use. */
+  name: string
+  hostName: string
+  os: string
+  online: boolean
+  ipv4?: string
+  lastSeen?: string
+}
+
+export type TailnetState = 'running' | 'stopped' | 'missing' | 'error'
+
+export interface TailnetStatus {
+  state: TailnetState
+  /** Why, when the state is not 'running'. Shown to the user, so it is a sentence. */
+  reason?: string
+  self?: TailnetNode
+  peers: TailnetNode[]
+}
+
+/** A library a device is willing to serve. */
+export interface RemoteLibrary {
+  id: string
+  label: string
+  path: string
+  /**
+   * Changes whenever the served index does, so a puller can tell *this is the library I
+   * already cached* from *this one has been rebuilt under me*.
+   *
+   * The index file's mtime, which is what `saveIndex`'s rename moves. Compared, never
+   * ordered: it says same or different and nothing about which is newer.
+   */
+  generation?: number
+}
+
+/**
+ * What `GET /hello` answers: discovery, identity and cache continuity in one response.
+ *
+ * `protocol` is checked rather than the app version - two builds that speak the same
+ * protocol should talk to each other, and one that does not should say so rather than fail
+ * halfway through a transfer.
+ */
+export interface RemoteHello {
+  app: 'umakbang'
+  protocol: number
+  device: { id: string; name: string; os: string; version: string }
+  libraries: RemoteLibrary[]
+}
+
+/** Whether this machine is answering on the tailnet, and on what address - or why not. */
+export interface RemoteServerState {
+  listening: boolean
+  address?: string
+  port: number
+  /** Why it is not listening. A sentence, because the user reads it. */
+  reason?: string
+}
+
+/**
+ * A tailnet machine with what umakbang knows about it, which is what the Devices section
+ * lists.
+ *
+ * Every peer appears, not only the serving ones: "why isn't my laptop showing up" is the
+ * question this will generate most, and a greyed row reading *umakbang not running* answers
+ * it on sight where an empty list just looks broken.
+ */
+export interface RemoteDevice {
+  node: TailnetNode
+  /** Answered `/hello` in umakbang's dialect. */
+  serving: boolean
+  hello?: RemoteHello
+  /** Why it is not serving, when it is online and did not answer. */
+  reason?: string
 }
 
 /** One entry in the "Move to" menu. */
@@ -786,7 +887,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // stopped at any point.
   tutorialSeen: false,
   developerMode: false,
-  resetOnLaunch: false
+  resetOnLaunch: false,
+  // Seeded on first run by `initStore`, which is the only place that can generate one.
+  deviceId: '',
+  shareLibrary: true
 }
 
 /* ------------------------------------------------------------------ stems */

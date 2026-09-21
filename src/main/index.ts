@@ -101,6 +101,7 @@ import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
+import { listRemoteDevices, remoteServerState, startRemoteServer, stopRemoteServer } from './remote'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
 import {
   cancel as cancelYoutube,
@@ -1139,6 +1140,11 @@ function registerIpc(): void {
     }
   })
 
+  /* --- the tailnet --- */
+  ipcMain.handle('remote:devices', () => listRemoteDevices())
+  ipcMain.handle('remote:serverState', () => remoteServerState())
+  ipcMain.handle('remote:restartServer', () => startRemoteServer())
+
   ipcMain.handle('library:pickFolder', () => pickAndOpenFolder())
   ipcMain.handle('library:open', (_event, path: string) => {
     const { settings, added } = addRoot(path)
@@ -1896,6 +1902,16 @@ if (!app.requestSingleInstanceLock()) {
     // Its first check is minutes away, deliberately: the scan starting now is the busiest
     // this process ever is, and it defers again if that scan is still going.
     initAutoBackup(() => scanning)
+    // Answers on the tailnet, or says in the log why it is not. After `initStore`, because
+    // it reads `shareLibrary` and the device id from settings, and it refuses to listen at
+    // all rather than falling back to a LAN bind - see `remote.ts`.
+    void startRemoteServer().then((state) => {
+      console.log(
+        state.listening
+          ? `umakbang: serving on ${state.address}:${state.port}`
+          : `umakbang: not serving (${state.reason})`
+      )
+    })
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -1908,6 +1924,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('before-quit', () => {
+    stopRemoteServer()
     send({ type: 'cancel' })
     scanner?.kill()
     flushStore()

@@ -490,7 +490,7 @@ interface LibraryState {
  * while it holds the index for the whole scan, the other is where the library actually
  * lives.
  *
- * There are 15,684 distinct `dir` values, as many `relDir`, 16 extensions and 3 kinds among
+ * There are 15,684 distinct `dir` values, as many `relDir`, 16 extensions and 4 kinds among
  * those 326,487 tracks. `path`, `rel` and `name` are left alone - they are distinct per
  * track, so pooling them is a Map that can never return a hit.
  */
