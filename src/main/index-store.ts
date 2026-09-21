@@ -21,6 +21,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
+import { INDEXABLE_SIGNATURE } from '../shared/files'
 import type { Track } from '../shared/types'
 
 let dataDir = ''
@@ -339,6 +340,8 @@ interface FolderRecord {
   /** The index this describes. See `loadFolderMtimes`. */
   indexMtimeMs: number
   indexSize: number
+  /** What counted as an indexable file when this was written. See `loadFolderMtimes`. */
+  indexable?: string
   dirs: Record<string, number>
 }
 
@@ -354,6 +357,12 @@ function dirsPath(root: string): string {
  * index underneath it, and folder mtimes describing another machine's index would skip
  * folders whose rows this one has never seen. A restore therefore costs one full walk, which
  * is what it already costs.
+ *
+ * It is refused for the same reason when the set of extensions worth indexing has changed
+ * since it was written. Adding one moves no folder's mtime, so every folder would be skipped
+ * and the new files would stay invisible in a library nobody had touched - which is how
+ * `.zip` went unlisted. A record from before this was recorded has no signature and is
+ * refused once, which is the full walk those libraries need anyway.
  */
 export function loadFolderMtimes(root: string): Map<string, number> | null {
   if (!dataDir) return null
@@ -362,6 +371,7 @@ export function loadFolderMtimes(root: string): Map<string, number> | null {
   try {
     const record = JSON.parse(readFileSync(file, 'utf8')) as FolderRecord
     if (!record || typeof record.dirs !== 'object') return null
+    if (record.indexable !== INDEXABLE_SIGNATURE) return null
     const info = statSync(indexPath(root))
     if (info.mtimeMs !== record.indexMtimeMs || info.size !== record.indexSize) return null
     return new Map(Object.entries(record.dirs))
@@ -396,6 +406,7 @@ function writeFolderMtimes(root: string, file: string): void {
     const record: FolderRecord = {
       indexMtimeMs: info.mtimeMs,
       indexSize: info.size,
+      indexable: INDEXABLE_SIGNATURE,
       dirs: Object.fromEntries(dirs)
     }
     writeFileSync(dirsPath(root), JSON.stringify(record), 'utf8')

@@ -6,6 +6,7 @@ import {
   ArrowUp,
   AudioLines,
   ChevronRight,
+  FileArchive,
   FileAudio2,
   FileMusic,
   FileSliders,
@@ -105,7 +106,8 @@ const UNSURE_KEY_FIT = 0.55
 const KIND_ICONS: Record<TrackKind, LucideIcon> = {
   audio: FileAudio2,
   midi: FileMusic,
-  project: FileSliders
+  project: FileSliders,
+  archive: FileArchive
 }
 
 /**

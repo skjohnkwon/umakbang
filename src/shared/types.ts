@@ -1,7 +1,7 @@
 /** Types shared between the main process, the preload bridge and the renderer. */
 
 /** What sort of file this is. Not what it's for - that's what tags are for. */
-export type TrackKind = 'audio' | 'midi' | 'project'
+export type TrackKind = 'audio' | 'midi' | 'project' | 'archive'
 
 /** One file in the library. Metadata fields are filled in by the background probe pass. */
 export interface Track {
@@ -458,6 +458,7 @@ export interface Settings {
    * screen you land on and every launch after it would wipe the machine again.
    */
   resetOnLaunch: boolean
+
 }
 
 /** One entry in the "Move to" menu. */

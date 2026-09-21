@@ -28,6 +28,7 @@
   --color-kind-audio: var(--kind-audio);
   --color-kind-midi: var(--kind-midi);
   --color-kind-project: var(--kind-project);
+  --color-kind-archive: var(--kind-archive);
 
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
@@ -65,6 +66,7 @@
   --kind-audio: oklch(0.55 0.11 200);
   --kind-midi: oklch(0.55 0.15 295);
   --kind-project: oklch(0.56 0.16 15);
+  --kind-archive: oklch(0.55 0.13 150);
 }
 
 .dark {
@@ -91,6 +93,7 @@
   --kind-audio: oklch(0.76 0.12 195);
   --kind-midi: oklch(0.72 0.14 295);
   --kind-project: oklch(0.72 0.15 15);
+  --kind-archive: oklch(0.73 0.14 150);
 }
 
 @layer base {

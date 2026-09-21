@@ -113,14 +113,16 @@ export function formatTime(seconds: number): string {
 export const KIND_LABELS: Record<TrackKind, string> = {
   audio: 'Audio',
   midi: 'MIDI',
-  project: 'Project'
+  project: 'Project',
+  archive: 'Archive'
 }
 
 /** Tailwind classes per kind, driven by the --kind-* tokens in index.css. */
 export const KIND_CLASSES: Record<TrackKind, string> = {
   audio: 'text-kind-audio bg-kind-audio/12 border-kind-audio/25',
   midi: 'text-kind-midi bg-kind-midi/12 border-kind-midi/25',
-  project: 'text-kind-project bg-kind-project/12 border-kind-project/25'
+  project: 'text-kind-project bg-kind-project/12 border-kind-project/25',
+  archive: 'text-kind-archive bg-kind-archive/12 border-kind-archive/25'
 }
 
 /**

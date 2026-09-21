@@ -51,6 +51,16 @@ export const PROJECT_EXTENSIONS = new Set([
   'ssnd'
 ])
 
+/**
+ * Archives, which a sample library is full of and which were invisible until now.
+ *
+ * Packs arrive as `.zip` and `.rar` and often sit unopened for months, and a zipped loop
+ * package is a project you can actually open - leaving them out of the index meant the
+ * explorer disagreed with the folder it was showing. Listed and revealable like unplayable
+ * audio rather than opened: what is inside one is the operating system's business.
+ */
+export const ARCHIVE_EXTENSIONS = new Set(['zip', 'rar', '7z'])
+
 /** Directories that are never worth walking into. */
 export const IGNORED_DIRS = new Set([
   'node_modules',
@@ -81,9 +91,33 @@ export function isIndexable(ext: string): boolean {
     PLAYABLE_EXTENSIONS.has(ext) ||
     UNPLAYABLE_AUDIO_EXTENSIONS.has(ext) ||
     MIDI_EXTENSIONS.has(ext) ||
-    PROJECT_EXTENSIONS.has(ext)
+    PROJECT_EXTENSIONS.has(ext) ||
+    ARCHIVE_EXTENSIONS.has(ext)
   )
 }
+
+/**
+ * A fingerprint of everything `isIndexable` accepts, so a scan can tell when the answer
+ * has changed.
+ *
+ * Folders whose mtime still matches are skipped rather than re-read, which is what keeps a
+ * launch from costing 45 seconds - but nothing about a folder moves when *this* list grows,
+ * so a newly indexable extension would stay invisible in every folder that had not been
+ * touched since. Which is all of them. Recorded beside the folder mtimes and compared on
+ * load, so adding an extension costs exactly one full walk and then never again.
+ *
+ * Sorted, because a `Set` preserves insertion order and reordering the literals above must
+ * not read as a change.
+ */
+export const INDEXABLE_SIGNATURE = [
+  ...PLAYABLE_EXTENSIONS,
+  ...UNPLAYABLE_AUDIO_EXTENSIONS,
+  ...MIDI_EXTENSIONS,
+  ...PROJECT_EXTENSIONS,
+  ...ARCHIVE_EXTENSIONS
+]
+  .sort()
+  .join(',')
 
 /**
  * What sort of file this is, from its extension alone.
@@ -95,5 +129,6 @@ export function isIndexable(ext: string): boolean {
 export function classifyKind(ext: string): TrackKind {
   if (PROJECT_EXTENSIONS.has(ext)) return 'project'
   if (MIDI_EXTENSIONS.has(ext)) return 'midi'
+  if (ARCHIVE_EXTENSIONS.has(ext)) return 'archive'
   return 'audio'
 }
