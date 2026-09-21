@@ -30,9 +30,16 @@ export interface PluginInventory {
   missing?: boolean
 }
 
-/** Walks a directory tree collecting `.fst` names. Depth is FL's, not ours: two or three. */
+/**
+ * Walks the database collecting `.fst` names.
+ *
+ * Stock plugins sit two deep - `Generators/Drum/BeepMap.fst` - but scanned third-party ones
+ * go under `Installed`, sorted by format and then by vendor, which is deeper and not a depth
+ * worth being clever about. The limit is only here so a folder somebody has pointed at by
+ * mistake cannot cost a walk of their whole disk.
+ */
 async function collectFst(dir: string, into: Set<string>, depth = 0): Promise<void> {
-  if (depth > 4) return
+  if (depth > 8) return
   let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
