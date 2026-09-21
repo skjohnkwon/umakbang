@@ -16,6 +16,7 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
 import { labelForRoot } from '../shared/roots'
@@ -102,6 +103,12 @@ export function initStore(): void {
   // branch permanently unreachable with another machine's install path in it.
   if (!userData.settings.bundleExportDir) {
     userData.settings.bundleExportDir = backupsDir()
+  }
+
+  // Generated here because this is the only place that can: it has to exist before anything
+  // serves or dials, and it must not come from an import - see `deviceId` in `Settings`.
+  if (!userData.settings.deviceId) {
+    userData.settings.deviceId = randomUUID()
   }
 
   userData.settings.quickMove ??= []
@@ -563,7 +570,15 @@ const LOCAL_ONLY = [
   // silently wipes the receiving machine's library on its next start is the worst thing in
   // this file by a distance.
   'developerMode',
-  'resetOnLaunch'
+  'resetOnLaunch',
+  // This install's identity on the tailnet. Two machines answering to one id would each
+  // claim to be the other's library, and an index cached against it would be wrong from
+  // then on without ever saying so.
+  'deviceId',
+  // Whether this machine serves its library to the tailnet. A settings file is something
+  // people send each other, and starting to serve a library is not something importing one
+  // should be able to switch on.
+  'shareLibrary'
 ] as const
 
 export function exportBackup(): SettingsBackup {

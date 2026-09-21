@@ -14,7 +14,10 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           // Forked by the main process; scanning must not share the window's thread.
-          scanner: resolve(__dirname, 'src/main/scanner-process.ts')
+          scanner: resolve(__dirname, 'src/main/scanner-process.ts'),
+          // Also forked: serving the tailnet is sustained I/O, and a fault handling
+          // something that arrived over a socket should cost a respawn, not the app.
+          'remote-server': resolve(__dirname, 'src/main/remote-process.ts')
         }
       }
     }

@@ -20,6 +20,9 @@ import type {
   LibraryRoot,
   MetadataPatch,
   PlatformInfo,
+  RemoteDevice,
+  RemoteServerState,
+  TailnetStatus,
   ScanProgress,
   Settings,
   Track,
@@ -383,6 +386,15 @@ const api = {
     ipcRenderer.invoke('peaks:put', path, data),
   /** Drops cached waveforms for files whose contents have changed. */
   forgetPeaks: (paths: string[]): Promise<void> => ipcRenderer.invoke('peaks:forget', paths),
+
+  /* --- the tailnet --- */
+  /** Every machine in the tailnet, with whichever of them are serving a library. */
+  remoteDevices: (): Promise<{ tailnet: TailnetStatus; devices: RemoteDevice[] }> =>
+    ipcRenderer.invoke('remote:devices'),
+  /** Whether this machine is answering, and on what address - or why it is not. */
+  remoteServerState: (): Promise<RemoteServerState> => ipcRenderer.invoke('remote:serverState'),
+  remoteRestartServer: (): Promise<RemoteServerState> =>
+    ipcRenderer.invoke('remote:restartServer'),
 
   /* --- os integration --- */
   /** The OS's own icon for a file, as a data URL. Null when it has none. */
