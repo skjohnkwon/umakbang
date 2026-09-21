@@ -144,6 +144,42 @@ function ensureDir(tree: TreeCache, rel: string, dirty: Set<FolderNode>): void {
   }
 }
 
+/**
+ * The files on this machine, without the ones a peer is serving.
+ *
+ * A remote library is somebody else's work, and counting it as yours makes both numbers
+ * meaningless: "your library" stops being a thing you can point at, and the stats - hours
+ * spent producing, which keys you write in, how much of it you have rated - start
+ * describing two people at once. The explorer is the place to see a peer's files; the
+ * totals and the charts are about this machine.
+ *
+ * Matched on the root's label, which is the first segment of every relative path underneath
+ * it, rather than by resolving each path against the roots - that is a sort and a prefix
+ * comparison per file, and there are two thirds of a million of them here.
+ *
+ * Keyed on `structureRevision` rather than `revision`, so a metadata pass arriving for a
+ * quarter of a million files does not rebuild the list for nothing.
+ */
+export function useLocalTracks(): Track[] {
+  const tracks = useLibrary((s) => s.tracks)
+  const structureRevision = useLibrary((s) => s.structureRevision)
+  const roots = useLibrary((s) => s.roots)
+
+  return useMemo(() => {
+    const remote = new Set(
+      roots.filter((root) => root.remote).map((root) => root.label.toLowerCase())
+    )
+    // Nothing is mounted: hand back the same array rather than a copy of every row.
+    if (remote.size === 0) return tracks
+    return tracks.filter((track) => {
+      const slash = track.rel.indexOf('/')
+      const label = (slash === -1 ? track.rel : track.rel.slice(0, slash)).toLowerCase()
+      return !remote.has(label)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks, structureRevision, roots])
+}
+
 export function useFolderTree(): FolderTree {
   const tracks = useLibrary((s) => s.tracks)
   // Structure only - metadata arriving for 250k files must not touch the tree.

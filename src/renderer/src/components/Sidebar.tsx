@@ -26,7 +26,7 @@ import {
 } from '@/components/ui/context-menu'
 import { TagBar } from '@/components/TagBar'
 import { YoutubeIcon } from '@/components/DownloadPage'
-import { useFolderTree, type FolderNode } from '@/hooks/useLibraryView'
+import { useFolderTree, useLocalTracks, type FolderNode } from '@/hooks/useLibraryView'
 import { useFolderDrop, type FolderDrop } from '@/hooks/useFolderDrop'
 import { collapseVariants } from '@/lib/motion'
 import { isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
@@ -62,7 +62,9 @@ export function Sidebar(): React.JSX.Element {
   const view = useLibrary((s) => s.view)
   const setView = useLibrary((s) => s.setView)
   const ratings = useLibrary((s) => s.ratings)
-  const totalCount = useLibrary((s) => s.tracks.length)
+  // This machine's files. A peer's library is listed in the tree below with its own count;
+  // folding it into the total would make "Library" a number about two computers.
+  const totalCount = useLocalTracks().length
   const lastFolderDir = useLibrary((s) => s.lastFolderDir)
   const playing = usePlayer((s) => s.current)
   const wave = usePalette().wave

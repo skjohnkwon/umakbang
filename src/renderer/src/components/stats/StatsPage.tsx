@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { Info, Loader2 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { staggerContainer, staggerItem } from '@/lib/motion'
+import { useLocalTracks } from '@/hooks/useLibraryView'
 import { useLibrary } from '@/state/library'
 import type { RangeId } from '@/lib/stats'
 import {
@@ -80,7 +81,14 @@ function EmptyRange({
 }
 
 export function StatsPage(): React.JSX.Element {
-  const tracks = useLibrary((s) => s.tracks)
+  /*
+   * This machine's files only.
+   *
+   * The stats describe your own work - hours spent producing, the keys you write in, how
+   * much of the library you have rated - and a peer's library answers all of those about
+   * somebody else. Mounting one would have silently doubled every figure on this page.
+   */
+  const tracks = useLocalTracks()
   const revision = useLibrary((s) => s.revision)
   const scanning = useLibrary((s) => s.scanning)
   const excludeDirs = useLibrary((s) => s.settings.randomExcludeDirs)
