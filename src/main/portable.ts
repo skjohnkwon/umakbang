@@ -22,7 +22,7 @@
 
 import { app } from 'electron'
 import { accessSync, constants, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 /** The folder beside the executable that turns this on. */
 const MARKER = 'data'
@@ -103,6 +103,25 @@ export function backupsDir(): string {
  */
 export function usePortableDataDir(): { portable: boolean; dir: string; reason?: string } {
   if (!app.isPackaged) {
+    /**
+     * `UMAKBANG_USER_DATA` gives a development run a data folder of its own.
+     *
+     * Without it `npm run dev` shares `userData` with the installed copy, which means two
+     * things and both are unhelpful: it shares the single-instance lock, so a dev run exits
+     * on startup whenever the real app happens to be open, and it writes the library index,
+     * the tags and the settings that the real app is using. Pointed somewhere else, the two
+     * run side by side and a dev build cannot spoil a real library.
+     *
+     * Development only, deliberately. In a packaged build this would be a way to move where
+     * somebody's work is kept by setting an environment variable.
+     */
+    const override = process.env.UMAKBANG_USER_DATA
+    if (override) {
+      const dir = resolve(override)
+      mkdirSync(dir, { recursive: true })
+      app.setPath('userData', dir)
+      return { portable: false, dir, reason: 'UMAKBANG_USER_DATA' }
+    }
     return { portable: false, dir: app.getPath('userData'), reason: 'development build' }
   }
 
