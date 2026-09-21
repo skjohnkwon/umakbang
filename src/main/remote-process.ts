@@ -183,7 +183,7 @@ function sendJson(response: ServerResponse, value: unknown): void {
  * transfer in this whole system big enough to be worth the CPU. A missing file is 204 rather
  * than 404: a library with no journal yet has nothing to send, which is not an error.
  */
-function sendGzipped(response: ServerResponse, file: string): void {
+function sendGzipped(response: ServerResponse, file: string, andThen?: string): void {
   let size = 0
   try {
     size = statSync(file).size
@@ -202,9 +202,18 @@ function sendGzipped(response: ServerResponse, file: string): void {
     // buffering 240MB to find out is the thing streaming exists to avoid.
     'x-umakbang-raw-length': String(size)
   })
-  const source = createReadStream(file)
-  source.on('error', () => response.destroy())
-  source.pipe(createGzip()).pipe(response)
+  const gzip = createGzip()
+  gzip.pipe(response)
+
+  const pump = (path: string, next?: () => void): void => {
+    const source = createReadStream(path)
+    source.on('error', () => (next ? next() : gzip.end()))
+    source.on('end', () => (next ? next() : gzip.end()))
+    source.pipe(gzip, { end: false })
+  }
+  // The journal follows the index in the same stream, so the two arrive as one list of
+  // lines and the reader does not have to know there were two files.
+  pump(file, andThen ? () => pump(andThen) : undefined)
 }
 
 /**
@@ -319,7 +328,15 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
         fail(response, 404)
         return
       }
-      sendGzipped(response, indexFileFor(library.path))
+      /*
+       * The saved index *and* the journal beside it, as one stream.
+       *
+       * The index file is only rewritten by a full scan. Anything this machine has made
+       * since - a packed project, a copied sample - is in the journal the scanner folds in
+       * on its next pass, and a puller that read only the file would be looking at the
+       * library as it was at the last scan rather than as it is.
+       */
+      sendGzipped(response, indexFileFor(library.path), patchFileFor(library.path))
       return
     }
 

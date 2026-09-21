@@ -665,10 +665,28 @@ function watchFolder(dir: string | null): void {
  * changed". Only the second is allowed to delete rows, and only when the folder was actually
  * read - see `describeDir`.
  */
-async function refreshFolder(dir: string, prune = false): Promise<void> {
+async function refreshFolder(dir: string, prune = false, journalAdded = false): Promise<void> {
   const target = mainWindow
   if (!target || target.isDestroyed()) return
-  const { tracks, read } = await describeDir(dir, getUserData().settings.roots)
+  const roots = getUserData().settings.roots
+  const { tracks, read } = await describeDir(dir, roots)
+
+  /*
+   * Files umakbang made itself have to reach the saved index, not just the window.
+   *
+   * The index file is written by the scanner and by nothing else, so a pack, a copy or an
+   * extract was visible here and invisible in the index until the next full walk. Locally
+   * that is harmless - the renderer has the rows. But the index file is what `/index`
+   * serves, so the moment another machine is reading it, it is the only thing that machine
+   * can see: a zip packed on this Mac simply did not exist on the PC.
+   *
+   * Journalled the same way a move is, through the patch file the scanner already folds in.
+   */
+  if (journalAdded && read && tracks.length > 0) {
+    const root = rootFor(roots, dir)
+    if (root) appendIndexPatch(root.path, { added: tracks })
+  }
+
   if (target.isDestroyed()) return
   target.webContents.send('library:folder', { dir, tracks, prune: prune && read })
 }
@@ -1170,7 +1188,7 @@ function registerIpc(): void {
      * is the thing that changed it.
      */
     if (result.written.length > 0) {
-      await refreshFolder(getUserData().settings.remoteDownloadDir, true)
+      await refreshFolder(getUserData().settings.remoteDownloadDir, true, true)
     }
     return result
   })
@@ -1717,12 +1735,12 @@ function registerIpc(): void {
         })
       }
     )
-    if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true)
+    if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true, true)
     return result
   })
   ipcMain.handle('fs:extractArchive', async (_event, path: string) => {
     const result = await extractArchive(path)
-    if (result.dir) await refreshFolder(dirname(path), true)
+    if (result.dir) await refreshFolder(dirname(path), true, true)
     return result
   })
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {
