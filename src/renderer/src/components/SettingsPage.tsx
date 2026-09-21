@@ -12,7 +12,13 @@ import {
   RotateCcw,
   X
 } from 'lucide-react'
-import { DEFAULT_VISUALIZER_STOPS, type QuickMoveTarget, type Settings } from '@shared/types'
+import {
+  DEFAULT_VISUALIZER_STOPS,
+  STEM_SPLITTERS,
+  type QuickMoveTarget,
+  type Settings,
+  type YoutubeToolStatus
+} from '@shared/types'
 import { CHANGELOG } from '@shared/changelog'
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
@@ -86,6 +92,9 @@ const SECTIONS = [
   { id: 'library', label: 'Library' },
   { id: 'analysis', label: 'Analysis' },
   { id: 'stems', label: 'Stems' },
+  // Named for the feature as the sidebar names it, not "Downloads": that row is the OS folder
+  // of that name, a place you file things out of rather than a thing you do.
+  { id: 'downloads', label: 'YT2MP3' },
   { id: 'backup', label: 'Backup' },
   { id: 'window', label: 'Window' },
   { id: 'updates', label: 'Updates' },
@@ -423,6 +432,10 @@ export function SettingsPage(): React.JSX.Element {
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('stems'))}>
           <StemSection />
+        </div>
+
+        <div className={cn('mx-auto max-w-[560px] space-y-4', show('downloads'))}>
+          <DownloadSection />
         </div>
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('backup'))}>
@@ -1197,22 +1210,132 @@ function StemSection(): React.JSX.Element {
 
       <Row
         label="Model"
-        hint="LALAL.AI retires these as it adds new ones; change it if a split is refused."
+        hint="Perseus unless a particular voice comes out better on an older one."
       >
         <select
           value={settings.stemSplitter}
           onChange={(event) => patchSettings({ stemSplitter: event.target.value })}
           className="h-7 rounded-md border bg-background px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          {/* Newest first - LALAL.AI keeps adding models and the latest is normally the
-              one worth using. The older ones stay listed because a model that suits a
+          {/* Only the models the split endpoint accepts - see `STEM_SPLITTERS`. This used to
+              list LALAL.AI's newest two as well, on the reasonable-sounding grounds that the
+              latest model is normally the one worth using; they belong to endpoints umakbang
+              does not call and refuse every stem it asks for, so offering them was offering a
+              choice that could only fail. The older ones stay because a model that suits a
               particular voice better is a real thing. */}
-          {['lynx', 'lyra', 'phoenix', 'orion', 'perseus', 'andromeda'].map((name) => (
+          {STEM_SPLITTERS.map((name) => (
             <option key={name} value={name}>
-              {name === 'lynx' ? 'lynx (latest)' : name}
+              {name}
             </option>
           ))}
         </select>
+      </Row>
+    </Section>
+  )
+}
+
+/**
+ * Downloading audio from a link.
+ *
+ * The extractor is the only external program umakbang runs, so this is the one page that has
+ * something to say about a binary: whether it is here, which build, and a way to force an
+ * update rather than waiting for the weekly one to come round.
+ */
+function DownloadSection(): React.JSX.Element {
+  const settings = useLibrary((s) => s.settings)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const [tool, setTool] = useState<YoutubeToolStatus | null>(null)
+  const [working, setWorking] = useState(false)
+
+  useEffect(() => {
+    void window.umakbang.youtubeToolStatus().then(setTool)
+  }, [])
+
+  const install = async (): Promise<void> => {
+    setWorking(true)
+    setTool(await window.umakbang.installYoutubeTool())
+    setWorking(false)
+  }
+
+  return (
+    <Section
+      title="YT2MP3"
+      hint="Pulls the audio off a link and writes it into the folder you are browsing. Whether a given link is yours to take is between you and whoever published it."
+    >
+      <div className="space-y-1.5">
+        <div className="text-[12.5px]">Downloader</div>
+        <div className="flex items-center gap-1.5">
+          <span className="flex-1 truncate text-[11.5px] text-muted-foreground">
+            {tool === null
+              ? 'Checking…'
+              : tool.ready
+                ? `yt-dlp ${tool.version ?? ''}`.trim()
+                : 'Not installed yet.'}
+          </span>
+          <Button variant="secondary" size="sm" disabled={working} onClick={() => void install()}>
+            {working ? 'Working…' : tool?.ready ? 'Update now' : 'Install'}
+          </Button>
+        </div>
+        {tool?.error && <p className="text-[11px] text-destructive">{tool.error}</p>}
+        <p className="text-[11px] leading-snug text-muted-foreground/60">
+          Fetched rather than bundled, and replaced by itself once a week: sites change how
+          they serve audio often enough that a build frozen on release day stops working
+          within a month. It lives beside umakbang&rsquo;s own data, not in your library.
+        </p>
+      </div>
+
+      <Row
+        label="Save as"
+        hint="MP3 re-encodes what came down, which costs a second lossy generation. The original stream is the better audio and is usually .m4a."
+      >
+        <SegmentedControl
+          value={settings.youtubeFormat}
+          options={[
+            { value: 'mp3', label: 'MP3' },
+            { value: 'source', label: 'Original' }
+          ]}
+          onChange={(youtubeFormat) =>
+            patchSettings({ youtubeFormat: youtubeFormat as 'mp3' | 'source' })
+          }
+        />
+      </Row>
+
+      {settings.youtubeFormat === 'mp3' && (
+        <Row
+          label="Bitrate"
+          hint="What comes down is already lossy, so a higher rate here mostly buys file size."
+        >
+          <SegmentedControl
+            value={String(settings.youtubeBitrate)}
+            options={[
+              { value: '128', label: '128k' },
+              { value: '192', label: '192k' },
+              { value: '256', label: '256k' },
+              { value: '320', label: '320k' }
+            ]}
+            onChange={(rate) => patchSettings({ youtubeBitrate: Number(rate) })}
+          />
+        </Row>
+      )}
+
+      <Row
+        label="Fallback folder"
+        hint={
+          settings.youtubeDir ||
+          'Where a download goes when you are not standing in a folder - the saved views have nowhere of their own.'
+        }
+      >
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            void window.umakbang
+              .pickDirectory('Where downloads are written', settings.youtubeDir || undefined)
+              .then((dir) => dir && patchSettings({ youtubeDir: dir }))
+          }}
+        >
+          Choose…
+        </Button>
       </Row>
     </Section>
   )

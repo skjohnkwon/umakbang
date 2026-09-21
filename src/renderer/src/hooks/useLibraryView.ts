@@ -3,8 +3,6 @@ import type { SortKey, Track, TrackKind } from '@shared/types'
 import { useLibrary } from '@/state/library'
 import { compareTracks, isEmptyQuery, matchesQuery, parseQuery, scoreMatch } from '@/lib/search'
 import { isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
-// The same rule the stats page folds by, imported rather than restated - see `workOf`.
-import { workOf } from '@/lib/stats'
 
 export interface FolderNode {
   name: string
@@ -174,15 +172,8 @@ export function useFolderTree(): FolderTree {
 /**
  * A row in the main table. Browsing a folder shows its subfolders first and then its own
  * files, the way a file manager does; searching or a saved view flattens to files only.
- *
- * `renders` is set only when `Settings.collapseRenders` folded siblings into this row, and
- * only when there was more than one: it is how many files the row stands for, itself
- * included. The row is still one real file at one real path, so `rowId` and everything
- * built on it - selection, drag, the menu, playback - are untouched.
  */
-export type Row =
-  | { type: 'folder'; node: FolderNode }
-  | { type: 'file'; track: Track; renders?: number }
+export type Row = { type: 'folder'; node: FolderNode } | { type: 'file'; track: Track }
 
 /** The sort in force for what's on screen - per folder, with a library-wide fallback. */
 export function useSort(): { key: SortKey; dir: 'asc' | 'desc' } {
@@ -208,10 +199,6 @@ export function useVisibleRows(): Row[] {
   const ratings = useLibrary((s) => s.ratings)
   const downloads = useLibrary((s) => s.downloads)
   const roots = useLibrary((s) => s.roots)
-  const collapseRenders = useLibrary((s) => s.settings.collapseRenders)
-  // Only so a folded group can be represented by the file that was revealed into it. Read
-  // even when collapsing is off, because a hook cannot be called conditionally.
-  const selectedPath = useLibrary((s) => s.selectedPath)
   const { index } = useFolderTree()
 
   return useMemo(() => {
@@ -304,73 +291,9 @@ export function useVisibleRows(): Row[] {
       return result
     }
 
-    /**
-     * Turns the files that are going to be shown into rows, folding a track's renders into
-     * one row first when the setting asks for it.
-     *
-     * The fold runs here rather than over the index: by this point the list has already been
-     * cut down to one folder, or to what a search matched, so the pass is over what is about
-     * to be drawn rather than over 326k tracks. With the setting off it is a single boolean
-     * and the work below is exactly what it always was.
-     *
-     * The fold is by name, so `X.wav` and `X.mp3` that are genuinely two different
-     * recordings come out as one row. That is a known and accepted false positive: nothing
-     * is hidden that the toggle doesn't put straight back, and the alternative - comparing
-     * audio - costs a decode per file to answer a question about a naming habit.
-     */
-    const fileRows = (files: Track[]): Row[] => {
-      if (!collapseRenders) return sortFiles(files).map((track) => ({ type: 'file', track }))
-
-      // One pass, and the two Maps are sized by the number of *works* rather than by the
-      // number of files. The largest render represents its work - the master rather than the
-      // MP3 beside it - which is the choice `computeMusicStats` makes; a later, bigger render
-      // replaces the one already standing in `out` in place, so the folder's own order
-      // survives for the sort below to break ties on.
-      //
-      // Audio only. The `.flp` a bounce came from shares its name and would fold into it, and
-      // hiding the project behind the render is the opposite of what the explorer is for.
-      const out: Track[] = []
-      const at = new Map<string, number>()
-      const counts = new Map<Track, number>()
-      for (const track of files) {
-        if (track.kind !== 'audio') {
-          out.push(track)
-          continue
-        }
-        const id = workOf(track)
-        const seen = at.get(id)
-        if (seen === undefined) {
-          at.set(id, out.length)
-          out.push(track)
-          counts.set(track, 1)
-          continue
-        }
-        const held = out[seen]
-        const total = (counts.get(held) ?? 1) + 1
-        /**
-         * The selected file always represents its own group, whatever its size.
-         *
-         * Otherwise revealing one - which is what the random button does - selects a path
-         * that this fold has just taken off the screen, and the row that stands in its place
-         * is a different file with a different name. Nothing looks selected, the scroll has
-         * nothing to scroll to, and the beat you were handed is invisible.
-         */
-        if (track.path === selectedPath || (held.path !== selectedPath && track.size > held.size)) {
-          counts.delete(held)
-          out[seen] = track
-          counts.set(track, total)
-        } else {
-          counts.set(held, total)
-        }
-      }
-
-      return sortFiles(out).map((track) => {
-        const renders = counts.get(track) ?? 1
-        // Only when it stands for more than itself, so a folder where nothing folded is
-        // indistinguishable from the setting being off - which is what it should look like.
-        return renders > 1 ? { type: 'file', track, renders } : { type: 'file', track }
-      })
-    }
+    /** Turns the files that are going to be shown into rows, in the sort in force. */
+    const fileRows = (files: Track[]): Row[] =>
+      sortFiles(files).map((track) => ({ type: 'file', track }))
 
     const flat = (files: Track[]): Row[] =>
       fileRows(narrowed(searching ? files.filter((t) => matchesQuery(t, parsed, context)) : files))
@@ -381,7 +304,8 @@ export function useVisibleRows(): Row[] {
       view.mode === 'stats' ||
       view.mode === 'settings' ||
       view.mode === 'contracts' ||
-      view.mode === 'videos'
+      view.mode === 'videos' ||
+      view.mode === 'downloading'
     ) {
       return []
     }
@@ -451,10 +375,7 @@ export function useVisibleRows(): Row[] {
     tagFilter,
     ratings,
     downloads,
-    roots,
-    collapseRenders,
-    // Only matters while collapsing, where it decides which render stands for its group.
-    selectedPath
+    roots
   ])
 }
 

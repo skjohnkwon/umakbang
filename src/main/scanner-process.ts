@@ -457,7 +457,7 @@ port.on('message', (message) => {
       log('--- scanner started ---')
       initMetadataCache(command.dataDir)
       initIndexStore(command.dataDir)
-      log('caches ready')
+      log('ready')
       post({ type: 'ready' })
       break
     }

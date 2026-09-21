@@ -275,20 +275,6 @@ export interface Settings {
   /** Type filters survive restarts - "audio only" is a mode, not a momentary action. */
   typeFilter: { kinds: TrackKind[]; exts: string[] }
   /**
-   * Whether a track's renders are folded into one row in the explorer.
-   *
-   * `REFLECT_Master.wav`, `REFLECT.mp3` and `REFLECT_notag.wav` are one piece of music
-   * occupying three rows, and in a folder of finished work that is the dominant pattern:
-   * 40 songs read as 120 files. The fold is the stats page's `workOf` - the folder plus
-   * the file name with the render words off - so the explorer and the panels can never
-   * disagree about what counts as one track.
-   *
-   * Off by default. It changes what the library looks like rather than how it behaves, and
-   * a row count that silently differs from the file count on disk is not something to hand
-   * somebody without their asking for it.
-   */
-  collapseRenders: boolean
-  /**
    * The folders you keep coming back to.
    *
    * One list doing both jobs: they are listed under "Move to" in the row menu, and drawn
@@ -430,6 +416,28 @@ export interface Settings {
   /** Which separation model to ask for, and what container to get back. */
   stemSplitter: string
   stemFormat: string
+
+  /**
+   * Where a download lands when there is no folder on screen to put it in.
+   *
+   * Normally the destination is the folder you are standing in - that is what makes a
+   * download appear in the list you were already looking at, through the folder watch that
+   * is already running. This is the fallback for the saved views, which are questions about
+   * the library rather than places in it, and it is seeded on first run the way
+   * `stemOutputDir` is.
+   */
+  youtubeDir: string
+  /**
+   * `mp3` re-encodes what came down; `source` keeps the stream as YouTube served it.
+   *
+   * MP3 is the default because it is what people mean when they ask for this, and because
+   * an m4a beside a WAV in a DAW's browser is one more format to think about. `source` is
+   * strictly better audio - it is the bytes themselves rather than a second lossy
+   * generation over them - so it is one radio button away.
+   */
+  youtubeFormat: 'mp3' | 'source'
+  /** Bitrate for the MP3 re-encode, in kbps. */
+  youtubeBitrate: number
 
   /**
    * Whether the guided first run has already happened.
@@ -730,7 +738,6 @@ export const DEFAULT_SETTINGS: Settings = {
   visualizerHeadroomDb: 6,
   waveformTint: 'spectrum',
   typeFilter: { kinds: [], exts: [] },
-  collapseRenders: false,
   quickMove: [],
   downloadsQuickAccess: true,
   randomExcludeDirs: [],
@@ -765,8 +772,15 @@ export const DEFAULT_SETTINGS: Settings = {
   lalalKey: '',
   bundleExportDir: '',
   stemOutputDir: '',
-  stemSplitter: 'lynx',
+  // See `STEM_SPLITTERS`: the endpoint refuses the two newest models for every stem it
+  // offers, and this is the first one it accepts.
+  stemSplitter: 'perseus',
   stemFormat: 'mp3',
+  youtubeDir: '',
+  youtubeFormat: 'mp3',
+  // 192 rather than 320: what comes down is already a lossy stream, and spending 60% more
+  // file on re-encoding it does not put back anything YouTube's encoder took out.
+  youtubeBitrate: 192,
   // False, so a fresh install gets the tour once a folder is open. An install that predates
   // the tour gets it too, which is the right way round: it is twenty seconds and it can be
   // stopped at any point.
@@ -776,6 +790,23 @@ export const DEFAULT_SETTINGS: Settings = {
 }
 
 /* ------------------------------------------------------------------ stems */
+
+/**
+ * The models `/split/stem_separator/` will actually accept, best first.
+ *
+ * Not a cosmetic list. LALAL.AI's model roster is wider than this endpoint's, and asking for a
+ * stem a model does not do is refused outright rather than quietly downgraded: measured
+ * against the live API, `lynx` answers 422 with `('Lynx does not support this stem',
+ * 'vocals')`. `lynx` was the shipped default, so a fresh install could never split anything -
+ * and the refusal arrives as a validation report, which `describe()` in `stems.ts` was
+ * flattening to "[object Object]", so the reason never reached the notice either.
+ *
+ * `lynx` and `lyra` are the voice-isolation and multi-stem networks behind `/split/voice_clean/`
+ * and `/split/multistem/`, which umakbang does not call. Probed here against every stem in the
+ * endpoint's own enum, both accept none of them, so they are not "other options" - they are
+ * settings that can only fail.
+ */
+export const STEM_SPLITTERS = ['perseus', 'orion', 'phoenix', 'andromeda'] as const
 
 export type StemPhase = 'uploading' | 'queued' | 'separating' | 'downloading' | 'done' | 'failed'
 
@@ -800,6 +831,57 @@ export interface StemOptions {
 export interface StemOutcome {
   path: string
   written: string[]
+  error?: string
+}
+
+/* ---------------------------------------------------------------- youtube */
+
+/** What the extractor says about a link, before anything is downloaded. */
+export interface YoutubeInfo {
+  id: string
+  title: string
+  uploader: string
+  /** Length in seconds, or undefined for a live stream, which has none. */
+  seconds?: number
+  thumbnail?: string
+  /** True for a link that names a playlist rather than one video. */
+  playlist?: boolean
+  /** How many entries, when it is a playlist. */
+  count?: number
+}
+
+export type YoutubePhase =
+  | 'tool'
+  | 'reading'
+  | 'downloading'
+  | 'converting'
+  | 'writing'
+  | 'done'
+  | 'failed'
+
+export interface YoutubeProgress {
+  phase: YoutubePhase
+  /** 0..100 within the current phase, when there is one to report. */
+  percent?: number
+  /** The title once it is known, so the toolbar can name what it is working on. */
+  title?: string
+  message?: string
+}
+
+/** What main hands back after fetching the audio, before it is placed. */
+export interface YoutubeFetched {
+  /** The stream on disk, somewhere temporary. Empty on failure. */
+  tempPath?: string
+  /** The container it actually is, without the dot. */
+  ext?: string
+  info?: YoutubeInfo
+  error?: string
+}
+
+/** Whether the extractor is present, and which build. */
+export interface YoutubeToolStatus {
+  ready: boolean
+  version?: string
   error?: string
 }
 

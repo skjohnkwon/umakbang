@@ -102,6 +102,19 @@ import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
+import {
+  cancel as cancelYoutube,
+  discard as discardYoutube,
+  fetchAudio,
+  installTool as installYoutubeTool,
+  place as placeYoutube,
+  probe as probeYoutube,
+  toolStatus as youtubeToolStatus,
+  type YoutubeFetched,
+  type YoutubeInfo,
+  type YoutubeProgress,
+  type YoutubeToolStatus
+} from './youtube'
 import { watch, type FSWatcher } from 'node:fs'
 import type { ScannerCommand, ScannerEvent } from './scanner-process'
 import type {
@@ -132,9 +145,26 @@ import {
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
 
+/**
+ * Launch timing, behind `UMAKBANG_TIMING=1`.
+ *
+ * Kept because the answer to "why is starting slow" is an ordering question, and ordering is
+ * invisible in a profile of any one piece: every stage here was individually fast while the
+ * launch was not. It is what showed that the scanner was being forked *after* the renderer had
+ * finished loading, and that 823ms of the child's own startup was a metadata cache nothing on
+ * the way to the first row reads. Console rather than a file, since anything worth measuring
+ * can be measured with `npx electron .`.
+ */
+const T0 = Date.now()
+function mark(label: string): void {
+  if (process.env['UMAKBANG_TIMING']) console.log(`[+${Date.now() - T0}ms] ${label}`)
+}
+
 let mainWindow: BrowserWindow | null = null
 let scanner: Electron.UtilityProcess | null = null
 let scannerReady = false
+/** Only so the launch trace can name the moment the first row reaches the window. */
+let sawTracks = false
 /** Full-size bounds held while the window is in compact visualizer mode. */
 let restoreBounds: Electron.Rectangle | null = null
 let boundsTimer: ReturnType<typeof setTimeout> | null = null
@@ -276,7 +306,10 @@ function createWindow(): void {
 
   if (windowMaximized) mainWindow.maximize()
 
-  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.once('ready-to-show', () => {
+    mark('ready-to-show')
+    mainWindow?.show()
+  })
 
   mainWindow.on('resize', rememberBounds)
   mainWindow.on('move', rememberBounds)
@@ -294,7 +327,9 @@ function createWindow(): void {
   // window would come back to an empty library until the next manual rescan. Subscribed
   // per window rather than once at startup, or a window recreated from the macOS dock
   // (`activate`) opens onto an empty library.
+  mainWindow.webContents.on('dom-ready', () => mark('dom-ready'))
   mainWindow.webContents.on('did-finish-load', () => {
+    mark('did-finish-load')
     beginScan(getUserData().settings.roots)
     // The undo record lives here, not in the page, so it survives a reload - and it has to
     // be pushed again or the affordance does not. This is not a rare accident: Ctrl+R is
@@ -425,12 +460,14 @@ function publishUndo(): void {
 function ensureScanner(): Electron.UtilityProcess {
   if (scanner) return scanner
 
+  mark('fork scanner')
   const child = utilityProcess.fork(join(__dirname, 'scanner.js'), [], {
     serviceName: 'umakbang-scanner'
   })
 
   child.on('message', (event: ScannerEvent) => {
     if (event.type === 'ready') {
+      mark('scanner ready')
       scannerReady = true
       // Run whatever was requested before the child finished initialising.
       const queued = pendingScanRoots
@@ -451,6 +488,10 @@ function ensureScanner(): Electron.UtilityProcess {
     if (!target || target.isDestroyed()) return
     switch (event.type) {
       case 'tracks':
+        if (!sawTracks) {
+          sawTracks = true
+          mark('first tracks')
+        }
         target.webContents.send('library:tracks', event.tracks)
         break
       case 'progress':
@@ -1264,6 +1305,66 @@ function registerIpc(): void {
   /** How much processing the account has left, so a batch can be judged before it starts. */
   ipcMain.handle('stems:minutesLeft', (_event, licenseKey: string) => minutesLeft(licenseKey))
 
+  /* --------------------------------------------------------------- youtube */
+
+  /**
+   * Pulling a reference track down as a file.
+   *
+   * Split across four handlers rather than one, for the reason the bundle export is two: the
+   * work is long, and a renderer sitting behind a single `await` cannot say which part of it
+   * is happening. It also has to be split for a plainer reason - the MP3 encode happens in
+   * the renderer, where the decoder and LAME already live, so the file genuinely does travel
+   * out and back.
+   */
+  ipcMain.handle('youtube:toolStatus', (): Promise<YoutubeToolStatus> => youtubeToolStatus())
+
+  ipcMain.handle('youtube:installTool', async (event): Promise<YoutubeToolStatus> => {
+    return installYoutubeTool((percent) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('youtube:progress', { phase: 'tool', percent } satisfies YoutubeProgress)
+      }
+    })
+  })
+
+  ipcMain.handle(
+    'youtube:probe',
+    // With the thumbnail inlined: this is the probe somebody is watching, and the renderer's
+    // CSP has no remote origin to load a picture from. See `inlineThumbnail`.
+    (_event, url: string): Promise<{ info?: YoutubeInfo; error?: string }> =>
+      probeYoutube(url, true)
+  )
+
+  ipcMain.handle('youtube:fetch', async (event, url: string): Promise<YoutubeFetched> => {
+    return fetchAudio(url, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('youtube:progress', progress)
+    })
+  })
+
+  ipcMain.handle('youtube:cancel', () => cancelYoutube())
+
+  ipcMain.handle(
+    'youtube:place',
+    (
+      _event,
+      tempPath: string,
+      dir: string,
+      base: string,
+      ext: string,
+      bytes?: Uint8Array
+    ): Promise<{ path?: string; error?: string }> => placeYoutube(tempPath, dir, base, ext, bytes)
+  )
+
+  ipcMain.handle('youtube:discard', (_event, tempPath: string) => discardYoutube(tempPath))
+
+  /**
+   * The clipboard as text, so the download dialog can offer what was just copied.
+   *
+   * Through IPC rather than `navigator.clipboard.readText()`, which is gated behind a
+   * permission prompt the renderer would have to survive - for a link the user copied
+   * thirty seconds ago in order to paste it here.
+   */
+  ipcMain.handle('clipboard:readText', () => clipboard.readText())
+
   ipcMain.handle('peaks:get', (_event, path: string) => getPeaks(path))
   ipcMain.handle('peaks:forget', (_event, paths: string[]) => {
     forgetPeaks(paths)
@@ -1756,7 +1857,9 @@ if (!app.requestSingleInstanceLock()) {
     } else if (portableChoice.reason && portableChoice.reason !== 'development build') {
       console.log(`umakbang: not portable (${portableChoice.reason}), data in ${portableChoice.dir}`)
     }
+    mark('whenReady')
     initStore()
+    mark('initStore')
     // After `initStore`, or this reads `DEFAULT_SETTINGS` instead of what is on disk - the
     // same trap `applyAnalysisSettings` documents in the renderer.
     setUndoLimit(getUserData().settings.undoDepth)
@@ -1765,6 +1868,18 @@ if (!app.requestSingleInstanceLock()) {
     // The scanner owns the index, but moves and renames happen here, and they have to be
     // recorded or the next launch replays a file at a path it no longer has.
     initIndexStore(getDataDir())
+    // Start the scanner before the window rather than from `did-finish-load`, which is where
+    // `beginScan` reaches it. Forking a process and letting it open its index store is work
+    // that needs no renderer, and doing it afterwards put the whole of it on the end of the
+    // launch: measured cold, the window took 6.3s to finish loading and only then did a
+    // scanner start that needed another 940ms before the first row could be asked for.
+    // Started here it runs beside Chromium, on another core, and is waiting by the time the
+    // page is. `beginScan` still owns the scan itself - this only moves the child's own
+    // startup off the critical path, and `pendingScanRoots` already covered the other order.
+    //
+    // Not when there is no library: a welcome screen has nothing to scan, and a process
+    // forked to sit idle is a process to shut down again.
+    if (getUserData().settings.roots.length > 0) ensureScanner()
     // umakbang is a dark app; telling Chromium so keeps native bits - scrollbars, form
     // controls, the caption buttons - from rendering light against it.
     nativeTheme.themeSource = 'dark'
@@ -1773,6 +1888,7 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc()
     buildMenu()
     createWindow()
+    mark('createWindow')
     // Reads the release feed and stages anything newer; it installs on quit rather than
     // interrupting. Deliberately after the window exists, since it reports to it.
     initUpdater(() => mainWindow)

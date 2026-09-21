@@ -14,6 +14,7 @@
  */
 
 import type { Track } from '@shared/types'
+import { encodeMp3, nearestBitrate, toInt16 } from '@/lib/mp3'
 
 /** What a trim produced, ready to be written. */
 export interface TrimResult {
@@ -25,26 +26,6 @@ export interface TrimResult {
 
 /** Extensions we can write back in their own format. Everything else becomes a WAV. */
 const MP3_SOURCES = new Set(['mp3'])
-
-/**
- * Interleaved 16-bit PCM, which is what both writers below want.
- *
- * Float samples outside -1..1 are clipped rather than wrapped: a mastered beat sits at 0dBFS
- * and the odd sample lands a hair over, and wrapping turns that into a click.
- */
-function toInt16(buffer: AudioBuffer, from: number, to: number): Int16Array {
-  const channels = buffer.numberOfChannels
-  const length = to - from
-  const out = new Int16Array(length * channels)
-  for (let channel = 0; channel < channels; channel++) {
-    const data = buffer.getChannelData(channel)
-    for (let i = 0; i < length; i++) {
-      const sample = Math.max(-1, Math.min(1, data[from + i]))
-      out[i * channels + channel] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
-    }
-  }
-  return out
-}
 
 /** A RIFF/WAVE container around the samples. */
 function encodeWav(pcm: Int16Array, channels: number, sampleRate: number): Uint8Array {
@@ -72,54 +53,6 @@ function encodeWav(pcm: Int16Array, channels: number, sampleRate: number): Uint8
 }
 
 /**
- * MP3 through LAME.
- *
- * Imported dynamically so the encoder is a code-split chunk rather than something every
- * launch parses - it is only ever wanted at the moment somebody saves a trim of an MP3. It is
- * LGPL-3.0, which this app can carry because it is already AGPL-3.0 for Essentia's sake.
- */
-async function encodeMp3(
-  pcm: Int16Array,
-  channels: number,
-  sampleRate: number,
-  kbps: number
-): Promise<Uint8Array> {
-  const { Mp3Encoder } = await import('@breezystack/lamejs')
-  const encoder = new Mp3Encoder(channels, sampleRate, kbps)
-
-  // A block per 1152 frames, which is the MP3 frame size LAME wants fed to it.
-  const BLOCK = 1152
-  const chunks: Uint8Array[] = []
-  const left = new Int16Array(BLOCK)
-  const right = new Int16Array(BLOCK)
-
-  for (let offset = 0; offset < pcm.length / channels; offset += BLOCK) {
-    const frames = Math.min(BLOCK, pcm.length / channels - offset)
-    for (let i = 0; i < frames; i++) {
-      left[i] = pcm[(offset + i) * channels]
-      right[i] = channels > 1 ? pcm[(offset + i) * channels + 1] : left[i]
-    }
-    const block =
-      channels > 1
-        ? encoder.encodeBuffer(left.subarray(0, frames), right.subarray(0, frames))
-        : encoder.encodeBuffer(left.subarray(0, frames))
-    if (block.length > 0) chunks.push(new Uint8Array(block))
-  }
-
-  const tail = encoder.flush()
-  if (tail.length > 0) chunks.push(new Uint8Array(tail))
-
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const out = new Uint8Array(total)
-  let at = 0
-  for (const chunk of chunks) {
-    out.set(chunk, at)
-    at += chunk.length
-  }
-  return out
-}
-
-/**
  * Cuts `from`..`to` (seconds) out of a decoded track.
  *
  * The bitrate for an MP3 is taken from the source rather than assumed, so trimming a 320k
@@ -139,8 +72,7 @@ export async function trimBuffer(
   const seconds = (end - start) / buffer.sampleRate
 
   if (MP3_SOURCES.has(track.ext)) {
-    const source = track.bitrate ? Math.round(track.bitrate / 1000) : 192
-    const rate = [320, 256, 192, 160, 128, 112, 96, 64].find((r) => r <= source) ?? 128
+    const rate = nearestBitrate(track.bitrate ? Math.round(track.bitrate / 1000) : 192)
     return { bytes: await encodeMp3(pcm, buffer.numberOfChannels, buffer.sampleRate, rate), ext: 'mp3', seconds }
   }
 

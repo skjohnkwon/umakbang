@@ -17,7 +17,13 @@ import {
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
-import { DEFAULT_SETTINGS, type LibraryRoot, type Settings, type UserData } from '../shared/types'
+import {
+  DEFAULT_SETTINGS,
+  STEM_SPLITTERS,
+  type LibraryRoot,
+  type Settings,
+  type UserData
+} from '../shared/types'
 import { labelForRoot } from '../shared/roots'
 import { keyedRecord, pathKey } from '../shared/path-key'
 import type { SettingsBackup } from '../shared/backup'
@@ -94,6 +100,25 @@ export function initStore(): void {
     userData.settings.stemOutputDir = isPortable()
       ? join(dataDir, 'stems')
       : join(musicDir(), 'umakbang stems')
+  }
+
+  // A separation model this endpoint refuses is a setting that can only ever fail, and `lynx`
+  // was the default long enough to be sitting in this machine's settings file - so leaving it
+  // alone would mean the fix only reached installs that never ran the broken build. There are
+  // no migrations here, so this is the same shape as the path repair above: a value outside
+  // the list is replaced rather than the app being taught to send it.
+  if (!(STEM_SPLITTERS as readonly string[]).includes(userData.settings.stemSplitter)) {
+    userData.settings.stemSplitter = DEFAULT_SETTINGS.stemSplitter
+  }
+
+  // Where a download lands when there is no folder on screen to put it in. Seeded the same
+  // way and for the same reason as the stem folder above: a path spelled out in the source is
+  // a path that does not exist on somebody else's machine, and the folder is created before
+  // the write.
+  if (!userData.settings.youtubeDir) {
+    userData.settings.youtubeDir = isPortable()
+      ? join(dataDir, 'downloads')
+      : join(musicDir(), 'umakbang downloads')
   }
 
   // Where the Export button writes, seeded to the same folder the daily backup uses so the

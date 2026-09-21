@@ -13,11 +13,13 @@ import type {
   UndoOutcome,
   UndoProgress,
   UndoSummary,
-  UserData
+  UserData,
+  YoutubePhase
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { setInternalDropHandler } from '@/lib/drag'
 import { forgetPeaks, setDecodeObserver } from '@/lib/peaks'
+import { transcodeToMp3 } from '@/lib/youtube'
 import type { BackupSummary, FolderMapping, SettingsBackup } from '@shared/backup'
 import {
   analyseDecoded,
@@ -58,6 +60,12 @@ export type ViewMode =
   | { mode: 'contracts' }
   /** Videos: the reel composer, the screen recorder and what has been made. */
   | { mode: 'videos' }
+  /**
+   * Pulling audio off a link - "YT2MP3" on screen. The mode is `downloading` rather than
+   * `downloads` because the sidebar already has a Downloads and it is the OS folder of that
+   * name; the two would be one typo apart everywhere they are compared.
+   */
+  | { mode: 'downloading' }
   /** The OS Downloads folder - a staging area, listed on demand. */
   | { mode: 'downloads' }
 
@@ -386,6 +394,16 @@ interface LibraryState {
   stemJob: { path: string; phase: string; percent?: number; done: number; total: number } | null
   /** Sends files to LALAL.AI and writes the stems back to the configured folder. */
   splitStems: (tracks: Track[]) => Promise<void>
+
+  /** What the downloader is doing, and to what. Null when idle. */
+  youtubeJob: { phase: YoutubePhase; percent?: number; title?: string } | null
+  /**
+   * Downloads a link's audio into `dir` and, for MP3, re-encodes it on the way.
+   *
+   * Resolves to the path it wrote, or null. The caller does not have to wait: the toolbar
+   * carries the progress, the way it does for a split.
+   */
+  downloadFromLink: (url: string, dir: string) => Promise<string | null>
 
   /* --- file operations --- */
 
@@ -1682,6 +1700,32 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       const failed = outcomes.filter((outcome) => outcome.error)
       const written = outcomes.reduce((total, outcome) => total + outcome.written.length, 0)
 
+      /**
+       * Tell the library the stems exist.
+       *
+       * Every other path that creates a file does this - a trim, a download, the recheck after
+       * a move - and the split was the one that did not, so the stems were on disk and simply
+       * not in the app. Nothing else was going to find them soon: the folder watch is on the
+       * folder you are *standing in*, which is where the source file is rather than where the
+       * stems went, and each split writes into a subfolder of its own that the explorer has no
+       * row for. That leaves a full rescan of the whole library as the only way to see two
+       * files that were just created on purpose.
+       *
+       * Worse, the revalidation skip can hide them for longer than one scan. `mkdir` runs
+       * before the upload and the stems arrive minutes later, so a scan that happens to land
+       * in between records the parent folder's new mtime while the folder is still empty - and
+       * the parent is then "unchanged" on the next pass. Measured on this machine, exactly
+       * that: the index was saved 42 seconds before the stems finished downloading.
+       *
+       * The stem folders, not the source folders, and deduped - a batch writes one folder per
+       * file. Capped like `recheckPaths` for the same reason: this is one IPC round trip and
+       * one `readdir` each.
+       */
+      const stemDirs = [
+        ...new Set(outcomes.flatMap((outcome) => outcome.written.map(parentPath)))
+      ].slice(0, RECHECK_DIRS)
+      for (const dir of stemDirs) void window.umakbang.refreshFolder(dir)
+
       if (failed.length === 0) {
         get().notify(
           `Wrote ${written} stem${written === 1 ? '' : 's'} to ${baseName(settings.stemOutputDir)}.`
@@ -1697,6 +1741,95 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     } finally {
       off()
       set({ stemJob: null })
+    }
+  },
+
+  youtubeJob: null,
+
+  downloadFromLink: async (url, dir) => {
+    if (get().youtubeJob) {
+      get().notify('A download is already running.', 'error')
+      return null
+    }
+    if (!dir.trim()) {
+      get().notify('There is nowhere to put it. Choose a download folder in Settings.', 'error')
+      return null
+    }
+
+    const { settings } = get()
+    set({ youtubeJob: { phase: 'reading' } })
+
+    // Main reports the fetch; the encode below is this side's own and reports itself.
+    const off = window.umakbang.onYoutubeProgress((progress) => {
+      if (!get().youtubeJob) return
+      set({
+        youtubeJob: {
+          phase: progress.phase,
+          percent: progress.percent,
+          title: progress.title ?? get().youtubeJob?.title
+        }
+      })
+    })
+
+    try {
+      const fetched = await window.umakbang.fetchYoutube(url)
+      if (fetched.error || !fetched.tempPath || !fetched.ext) {
+        // A cancel comes back through the same channel as a failure, and it is not one.
+        if (fetched.error !== 'Cancelled.') {
+          get().notify(fetched.error ?? 'The download failed.', 'error')
+        }
+        return null
+      }
+
+      const title = fetched.info?.title ?? 'download'
+      let bytes: Uint8Array | undefined
+      let ext = fetched.ext
+
+      if (settings.youtubeFormat === 'mp3') {
+        set({ youtubeJob: { phase: 'converting', percent: 0, title } })
+        try {
+          // Statically imported: the only heavy thing behind it is LAME, and `mp3.ts`
+          // already loads that dynamically, so a second dynamic import here bought no
+          // chunk - it only made the module belong to two graphs at once.
+          bytes = await transcodeToMp3(fetched.tempPath, settings.youtubeBitrate, (fraction) => {
+            set({ youtubeJob: { phase: 'converting', percent: fraction * 100, title } })
+          })
+          ext = 'mp3'
+        } catch {
+          /**
+           * The stream is kept in whatever it arrived as rather than lost.
+           *
+           * Everything YouTube serves decodes here, so this is the case where something
+           * else was on the end of the link - and a file the app cannot decode is still a
+           * file the user asked for and can convert elsewhere. Throwing away a finished
+           * download because the second half of the job failed is the worst of the options.
+           */
+          bytes = undefined
+          ext = fetched.ext
+          get().notify(`Could not re-encode ${title}; kept it as .${ext}.`, 'error')
+        }
+      }
+
+      set({ youtubeJob: { phase: 'writing', title } })
+      const written = await window.umakbang.placeYoutube(fetched.tempPath, dir, title, ext, bytes)
+      if (written.error || !written.path) {
+        await window.umakbang.discardYoutube(fetched.tempPath)
+        get().notify(written.error ?? 'The file could not be written.', 'error')
+        return null
+      }
+
+      // The folder re-read is what puts it in the list, the same way a trim arrives. The
+      // watch would find it within 600ms anyway; asking directly means it is there by the
+      // time the notice is read.
+      void window.umakbang.refreshFolder(dir)
+      get().notify(`Downloaded ${baseName(written.path)}.`)
+      return written.path
+    } catch (error) {
+      get().notify(error instanceof Error ? error.message : String(error), 'error')
+      return null
+    } finally {
+      off()
+      set({ youtubeJob: null })
     }
   },
 

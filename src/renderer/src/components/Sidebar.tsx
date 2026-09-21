@@ -25,6 +25,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { TagBar } from '@/components/TagBar'
+import { YoutubeIcon } from '@/components/DownloadPage'
 import { useFolderTree, type FolderNode } from '@/hooks/useLibraryView'
 import { useFolderDrop, type FolderDrop } from '@/hooks/useFolderDrop'
 import { collapseVariants } from '@/lib/motion'
@@ -288,6 +289,18 @@ export function Sidebar(): React.JSX.Element {
         active={view.mode === 'videos'}
         depth={0}
         onClick={() => setView({ mode: 'videos' })}
+      />
+      {/* Under Videos because it belongs to the same half of the sidebar: these are things
+          you do with audio, not further ways of listing what you already have. Named for what
+          it does rather than for the act - there is a Downloads row further down and it is the
+          OS folder of that name, a place you file things out of rather than a thing you do. */}
+      <SidebarRow
+        icon={<YoutubeIcon className="h-3.5 w-3.5" />}
+        label="YT2MP3"
+        count={0}
+        active={view.mode === 'downloading'}
+        depth={0}
+        onClick={() => setView({ mode: 'downloading' })}
       />
 
       <SidebarRow

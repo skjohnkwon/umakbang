@@ -1645,7 +1645,6 @@ export function FileTable({
                       template={template}
                       spacer={spacer}
                       icon={fileIcon(row.track.ext) ?? null}
-                      renders={row.renders}
                       selected={selection.has(row.track.path)}
                       cut={cutPaths?.has(row.track.path) ?? false}
                       tags={tags[key]}
@@ -1859,11 +1858,6 @@ interface FileCellContext {
   note: string
   /** The OS's icon for this file type, once it has arrived. */
   icon: string | null
-  /**
-   * How many renders this row stands for, itself included, or undefined when it stands for
-   * one file. Only ever set while `Settings.collapseRenders` is on.
-   */
-  renders: number | undefined
   /** How waveforms are coloured. Subscribed to once by the table, never by a row. */
   waveformTint: Settings['waveformTint']
   /** The ramp they are coloured with, likewise. */
@@ -1965,18 +1959,6 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
           >
             {track.name}
           </span>
-          {/* The renders this row is standing in for, in the folder count's muted style: it
-              is a footnote about the row, not a value to compare rows by, so it stays out
-              of the columns. */}
-          {ctx.renders !== undefined && (
-            <span
-              className="tnum shrink-0 text-[11px] text-muted-foreground/60"
-              title={`${ctx.renders} renders of this track, folded into one row`}
-            >
-              {'×'}
-              {ctx.renders}
-            </span>
-          )}
           <RowTags
             tags={ctx.tags}
             paths={[track.path]}
@@ -2238,7 +2220,6 @@ const FileRow = memo(function FileRow({
   template,
   spacer,
   icon,
-  renders,
   selected,
   cut,
   tags,
@@ -2279,9 +2260,6 @@ const FileRow = memo(function FileRow({
   template: string
   spacer: boolean
   icon: string | null
-  /** How many renders this row stands for, when they were folded. A primitive, so memo
-      compares it the same way it compares everything else the row draws. */
-  renders: number | undefined
   selected: boolean
   cut: boolean
   tags: string[] | undefined
@@ -2308,7 +2286,6 @@ const FileRow = memo(function FileRow({
     keyUnsure,
     note,
     icon,
-    renders,
     waveformTint,
     wave,
     handlers

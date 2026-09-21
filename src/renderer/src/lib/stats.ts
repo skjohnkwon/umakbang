@@ -560,14 +560,8 @@ const FIFTHS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F']
 const RENDER_SUFFIX =
   /(?:[_\s-]*(?:master(?:ed)?|notag|no[_\s-]?tag|final|mixdown|mixed|mix|render|export|v\d+|copy))+$/i
 
-/**
- * The work a file is a render of: its folder plus its name with the render words off.
- *
- * Exported because the explorer folds rows by the same rule (`Settings.collapseRenders`).
- * Two definitions of "one track" that disagreed would be a bug nobody could see: the panels
- * would count 40 songs where the list showed 41 rows and neither would look wrong.
- */
-export function workOf(track: Track): string {
+/** The work a file is a render of: its folder plus its name with the render words off. */
+function workOf(track: Track): string {
   const stem = track.name.replace(/\.[^.]+$/, '')
   return `${track.relDir}/${stem.replace(RENDER_SUFFIX, '').trim()}`.toLowerCase()
 }

@@ -21,6 +21,7 @@ import { StatsPage } from '@/components/stats/StatsPage'
 import { SettingsPage } from '@/components/SettingsPage'
 import { ContractsPage } from '@/components/contracts/ContractsPage'
 import { VideosPage } from '@/components/videos/VideosPage'
+import { DownloadPage } from '@/components/DownloadPage'
 import { ContractDialog } from '@/components/ContractDialog'
 import { ImportWizard } from '@/components/ImportWizard'
 import { Tutorial } from '@/components/Tutorial'
@@ -411,7 +412,8 @@ export default function App(): React.JSX.Element {
     view.mode === 'stats' ||
     view.mode === 'settings' ||
     view.mode === 'contracts' ||
-    view.mode === 'videos'
+    view.mode === 'videos' ||
+    view.mode === 'downloading'
       ? view.mode
       : 'browse'
 
@@ -459,6 +461,8 @@ export default function App(): React.JSX.Element {
                       <ContractsPage />
                     ) : view.mode === 'videos' ? (
                       <VideosPage />
+                    ) : view.mode === 'downloading' ? (
+                      <DownloadPage />
                     ) : (
                       <>
                         <Toolbar

@@ -37,16 +37,55 @@ function headers(key: string): Record<string, string> {
   return { 'X-License-Key': key }
 }
 
-/** Turns a failed response into something worth putting in front of a person. */
+/**
+ * Turns a failed response into something worth putting in front of a person.
+ *
+ * The shape of the body is the whole difficulty, and getting it wrong cost this feature. A
+ * rejected *key* comes back as `{"detail": "..."}` and reads fine; a rejected *request* comes
+ * back as a validation report, `{"detail": [{"loc": [...], "msg": "..."}]}`, and interpolating
+ * that array into a template gives "[object Object]". Which is what the app said for every
+ * split anyone tried: the service was explaining that the chosen model cannot separate vocals,
+ * and the explanation was being destroyed on the way to the notice. An error reporter that
+ * only handles the errors you expected is worse than none, because it looks like it worked.
+ *
+ * The status code is always kept. "Invalid license key" and "not a supported format" are the
+ * same sentence to a user until you can see one was a 401 and the other a 422.
+ */
 async function describe(response: Response): Promise<string> {
-  let detail = ''
+  const status = `${response.status} ${response.statusText}`
+  // Read as text once: a body is a stream that can only be consumed once, and not every
+  // failure is JSON - an HTML error page from something in front of the API is still worth
+  // showing a few words of.
+  const text = await response.text().catch(() => '')
+
+  let said = ''
   try {
-    const body = (await response.json()) as { error?: string; detail?: string }
-    detail = body.error ?? body.detail ?? ''
+    const body = JSON.parse(text) as { error?: unknown; detail?: unknown; message?: unknown }
+    said = flatten(body.error ?? body.detail ?? body.message)
   } catch {
-    // Not every failure is JSON.
+    said = text.trim().slice(0, 300)
   }
-  return detail || `${response.status} ${response.statusText}`
+
+  return said ? `${said} (${status})` : status
+}
+
+/** Any of the shapes an error body arrives in, as one sentence. */
+function flatten(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map(flatten).filter(Boolean).join('; ')
+  }
+  if (detail && typeof detail === 'object') {
+    const entry = detail as { msg?: unknown; message?: unknown; detail?: unknown }
+    const message = entry.msg ?? entry.message ?? entry.detail
+    // The validation framework prefixes its own category onto the sentence it was given.
+    // "Value error, " in front of the only useful words is noise to whoever reads the notice.
+    if (typeof message === 'string') return message.replace(/^Value error,\s*/, '')
+    // Something structured nobody anticipated. Unreadable beats discarded: it is still the
+    // only account of what went wrong, and it is what a bug report can be pasted from.
+    return JSON.stringify(detail).slice(0, 300)
+  }
+  return ''
 }
 
 /** Minutes of processing left on the account, so a batch can be refused before it starts. */

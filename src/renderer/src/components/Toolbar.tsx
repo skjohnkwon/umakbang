@@ -15,7 +15,6 @@ import {
   FolderTree,
   Download,
   FilterX,
-  Layers,
   List,
   ListFilter,
   Loader2,
@@ -88,6 +87,7 @@ export function Toolbar({
   const scanning = useLibrary((s) => s.scanning)
   const selectionCount = useLibrary((s) => s.selection.size)
   const stemJob = useLibrary((s) => s.stemJob)
+  const youtubeJob = useLibrary((s) => s.youtubeJob)
   // The durable way back. The menu carries it too, but a menu bar is not where a Windows
   // user looks for the thing they just did, so the button sits with Back and Forward - which
   // is the other control on this strip that means "take me to before".
@@ -304,6 +304,21 @@ export function Toolbar({
         </span>
       )}
 
+      {/* Downloading runs in the background too, and the dialog it was started from is
+          usually shut by now. */}
+      {youtubeJob && (
+        <span
+          className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground"
+          title={youtubeJob.title ? `${youtubeJob.phase} ${youtubeJob.title}` : youtubeJob.phase}
+        >
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+          <span className="truncate">
+            {youtubeJob.phase === 'converting' ? 'encoding' : youtubeJob.phase}
+            {youtubeJob.percent !== undefined ? ` · ${Math.round(youtubeJob.percent)}%` : ''}
+          </span>
+        </span>
+      )}
+
       {scanning && progress && (
         <span className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
@@ -323,7 +338,6 @@ export function Toolbar({
       <RandomBeatButton />
       <AudioOnlyToggle />
       <FoldersToggle />
-      <CollapseRendersToggle />
       <TypeFilterMenu />
       <ColumnsButton />
 
@@ -662,45 +676,6 @@ function FoldersToggle(): React.JSX.Element {
         className={cn(recursive && 'bg-primary/15 text-primary')}
       >
         {recursive ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
-      </Button>
-    </Hint>
-  )
-}
-
-/**
- * Folds a track's renders into one row.
- *
- * A finished piece of music leaves several files behind - `REFLECT_Master.wav`,
- * `REFLECT.mp3`, `REFLECT_notag.wav` - and in a folder of finished work that is the rule
- * rather than the exception: 40 songs read as 120 files. The largest render stands for the
- * rest and says how many it stands for.
- *
- * It sits here beside the other view toggles rather than only in Settings because it is a
- * question about the folder you are looking at now: browsing your own bounces wants it on,
- * and going to find the exact MP3 you sent somebody wants it off.
- */
-function CollapseRendersToggle(): React.JSX.Element {
-  const active = useLibrary((s) => s.settings.collapseRenders)
-  const patchSettings = useLibrary((s) => s.patchSettings)
-
-  return (
-    <Hint
-      label={
-        active
-          ? 'One row per track - the biggest render stands for the rest'
-          : "Fold a track's renders (Master, MP3, notag) into one row"
-      }
-      side="bottom"
-    >
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-pressed={active}
-        aria-label="Collapse renders"
-        onClick={() => patchSettings({ collapseRenders: !active })}
-        className={cn(active && 'bg-primary/15 text-primary')}
-      >
-        <Layers className="h-3.5 w-3.5" />
       </Button>
     </Hint>
   )

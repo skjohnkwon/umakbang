@@ -322,7 +322,8 @@ export function summariseBackup(backup: SettingsBackup): BackupSummary {
   ]
   const extras = [
     ...(backup.settings.quickMove ?? []).map((target) => target.path),
-    ...(backup.settings.stemOutputDir ? [backup.settings.stemOutputDir] : [])
+    ...(backup.settings.stemOutputDir ? [backup.settings.stemOutputDir] : []),
+    ...(backup.settings.youtubeDir ? [backup.settings.youtubeDir] : [])
   ]
 
   const sample = keyed[0] ?? extras[0] ?? libraryRoots[0] ?? ''
@@ -472,6 +473,14 @@ export function remapBackup(backup: SettingsBackup, mapping: FolderMapping): Rem
     const next = rewrite(settings.stemOutputDir, ordered)
     if (next === null) delete settings.stemOutputDir
     else settings.stemOutputDir = next
+  }
+
+  if (settings.youtubeDir) {
+    // Same reasoning as the stem folder: dropped rather than carried, so `initStore` seeds
+    // this machine's own default instead of pointing at the other machine's drive letter.
+    const next = rewrite(settings.youtubeDir, ordered)
+    if (next === null) delete settings.youtubeDir
+    else settings.youtubeDir = next
   }
 
   return {

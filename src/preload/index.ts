@@ -33,7 +33,11 @@ import type {
   StemOptions as StemSplitOptions,
   StemOutcome,
   StemProgress,
-  UpdateStatus
+  UpdateStatus,
+  YoutubeFetched,
+  YoutubeInfo,
+  YoutubeProgress,
+  YoutubeToolStatus
 } from '../shared/types'
 
 /** Wraps an ipcRenderer subscription so callers get a plain unsubscribe function. */
@@ -376,6 +380,34 @@ const api = {
     ipcRenderer.invoke('stems:minutesLeft', licenseKey),
   onStemProgress: (handler: (progress: StemProgress) => void): (() => void) =>
     subscribe('stems:progress', handler),
+
+  /* --- youtube --- */
+  /** Whether the extractor is installed, and which build. */
+  youtubeToolStatus: (): Promise<YoutubeToolStatus> => ipcRenderer.invoke('youtube:toolStatus'),
+  /** Fetches the extractor. Progress arrives on `onYoutubeProgress` as phase `tool`. */
+  installYoutubeTool: (): Promise<YoutubeToolStatus> => ipcRenderer.invoke('youtube:installTool'),
+  /** What a link turns out to be, before anything is downloaded. */
+  probeYoutube: (url: string): Promise<{ info?: YoutubeInfo; error?: string }> =>
+    ipcRenderer.invoke('youtube:probe', url),
+  /** Downloads the audio to somewhere temporary; `place` decides where it ends up. */
+  fetchYoutube: (url: string): Promise<YoutubeFetched> => ipcRenderer.invoke('youtube:fetch', url),
+  cancelYoutube: (): Promise<void> => ipcRenderer.invoke('youtube:cancel'),
+  /** Writes the finished audio into `dir` and clears the scratch file. */
+  placeYoutube: (
+    tempPath: string,
+    dir: string,
+    base: string,
+    ext: string,
+    bytes?: Uint8Array
+  ): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('youtube:place', tempPath, dir, base, ext, bytes),
+  /** Throws the scratch file away when the encode failed and nothing will be placed. */
+  discardYoutube: (tempPath: string): Promise<void> =>
+    ipcRenderer.invoke('youtube:discard', tempPath),
+  onYoutubeProgress: (handler: (progress: YoutubeProgress) => void): (() => void) =>
+    subscribe('youtube:progress', handler),
+  /** The clipboard as text, for offering the link that was just copied. */
+  readClipboardText: (): Promise<string> => ipcRenderer.invoke('clipboard:readText'),
 
   /* --- waveform peak cache --- */
   getPeaks: (path: string): Promise<string | null> => ipcRenderer.invoke('peaks:get', path),
