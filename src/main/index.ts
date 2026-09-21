@@ -101,7 +101,13 @@ import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
-import { listRemoteDevices, remoteServerState, startRemoteServer, stopRemoteServer } from './remote'
+import {
+  listRemoteDevices,
+  remoteServerState,
+  remoteStats,
+  startRemoteServer,
+  stopRemoteServer
+} from './remote'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
 import { watch, type FSWatcher } from 'node:fs'
 import type { ScannerCommand, ScannerEvent } from './scanner-process'
@@ -1102,6 +1108,7 @@ function registerIpc(): void {
   /* --- the tailnet --- */
   ipcMain.handle('remote:devices', () => listRemoteDevices())
   ipcMain.handle('remote:serverState', () => remoteServerState())
+  ipcMain.handle('remote:stats', () => remoteStats())
   ipcMain.handle('remote:restartServer', () => startRemoteServer())
 
   ipcMain.handle('library:pickFolder', () => pickAndOpenFolder())

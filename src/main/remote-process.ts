@@ -20,7 +20,7 @@
 import { createReadStream, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createGzip } from 'node:zlib'
-import type { RemoteHello, RemoteLibrary } from '../shared/types'
+import type { RemoteHello, RemoteLibrary, RemoteRequestLog, RemoteStats } from '../shared/types'
 import { indexFileFor, initIndexStore, patchFileFor } from './index-store'
 import { parseRange, resolveInLibrary } from './remote-routes'
 
@@ -41,9 +41,59 @@ export type RemoteEvent =
   | { type: 'ready' }
   | { type: 'listening'; address: string; port: number }
   | { type: 'failed'; reason: string }
+  | { type: 'stats'; stats: RemoteStats }
+
+/**
+ * How many answered requests the monitor remembers.
+ *
+ * A window rather than a log: this is for watching a transfer happen and for seeing that a
+ * refusal was a refusal, neither of which needs history. Keeping every request of a session
+ * would grow without bound in a process that is meant to be cheap to leave running.
+ */
+const RECENT_LIMIT = 50
+
+/** At most this often, so a burst of range requests cannot flood the parent. */
+const STATS_THROTTLE_MS = 400
 
 let server: Server | null = null
 let config: RemoteConfig | null = null
+
+let stats: RemoteStats = {
+  startedAt: 0,
+  requests: 0,
+  bytesOut: 0,
+  refused: 0,
+  inFlight: 0,
+  recent: []
+}
+let statsTimer: NodeJS.Timeout | null = null
+let statsDirty = false
+
+/**
+ * Sends the counters up, at most every `STATS_THROTTLE_MS`.
+ *
+ * Trailing rather than leading: the interesting snapshot is the one after a burst has
+ * finished, not the one from its first request.
+ */
+function publishStats(): void {
+  statsDirty = true
+  if (statsTimer) return
+  statsTimer = setTimeout(() => {
+    statsTimer = null
+    if (!statsDirty) return
+    statsDirty = false
+    post({ type: 'stats', stats: { ...stats, recent: [...stats.recent] } })
+  }, STATS_THROTTLE_MS)
+}
+
+function record(entry: RemoteRequestLog): void {
+  stats.requests += 1
+  stats.bytesOut += entry.bytes
+  if (entry.status >= 400) stats.refused += 1
+  stats.recent.unshift(entry)
+  if (stats.recent.length > RECENT_LIMIT) stats.recent.length = RECENT_LIMIT
+  publishStats()
+}
 
 function post(event: RemoteEvent): void {
   process.parentPort?.postMessage(event)
@@ -72,6 +122,31 @@ function hello(): RemoteHello {
       ...library,
       generation: generationOf(library.path)
     }))
+  }
+}
+
+function pathOf(url: string | undefined): string {
+  return (url ?? '/').split('?')[0]
+}
+
+/**
+ * A few words saying which request this was, without putting a full path on screen.
+ *
+ * The query carries absolute library paths, and a monitor that printed them whole would be
+ * unreadable long before it was useful. A file's own name is what tells two requests apart.
+ */
+function detailOf(url: string | undefined): string | undefined {
+  try {
+    const parsed = new URL(url ?? '/', 'http://localhost')
+    const rel = parsed.searchParams.get('rel')
+    if (rel) return rel.split(/[\\/]/).pop() ?? undefined
+    const library = parsed.searchParams.get('library')
+    if (library) {
+      return config?.libraries.find((entry) => entry.id === library)?.label ?? library
+    }
+    return undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -251,6 +326,35 @@ function start(next: RemoteConfig): void {
   // here rather than the name being rebuilt.
   initIndexStore(next.dataDir)
   const created = createServer((request, response) => {
+    const at = Date.now()
+    // Off the socket rather than counted through the stream: a range request and a whole
+    // file take different paths out of here, and the socket has already added the headers
+    // by the time it is asked. Keep-alive means it accumulates, so it is read as a delta.
+    const socket = request.socket
+    const writtenBefore = socket?.bytesWritten ?? 0
+
+    stats.inFlight += 1
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      stats.inFlight = Math.max(0, stats.inFlight - 1)
+      record({
+        at,
+        peer: socket?.remoteAddress ?? '',
+        method: request.method ?? '',
+        path: pathOf(request.url),
+        detail: detailOf(request.url),
+        status: response.statusCode,
+        bytes: Math.max(0, (socket?.bytesWritten ?? writtenBefore) - writtenBefore),
+        ms: Date.now() - at
+      })
+    }
+    // Both, because a client that walks away mid-stream ends the response without
+    // finishing it, and a transfer that was abandoned is exactly what a monitor is for.
+    response.on('finish', finish)
+    response.on('close', finish)
+
     // Read-only, and that is enforced here rather than route by route. Nothing this process
     // serves can be written to over the wire, so a method that implies otherwise never
     // reaches the table.
@@ -276,7 +380,11 @@ function start(next: RemoteConfig): void {
   })
   created.listen(next.port, next.address, () => {
     server = created
+    stats = { startedAt: Date.now(), requests: 0, bytesOut: 0, refused: 0, inFlight: 0, recent: [] }
     post({ type: 'listening', address: next.address, port: next.port })
+    // One snapshot straight away, so the monitor has something to draw before any request
+    // arrives rather than an empty panel that looks broken.
+    post({ type: 'stats', stats })
   })
 }
 

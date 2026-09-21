@@ -22,6 +22,7 @@ import type {
   PlatformInfo,
   RemoteDevice,
   RemoteServerState,
+  RemoteStats,
   TailnetStatus,
   ScanProgress,
   Settings,
@@ -395,6 +396,8 @@ const api = {
   remoteServerState: (): Promise<RemoteServerState> => ipcRenderer.invoke('remote:serverState'),
   remoteRestartServer: (): Promise<RemoteServerState> =>
     ipcRenderer.invoke('remote:restartServer'),
+  /** What the server has answered since it started. Null when it is not running. */
+  remoteStats: (): Promise<RemoteStats | null> => ipcRenderer.invoke('remote:stats'),
 
   /* --- os integration --- */
   /** The OS's own icon for a file, as a data URL. Null when it has none. */

@@ -535,6 +535,39 @@ export interface RemoteHello {
   libraries: RemoteLibrary[]
 }
 
+/** One request the server answered, for the monitor. */
+export interface RemoteRequestLog {
+  at: number
+  /** The tailnet address it came from, which the UI maps back to a device name. */
+  peer: string
+  method: string
+  /** Pathname only. The query carries file paths and belongs in `detail`, shortened. */
+  path: string
+  /** Enough to tell two requests apart at a glance - a file's name, a library's label. */
+  detail?: string
+  status: number
+  bytes: number
+  ms: number
+}
+
+/**
+ * What the server has been doing, for the monitor in Settings.
+ *
+ * Counted in the process that serves, because it is the only one that sees a request. Pushed
+ * to the parent rather than pulled: a pull needs the two ends to correlate a reply, and the
+ * numbers are small enough that sending them on a throttle costs nothing.
+ */
+export interface RemoteStats {
+  startedAt: number
+  requests: number
+  bytesOut: number
+  /** Answered 4xx or 5xx. Mostly the containment check, which is worth watching. */
+  refused: number
+  inFlight: number
+  /** Newest first, capped. */
+  recent: RemoteRequestLog[]
+}
+
 /** Whether this machine is answering on the tailnet, and on what address - or why not. */
 export interface RemoteServerState {
   listening: boolean

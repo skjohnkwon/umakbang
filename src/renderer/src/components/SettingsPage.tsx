@@ -32,6 +32,7 @@ import {
 import type {
   RemoteDevice,
   RemoteServerState,
+  RemoteStats,
   TailnetStatus,
   Track
 } from '@shared/types'
@@ -623,6 +624,117 @@ function UpdateSection(): React.JSX.Element {
  * The tour replay is outside the gate, since wanting the introduction again is an ordinary
  * thing to want and nothing about it is dangerous.
  */
+/** Bytes, at the precision a monitor wants: enough to see a transfer, never a long number. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function formatUptime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+/**
+ * What the server has been asked for, as it is asked.
+ *
+ * Polled rather than pushed all the way to the renderer: the counters are already cached in
+ * the browser process, so a read is a property access, and a panel nobody has open should
+ * not be costing anything at all - which is why the interval only runs while this is
+ * mounted.
+ *
+ * Refusals are given their own count and drawn in place. They are almost all the containment
+ * check doing its job, and a number that quietly climbs while nothing is being transferred
+ * is the one thing here worth noticing.
+ */
+function ServerMonitor({ peers }: { peers: RemoteDevice[] }): React.JSX.Element | null {
+  const [stats, setStats] = useState<RemoteStats | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      const next = await window.umakbang.remoteStats()
+      if (!cancelled) {
+        setStats(next)
+        setNow(Date.now())
+      }
+    }
+    void tick()
+    const timer = setInterval(() => void tick(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  /** Tailnet addresses back to machine names, so a log line says who rather than which IP. */
+  const names = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const peer of peers) {
+      if (peer.node.ipv4) map.set(peer.node.ipv4, peer.node.hostName || peer.node.name)
+    }
+    return map
+  }, [peers])
+
+  if (!stats) return null
+
+  return (
+    <div className="rounded-md border bg-card/40 px-2.5 py-2">
+      <div className="tnum flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span>up {formatUptime(now - stats.startedAt)}</span>
+        <span>{stats.requests.toLocaleString()} requests</span>
+        <span>{formatBytes(stats.bytesOut)} out</span>
+        {stats.refused > 0 && (
+          <span className="text-kind-project">{stats.refused} refused</span>
+        )}
+        {stats.inFlight > 0 && <span className="text-primary">{stats.inFlight} in flight</span>}
+      </div>
+
+      {stats.recent.length === 0 ? (
+        <p className="mt-1.5 text-[11px] text-muted-foreground/50">
+          Nothing has asked for anything yet.
+        </p>
+      ) : (
+        <div className="mt-1.5 flex flex-col gap-px">
+          {stats.recent.slice(0, 12).map((entry) => (
+            <div
+              key={`${entry.at}-${entry.path}-${entry.ms}-${entry.bytes}`}
+              className="tnum flex items-baseline gap-2 text-[10.5px]"
+            >
+              <span
+                className={cn(
+                  'w-7 shrink-0',
+                  entry.status >= 400 ? 'text-kind-project' : 'text-muted-foreground/60'
+                )}
+              >
+                {entry.status}
+              </span>
+              <span className="shrink-0 text-muted-foreground/80">{entry.path}</span>
+              <span className="truncate text-foreground/70">{entry.detail}</span>
+              <span className="ml-auto shrink-0 text-muted-foreground/45">
+                {names.get(entry.peer) ?? entry.peer}
+              </span>
+              <span className="w-14 shrink-0 text-right text-muted-foreground/45">
+                {formatBytes(entry.bytes)}
+              </span>
+              <span className="w-12 shrink-0 text-right text-muted-foreground/45">
+                {entry.ms}ms
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /**
  * What the tailnet looks like from here, while it is being built.
  *
@@ -690,6 +802,8 @@ function TailnetSection(): React.JSX.Element {
           Refresh
         </Button>
       </Row>
+
+      {server?.listening && <ServerMonitor peers={state?.devices ?? []} />}
 
       {tailnet && tailnet.state !== 'running' && (
         <p className="text-[11px] text-muted-foreground/70">
