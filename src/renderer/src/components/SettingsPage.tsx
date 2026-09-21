@@ -991,11 +991,15 @@ function FlPluginManager(): React.JSX.Element {
 
       {note && <p className="text-[11px] text-muted-foreground/70">{note}</p>}
 
+      {/* Every match, drawn. Not virtualised like the file list is: that one draws three
+          hundred thousand rows and this draws a thousand at the very most. Capping it was
+          worse than useless - "select all" and a shift-range both read the filtered list,
+          so they acted on rows nobody could see. */}
       <div className="scroll-thin max-h-[320px] overflow-y-auto rounded-md border bg-card/40">
         {shown.length === 0 ? (
           <p className="px-2.5 py-2 text-[11px] text-muted-foreground/60">Nothing matches.</p>
         ) : (
-          shown.slice(0, 300).map((plugin, index) => {
+          shown.map((plugin, index) => {
             const picked = selected.has(plugin.name)
             return (
               <div
@@ -1042,11 +1046,7 @@ function FlPluginManager(): React.JSX.Element {
           })
         )}
       </div>
-      {shown.length > 300 && (
-        <p className="text-[11px] text-muted-foreground/60">
-          Showing 300 of {shown.length.toLocaleString()}. The buttons above act on all of them.
-        </p>
-      )}
+
     </Section>
   )
 }
