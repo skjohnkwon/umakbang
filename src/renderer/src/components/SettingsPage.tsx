@@ -16,6 +16,7 @@ import {
 import {
   DEFAULT_VISUALIZER_STOPS,
   STEM_SPLITTERS,
+  STEM_SPLITTER_NOTES,
   type QuickMoveTarget,
   type Settings,
   type YoutubeToolStatus
@@ -1866,26 +1867,25 @@ function StemSection(): React.JSX.Element {
         />
       </Row>
 
-      <Row
-        label="Model"
-        hint="Perseus unless an older one suits the voice better."
-      >
+      <Row label="Model" hint="All four split vocals. Try another if a voice comes out badly.">
         <select
           value={settings.stemSplitter}
           onChange={(event) => patchSettings({ stemSplitter: event.target.value })}
           className="h-7 rounded-md border bg-background px-2 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          {/* Only the models the split endpoint accepts - see `STEM_SPLITTERS`. This used to
-              list LALAL.AI's newest two as well, on the reasonable-sounding grounds that the
-              latest model is normally the one worth using; they belong to endpoints umakbang
-              does not call and refuse every stem it asks for, so offering them was offering a
-              choice that could only fail. The older ones stay because a model that suits a
-              particular voice better is a real thing. */}
-          {STEM_SPLITTERS.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
+          {/* Only the models the split endpoint accepts - see `STEM_SPLITTERS`. Named and
+              ordered so the newest is visibly there: the list used to open on perseus with
+              three bare lowercase names under it, which reads as one model and a fallback
+              rather than a choice between generations. */}
+          {STEM_SPLITTERS.map((name) => {
+            const note = STEM_SPLITTER_NOTES[name]
+            return (
+              <option key={name} value={name}>
+                {name[0].toUpperCase() + name.slice(1)}
+                {note ? ` (${note})` : ''}
+              </option>
+            )
+          })}
         </select>
       </Row>
     </Section>

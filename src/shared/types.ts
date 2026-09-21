@@ -977,8 +977,10 @@ export const DEFAULT_SETTINGS: Settings = {
   lalalKey: '',
   bundleExportDir: '',
   stemOutputDir: '',
-  // See `STEM_SPLITTERS`: the endpoint refuses the two newest models for every stem it
-  // offers, and this is the first one it accepts.
+  // Not `andromeda`, though that is the newer model. Every install that never touched this
+  // setting is on `perseus`, and a default that changes underneath them changes what their
+  // stems sound like without being asked. New installs can be moved once there is a reason
+  // beyond the version number.
   stemSplitter: 'perseus',
   stemFormat: 'mp3',
   youtubeDir: '',
@@ -1002,7 +1004,7 @@ export const DEFAULT_SETTINGS: Settings = {
 /* ------------------------------------------------------------------ stems */
 
 /**
- * The models `/split/stem_separator/` will actually accept, best first.
+ * The models `/split/stem_separator/` will actually accept, newest first.
  *
  * Not a cosmetic list. LALAL.AI's model roster is wider than this endpoint's, and asking for a
  * stem a model does not do is refused outright rather than quietly downgraded: measured
@@ -1011,12 +1013,21 @@ export const DEFAULT_SETTINGS: Settings = {
  * and the refusal arrives as a validation report, which `describe()` in `stems.ts` was
  * flattening to "[object Object]", so the reason never reached the notice either.
  *
- * `lynx` and `lyra` are the voice-isolation and multi-stem networks behind `/split/voice_clean/`
- * and `/split/multistem/`, which umakbang does not call. Probed here against every stem in the
- * endpoint's own enum, both accept none of them, so they are not "other options" - they are
- * settings that can only fail.
+ * `lynx` and `lyra` are the voice-isolation and local networks behind endpoints umakbang does
+ * not call. Probed here against every stem in this endpoint's own enum, both accept none of
+ * them, and LALAL.AI's own API reference lists the same four as this one takes: they appear
+ * only in `/api/check/` results, never as something to ask for. So they are not "other
+ * options" - they are settings that can only fail.
+ *
+ * All four do split `vocals`, which is the only stem umakbang asks for, so the choice between
+ * them is which generation's separation you prefer rather than what they can do.
  */
-export const STEM_SPLITTERS = ['perseus', 'orion', 'phoenix', 'andromeda'] as const
+export const STEM_SPLITTERS = ['andromeda', 'perseus', 'orion', 'phoenix'] as const
+
+/** What each one is, for the picker. Left off the ones whose only story is being older. */
+export const STEM_SPLITTER_NOTES: Readonly<Record<string, string>> = {
+  andromeda: 'newest'
+}
 
 export type StemPhase = 'uploading' | 'queued' | 'separating' | 'downloading' | 'done' | 'failed'
 
