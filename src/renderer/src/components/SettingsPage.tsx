@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
   ChevronRight,
   Download,
@@ -10,7 +10,6 @@ import {
   Package,
   Plus,
   RefreshCw,
-  Star,
   RotateCcw,
   X
 } from 'lucide-react'
@@ -28,6 +27,7 @@ import { Input } from '@/components/ui/input'
 import { ColorPicker, ACCENT_PRESETS, SURFACE_PRESETS } from '@/components/ColorPicker'
 import { Clock } from 'lucide-react'
 import { usePlayer } from '@/state/player'
+import { FlPluginsDialog } from '@/components/FlPluginsDialog'
 import { useLibrary } from '@/state/library'
 import {
   DEFAULT_DETAIL_FIELDS,
@@ -812,301 +812,46 @@ function PluginList({ title, names }: { title: string; names: string[] }): React
  * this machine, which is the question that gets asked; "missing there" is the same sentence
  * the other way round, and is what stops something made here going back.
  */
-type FlPlugin = Awaited<ReturnType<typeof window.umakbang.flCatalog>>['plugins'][number]
-
 /**
- * FL's plugin database, as a list you can act on rather than a menu you walk through.
+ * A count and a way in.
  *
- * Favouriting is what puts a plugin in the picker you get from a channel, and FL offers it
- * one plugin at a time - fine for the one you just installed, miserable for the forty you
- * have had for a year. Everything here is a checkbox and a button, because underneath it is
- * a file being copied.
- *
- * Nothing is destroyed. A favourite removed can be added again from the scan, and a plugin
- * taken out of the scan is moved aside rather than deleted - see `fl-plugins.ts`.
+ * The managing itself is a dialog: two lists with a thousand rows between them is not
+ * something to do in a column of settings, and it was already cramped at six hundred.
  */
-function FlPluginManager(): React.JSX.Element {
-  const [catalog, setCatalog] = useState<FlPlugin[] | null>(null)
-  const [from, setFrom] = useState<string>('')
-  const [missing, setMissing] = useState(false)
-  const [query, setQuery] = useState('')
-  const [only, setOnly] = useState<'all' | 'favourites' | 'others'>('all')
-  /** Formats to keep. Empty means all of them, which is what opening the page should show. */
-  const [formats, setFormats] = useState<Set<string>>(() => new Set())
-  const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(() => new Set())
-  /** Where the last click landed, so shift can mean "everything between". */
-  const anchor = useRef<number | null>(null)
+function FlPluginsRow(): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [summary, setSummary] = useState<{ total: number; favourites: number } | null>(null)
 
-  const load = useCallback(async () => {
+  const refresh = useCallback(async () => {
     const result = await window.umakbang.flCatalog()
-    setCatalog(result.plugins)
-    setFrom(result.from)
-    setMissing(Boolean(result.missing))
+    setSummary({
+      total: result.plugins.length,
+      favourites: result.plugins.filter((plugin) => plugin.favourite).length
+    })
   }, [])
 
   useEffect(() => {
-    void load()
-  }, [load])
-
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    return (catalog ?? []).filter((plugin) => {
-      if (only === 'favourites' && !plugin.favourite) return false
-      if (only === 'others' && plugin.favourite) return false
-      if (formats.size > 0 && !formats.has(plugin.format)) return false
-      return !needle || plugin.name.toLowerCase().includes(needle)
-    })
-  }, [catalog, query, only, formats])
-
-  /**
-   * The formats actually present, with counts, commonest first.
-   *
-   * Read off the catalogue rather than listed here: FL files a plugin under the folder it
-   * found it in, and which of those exist depends on the machine - there is no AudioUnit on
-   * Windows, and `New` only appears once FL has scanned something it had not seen before.
-   */
-  const formatCounts = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const plugin of catalog ?? []) {
-      counts.set(plugin.format, (counts.get(plugin.format) ?? 0) + 1)
-    }
-    return [...counts].sort((a, b) => b[1] - a[1])
-  }, [catalog])
-
-  const favourites = (catalog ?? []).filter((plugin) => plugin.favourite).length
-  /** What the buttons act on: the selection, or everything the search left if there is none. */
-  const acting = useMemo(
-    () => (selected.size > 0 ? shown.filter((plugin) => selected.has(plugin.name)) : shown),
-    [shown, selected]
-  )
-
-  /**
-   * Picks a row, or a run of them.
-   *
-   * Shift takes everything between this row and the last one touched, against the list as
-   * it is filtered rather than the catalogue - a range somebody drew on screen should mean
-   * what it looked like, not what it would have meant unfiltered.
-   */
-  const pick = useCallback(
-    (index: number, extend: boolean) => {
-      setSelected((current) => {
-        const next = new Set(current)
-        const from = extend && anchor.current !== null ? anchor.current : index
-        const [lo, hi] = from <= index ? [from, index] : [index, from]
-        const run = shown.slice(lo, hi + 1).map((plugin) => plugin.name)
-        // A range takes its lead from the row that started it: if that row was being turned
-        // on, the whole run goes on.
-        const turningOn = !current.has(shown[from]?.name ?? '')
-        for (const name of run) {
-          if (turningOn) next.add(name)
-          else next.delete(name)
-        }
-        return next
-      })
-      anchor.current = index
-    },
-    [shown]
-  )
-
-  const apply = useCallback(
-    async (names: string[], wanted: boolean) => {
-      if (names.length === 0) return
-      setBusy(true)
-      try {
-        const result = await window.umakbang.flSetFavourites(names, wanted)
-        setNote(
-          result.failures.length > 0
-            ? result.failures[0]
-            : `${wanted ? 'Added' : 'Removed'} ${result.changed}.`
-        )
-        await load()
-        // The rows it named have changed side, and a selection that survives that is a
-        // selection about a list that no longer exists.
-        setSelected(new Set())
-      } finally {
-        setBusy(false)
-      }
-    },
-    [load]
-  )
-
-  if (missing) {
-    return (
-      <Section title="FL plugins">
-        <p className="text-[11px] text-muted-foreground/70">
-          Nothing at {from}. Point the folder above at FL&apos;s plugin database first.
-        </p>
-      </Section>
-    )
-  }
+    void refresh()
+  }, [refresh, open])
 
   return (
     <Section
       title="FL plugins"
       hint="A favourite is what appears when you add a plugin to a channel. FL adds them one at a time; this does not."
     >
-      <div className="flex items-center gap-1.5">
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={`Search ${catalog?.length ?? 0} plugins`}
-          className="h-7 text-[12px]"
-        />
-        {/* Narrowing to what is *not* yet a favourite is the common case - it is the list
-            somebody is actually working through. */}
-        {(['all', 'others', 'favourites'] as const).map((value) => (
-          <Button
-            key={value}
-            variant={only === value ? 'default' : 'secondary'}
-            size="sm"
-            onClick={() => setOnly(value)}
-          >
-            {value === 'all' ? 'All' : value === 'others' ? 'Not yet' : 'Favourites'}
-          </Button>
-        ))}
-      </div>
-
-      {formatCounts.length > 1 && (
-        <div className="flex flex-wrap items-center gap-1">
-          {formatCounts.map(([format, count]) => {
-            const on = formats.has(format)
-            return (
-              <button
-                key={format}
-                type="button"
-                onClick={() =>
-                  setFormats((current) => {
-                    const next = new Set(current)
-                    // Off again when it was the only one on, rather than leaving a filter
-                    // nobody can clear without knowing which chip to press.
-                    if (next.has(format)) next.delete(format)
-                    else next.add(format)
-                    return next
-                  })
-                }
-                className={cn(
-                  'rounded border px-1.5 py-px text-[10.5px]',
-                  on
-                    ? 'border-primary/30 bg-primary/15 text-primary'
-                    : 'border-border/60 text-muted-foreground hover:bg-secondary/60'
-                )}
-              >
-                {format}
-                <span className="tnum pl-1 text-muted-foreground/50">{count}</span>
-              </button>
-            )
-          })}
-          {formats.size > 0 && (
-            <button
-              type="button"
-              onClick={() => setFormats(new Set())}
-              className="px-1 text-[10.5px] text-muted-foreground/60 hover:text-foreground"
-            >
-              clear
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-        <span>
-          {selected.size > 0
-            ? `${selected.size.toLocaleString()} selected`
-            : `${shown.length.toLocaleString()} shown · ${favourites.toLocaleString()} favourites`}
-        </span>
-        {/* Selecting nothing means "everything I can see", which is what the search was
-            for. Selecting something means that, and the buttons say which. */}
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={shown.length === 0}
-          onClick={() =>
-            setSelected((current) =>
-              current.size > 0 ? new Set() : new Set(shown.map((plugin) => plugin.name))
-            )
-          }
-        >
-          {selected.size > 0 ? 'Clear' : 'Select all'}
+      <Row
+        label="Favourites"
+        hint={
+          summary
+            ? `${summary.favourites.toLocaleString()} of ${summary.total.toLocaleString()} plugins FL has found.`
+            : 'Reading FL&apos;s plugin database…'
+        }
+      >
+        <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
+          Manage…
         </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="ml-auto"
-          disabled={busy || acting.every((plugin) => plugin.favourite)}
-          onClick={() => void apply(acting.filter((p) => !p.favourite).map((p) => p.name), true)}
-        >
-          Favourite{selected.size > 0 ? ` ${selected.size}` : ' these'}
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={busy || acting.every((plugin) => !plugin.favourite)}
-          onClick={() => void apply(acting.filter((p) => p.favourite).map((p) => p.name), false)}
-        >
-          Unfavourite{selected.size > 0 ? ` ${selected.size}` : ' these'}
-        </Button>
-      </div>
-
-      {note && <p className="text-[11px] text-muted-foreground/70">{note}</p>}
-
-      {/* Every match, drawn. Not virtualised like the file list is: that one draws three
-          hundred thousand rows and this draws a thousand at the very most. Capping it was
-          worse than useless - "select all" and a shift-range both read the filtered list,
-          so they acted on rows nobody could see. */}
-      <div className="scroll-thin max-h-[320px] overflow-y-auto rounded-md border bg-card/40">
-        {shown.length === 0 ? (
-          <p className="px-2.5 py-2 text-[11px] text-muted-foreground/60">Nothing matches.</p>
-        ) : (
-          shown.map((plugin, index) => {
-            const picked = selected.has(plugin.name)
-            return (
-              <div
-                key={`${plugin.kind}-${plugin.name}`}
-                // The row selects. Shift extends from the last one touched.
-                onClick={(event) => pick(index, event.shiftKey)}
-                className={cn(
-                  'flex w-full cursor-default items-center gap-2 px-2.5 py-1 text-[11.5px] select-none',
-                  picked ? 'bg-primary/15' : 'hover:bg-secondary/60'
-                )}
-              >
-                <span
-                  aria-hidden
-                  className={cn(
-                    'h-3 w-3 shrink-0 rounded-[3px] border',
-                    picked ? 'border-primary bg-primary' : 'border-muted-foreground/40'
-                  )}
-                />
-                {/* The star acts on that one plugin there and then, which is what a star
-                    looks like it does - so it must not also be selecting. */}
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label={plugin.favourite ? `Unfavourite ${plugin.name}` : `Favourite ${plugin.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    void apply([plugin.name], !plugin.favourite)
-                  }}
-                  className="shrink-0"
-                >
-                  <Star
-                    className={cn(
-                      'h-3.5 w-3.5',
-                      plugin.favourite ? 'fill-primary text-primary' : 'text-muted-foreground/40'
-                    )}
-                  />
-                </button>
-                <span className="truncate">{plugin.name}</span>
-                <span className="ml-auto shrink-0 text-[10.5px] text-muted-foreground/50">
-                  {plugin.format}
-                </span>
-              </div>
-            )
-          })
-        )}
-      </div>
-
+      </Row>
+      {open && <FlPluginsDialog onClose={() => setOpen(false)} />}
     </Section>
   )
 }
@@ -1172,7 +917,7 @@ function PluginsSection(): React.JSX.Element {
         </Row>
       </Section>
 
-      <FlPluginManager />
+      <FlPluginsRow />
 
       <Section
         title="Other machines"
