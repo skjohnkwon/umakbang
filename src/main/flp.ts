@@ -22,10 +22,25 @@ const MS_PER_DAY = 86_400_000
 
 /** UTF-16LE, null-terminated: the path a channel or audio clip plays from. */
 const EVENT_SAMPLE_PATH = 196
-/** The generator a channel is. `Fruity Wrapper` means the next name is a third-party plugin. */
-const EVENT_GENERATOR = 201
-/** The name of the thing above - a channel's, or the wrapped plugin's. */
-const EVENT_INSTANCE_NAME = 203
+/**
+ * A wrapped plugin's saved state, which is where its identity actually is.
+ *
+ * Not events 201 and 203, which were the obvious pair and are wrong. 203 is the *channel's*
+ * display name - FL defaults it to the plugin's, so it reads correctly right up until
+ * somebody renames a channel, at which point a Serum channel called `SNARE - SLIMYYY`
+ * reports a missing plugin by that name. The state blob carries the file FL actually loads,
+ * which nobody can rename by accident.
+ */
+const EVENT_PLUGIN_STATE = 213
+
+/**
+ * The plugin file inside that blob, as Windows or macOS spells it.
+ *
+ * Read out of the bytes rather than by walking the blob's structure: it is a plugin's own
+ * saved state, its shape is the plugin's business and changes between them, and the one
+ * thing every one of them contains is the path FL used to load it.
+ */
+const PLUGIN_PATH = /(?:[A-Za-z]:\\|\/)[^\0\r\n]{3,160}?\.(?:dll|vst3|vst|component)/gi
 
 const EVENT_TEMPO = 66
 const EVENT_FINE_TEMPO = 156
@@ -311,6 +326,21 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+/**
+ * A plugin's name from the file FL loads it out of.
+ *
+ * `Serum2.vst3` is Serum 2, and `Serum_x64.dll` is Serum - the architecture suffix is a
+ * build detail and never part of what anybody calls it. Kept close to the file name
+ * otherwise, because that is the one spelling both machines agree on.
+ */
+function pluginNameFrom(path: string): string {
+  const leaf = path.split(/[\\/]/).pop() ?? ''
+  return leaf
+    .replace(/\.(dll|vst3|vst|component)$/i, '')
+    .replace(/[_-]?(x64|x86|win64|win32|64bit|32bit)$/i, '')
+    .trim()
+}
+
 /** Trailing nulls off, which every text event carries. */
 function text(data: Buffer, at: number, size: number): string {
   return data.toString('utf16le', at, at + size).replace(/\0+$/, '')
@@ -343,7 +373,6 @@ export function collectFlpContents(data: Buffer): FlpContents {
   const seen = new Set<string>()
   const plugins: string[] = []
   const pluginsSeen = new Set<string>()
-  let wrapped = false
 
   if (data.length < 12 || data.toString('ascii', 0, 4) !== 'FLhd') {
     return { samples, plugins, clean: false }
@@ -378,20 +407,18 @@ export function collectFlpContents(data: Buffer): FlpContents {
           seen.add(path)
           samples.push(path)
         }
-      } else if (eventId === EVENT_GENERATOR) {
-        // Set for the *next* name only: a channel that is not a wrapper is a native one,
-        // and its name is a channel's name rather than a plugin's.
-        wrapped = text(data, pos, size) === 'Fruity Wrapper'
-      } else if (eventId === EVENT_INSTANCE_NAME) {
-        if (wrapped) {
-          // `Serum_x64 #3` is the third instance of one plugin, not a third plugin.
-          const name = text(data, pos, size).replace(/\s*#\d+$/, '')
-          if (name && !pluginsSeen.has(name)) {
-            pluginsSeen.add(name)
+      } else if (eventId === EVENT_PLUGIN_STATE && size > 4) {
+        // Latin-1: the path sits in a binary blob as single bytes, not as the UTF-16 the
+        // text events use.
+        const blob = data.toString('latin1', pos, pos + size)
+        PLUGIN_PATH.lastIndex = 0
+        for (const match of blob.matchAll(PLUGIN_PATH)) {
+          const name = pluginNameFrom(match[0])
+          if (name && !pluginsSeen.has(name.toLowerCase())) {
+            pluginsSeen.add(name.toLowerCase())
             plugins.push(name)
           }
         }
-        wrapped = false
       }
       pos += size
     }

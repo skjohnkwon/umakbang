@@ -728,13 +728,14 @@ type Inventory = { names: string[]; from: string; missing?: boolean }
 
 /** What one machine has that the other does not, both ways. */
 function diff(mine: string[], theirs: string[]): { missingHere: string[]; missingThere: string[] } {
-  // Compared case-insensitively, because FL writes a plugin's name as its installer spelled
-  // it and two machines can disagree about that without disagreeing about the plugin.
-  const here = new Set(mine.map((name) => name.toLowerCase()))
-  const there = new Set(theirs.map((name) => name.toLowerCase()))
+  // Punctuation and case taken out: FL writes a plugin's name as its installer spelled it,
+  // and two machines can disagree about a space without disagreeing about the plugin.
+  const flatten = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const here = new Set(mine.map(flatten))
+  const there = new Set(theirs.map(flatten))
   return {
-    missingHere: theirs.filter((name) => !here.has(name.toLowerCase())),
-    missingThere: mine.filter((name) => !there.has(name.toLowerCase()))
+    missingHere: theirs.filter((name) => !here.has(flatten(name))),
+    missingThere: mine.filter((name) => !there.has(flatten(name)))
   }
 }
 

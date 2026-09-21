@@ -596,8 +596,19 @@ export async function previewPack(flpPath: string): Promise<PackPreview> {
   if (manifest.error) return { ...empty, error: manifest.error }
 
   const here = await readPluginInventory(settings.flUserData || defaultFlUserData())
-  const have = new Set(here.names.map((name) => name.toLowerCase()))
-  const missingPlugins = manifest.plugins.filter((name) => !have.has(name.toLowerCase()))
+  /*
+   * Compared with the punctuation taken out, because the two lists spell the same plugin
+   * differently by nature: a project names the file FL loads (`Serum2.vst3`) and the
+   * database names what the browser shows (`Serum 2`). Spaces, dashes and case are the
+   * whole of the difference in most cases.
+   *
+   * Not a complete answer - `SerumFX` against `Serum 2 FX` still reads as missing - but it
+   * is wrong in the safe direction: a plugin that is there and reported missing costs a
+   * dialog somebody dismisses, where the reverse costs the settings on six channels.
+   */
+  const flatten = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const have = new Set(here.names.map(flatten))
+  const missingPlugins = manifest.plugins.filter((name) => !have.has(flatten(name)))
 
   return {
     name: manifest.flp.name,
