@@ -50,6 +50,20 @@ nsis:
 mac:
   # electron-builder renders the .icns from the 1024px master.
   icon: build/icon.png
+  # The certificate, named rather than left to be guessed at.
+  #
+  # An installed copy only accepts an update whose signature satisfies its own designated
+  # requirement, and this app's names the Developer ID authority: `certificate
+  # 1[field.1.2.840.113635.100.6.2.6]`. Left to choose, electron-builder took the only
+  # identity in the keychain - an `Apple Development` one - which has the same team and the
+  # wrong lineage, so 0.2.0 built, signed, uploaded, downloaded, and was then refused by
+  # every Mac running 0.1.2.
+  #
+  # Named here, a machine without the right certificate fails the build instead of shipping
+  # something that cannot be installed over what people already have. Any Developer ID
+  # Application certificate for this team satisfies the requirement - it pins the team, not
+  # the certificate - so a replacement one is fine if the original key is gone.
+  identity: Developer ID Application: Jung Ho Kwon (8CXYS29KVP)
   category: public.app-category.music
   target:
     - target: dmg
