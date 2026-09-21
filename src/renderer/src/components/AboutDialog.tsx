@@ -61,7 +61,10 @@ export function AboutDialog({
 }): React.JSX.Element {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-[320px] p-4">
+      {/* `w-auto` against the base's `w-full`: with nothing but a name, a version and one
+          line, a fixed 320 left the card mostly empty on its right. Sized to the text now,
+          with the cap still there for a longer tagline or a translated one. */}
+      <DialogContent className="w-auto max-w-[320px] p-4">
         <div className="flex items-center gap-2.5">
           <Logo className="h-7 w-7 shrink-0 text-primary" />
           <div className="min-w-0">
