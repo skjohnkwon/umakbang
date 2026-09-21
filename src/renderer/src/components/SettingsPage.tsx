@@ -798,13 +798,13 @@ function PluginsSection(): React.JSX.Element {
         hint="Read from FL Studio's own plugin database - what FL has found, which is what decides whether a project opens."
       >
         <Row
-          label="FL Studio user data"
+          label="FL Studio user data folder"
           hint={
             mine === null
               ? 'Looking…'
               : mine.missing
-                ? `No plugin database at ${mine.from}. Open FL and let it scan, or point this at the right folder.`
-                : `${mine.names.length} plugins · ${mine.from}`
+                ? `Nothing at ${mine.from}. FL writes that folder when it scans for plugins, so either it has not, or this is pointing somewhere else.`
+                : `${mine.names.length} plugins, read from ${mine.from}`
           }
         >
           <Button
