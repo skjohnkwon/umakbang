@@ -63,7 +63,9 @@ mac:
   # something that cannot be installed over what people already have. Any Developer ID
   # Application certificate for this team satisfies the requirement - it pins the team, not
   # the certificate - so a replacement one is fine if the original key is gone.
-  identity: Developer ID Application: Jung Ho Kwon (8CXYS29KVP)
+  # The name only - electron-builder refuses the "Developer ID Application:" prefix and
+  # picks the certificate type appropriate to the target itself.
+  identity: Jung Ho Kwon (8CXYS29KVP)
   category: public.app-category.music
   target:
     - target: dmg
