@@ -457,6 +457,7 @@ export function Sidebar(): React.JSX.Element {
                   depth={1}
                   expanded={expanded}
                   onToggle={toggle}
+                  remote
                 />
               ))}
             </div>
@@ -536,9 +537,11 @@ function SectionLabel({
  */
 function MaybeMenu({
   label,
+  remote = false,
   children
 }: {
   label: string | null
+  remote?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
   if (!label) return <>{children}</>
@@ -549,9 +552,12 @@ function MaybeMenu({
       </ContextMenuTrigger>
       <ContextMenuContent className="w-56">
         <ContextMenuLabel className="truncate">{label}</ContextMenuLabel>
+        {/* Nothing is deleted either way - this drops the folder from the library, and for
+            a machine it stops reading one that was never here to begin with. Said
+            differently because "remove" over somebody else's files reads like a threat. */}
         <ContextMenuItem onSelect={() => void window.umakbang.removeLibraryFolder(label)}>
           <X className="h-3.5 w-3.5" />
-          Remove from library
+          {remote ? 'Stop reading this library' : 'Remove from library'}
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
@@ -609,13 +615,16 @@ function FolderRows({
   depth,
   expanded,
   onToggle,
-  isRoot = false
+  isRoot = false,
+  remote = false
 }: {
   node: FolderNode
   depth: number
   expanded: Set<string>
   onToggle: (path: string) => void
   isRoot?: boolean
+  /** Set for a library another machine is serving, which is disconnected rather than removed. */
+  remote?: boolean
 }): React.JSX.Element {
   const view = useLibrary((s) => s.view)
   const setView = useLibrary((s) => s.setView)
@@ -631,7 +640,7 @@ function FolderRows({
 
   return (
     <>
-      <MaybeMenu label={isLibraryFolder ? node.name : null}>
+      <MaybeMenu label={isLibraryFolder ? node.name : null} remote={remote}>
       <SidebarRow
         // The virtual root has no folder on disk behind it, so offering it as a drop
         // target lit up a place every drop would then fail into.

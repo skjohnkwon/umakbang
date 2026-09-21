@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ChevronDown, FolderOpen, RefreshCw, Search, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +27,9 @@ export function TitleBar(): React.JSX.Element {
   const platform = useLibrary((s) => s.platform)
   const settings = useLibrary((s) => s.settings)
   const roots = useLibrary((s) => s.roots)
+  // This machine's folders. What the button counts has to be what the menu lists, or it
+  // says "2 folders" over a menu offering one.
+  const local = useMemo(() => roots.filter((root) => !root.remote), [roots])
   const ready = useLibrary((s) => s.ready)
   const query = useLibrary((s) => s.query)
   const scanning = useLibrary((s) => s.scanning)
@@ -118,9 +121,9 @@ export function TitleBar(): React.JSX.Element {
                 ? ''
                 : roots.length === 0
                   ? 'No library'
-                  : roots.length === 1
-                    ? roots[0].label
-                    : `${roots.length} folders`}
+                  : local.length === 1
+                    ? local[0].label
+                    : `${local.length} folders`}
             </span>
             <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
           </Button>
@@ -130,9 +133,15 @@ export function TitleBar(): React.JSX.Element {
             <FolderOpen className="h-3.5 w-3.5" />
             Add a folder…
           </DropdownMenuItem>
-          {/* Every open folder, so the one you want to drop is named rather than
-              described. Removing one leaves the files on disk untouched. */}
-          {roots.map((entry) => (
+          {/* Every open folder of this machine's, so the one you want to drop is named
+              rather than described. Removing one leaves the files on disk untouched.
+
+              A library served by another machine is not listed: it is not a folder anybody
+              added here, it is a machine that is reachable, and it belongs with the others
+              under Devices rather than among this library's own folders. */}
+          {roots
+            .filter((entry) => !entry.remote)
+            .map((entry) => (
             <DropdownMenuItem
               key={entry.label}
               title={entry.path}
@@ -141,7 +150,7 @@ export function TitleBar(): React.JSX.Element {
               <X className="h-3.5 w-3.5" />
               <span className="truncate">Remove {entry.label}</span>
             </DropdownMenuItem>
-          ))}
+            ))}
           <DropdownMenuItem
             onSelect={() => void window.umakbang.rescan()}
             disabled={roots.length === 0}
