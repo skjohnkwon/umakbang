@@ -28,6 +28,7 @@ import {
 import { TagBar } from '@/components/TagBar'
 import { YoutubeIcon } from '@/components/DownloadPage'
 import { useFolderTree, useLocalTracks, type FolderNode } from '@/hooks/useLibraryView'
+import { baseName } from '@/lib/paths'
 import { useFolderDrop, type FolderDrop } from '@/hooks/useFolderDrop'
 import { collapseVariants } from '@/lib/motion'
 import { isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
@@ -81,7 +82,7 @@ export function Sidebar(): React.JSX.Element {
     const mine: FolderNode[] = []
     const machines = new Map<
       string,
-      { id: string; name: string; os: string; libraries: FolderNode[] }
+      { id: string; name: string; os: string; libraries: Array<{ node: FolderNode; name: string }> }
     >()
     for (const node of tree.children) {
       const root = byLabel.get(node.name.toLowerCase())
@@ -90,16 +91,37 @@ export function Sidebar(): React.JSX.Element {
         mine.push(node)
         continue
       }
+      /*
+       * Shown by the folder's own name, not the label.
+       *
+       * A remote label carries the machine it came from - `SECRET SAUCE (jkpc)` - because
+       * it is the first segment of every path beneath it and has to stay unique against
+       * the local library of the same name. Under a Devices heading that already says
+       * `jkpc`, the suffix only repeats it, so the row shows the folder and the label goes
+       * on doing its job underneath.
+       */
+      const library = { node, name: baseName(root.path) || node.name }
       const existing = machines.get(remote.deviceId)
-      if (existing) existing.libraries.push(node)
+      if (existing) existing.libraries.push(library)
       else {
         machines.set(remote.deviceId, {
           id: remote.deviceId,
           name: remote.deviceName,
           // The node knows nothing about the machine; the root it came from does.
           os: '',
-          libraries: [node]
+          libraries: [library]
         })
+      }
+    }
+    /*
+     * Unless two of a machine's libraries end up sharing that folder name, which is the one
+     * case the label was disambiguating something real - so those keep it.
+     */
+    for (const machine of machines.values()) {
+      const seen = new Map<string, number>()
+      for (const { name } of machine.libraries) seen.set(name, (seen.get(name) ?? 0) + 1)
+      for (const library of machine.libraries) {
+        if ((seen.get(library.name) ?? 0) > 1) library.name = library.node.name
       }
     }
     return {
@@ -452,8 +474,9 @@ export function Sidebar(): React.JSX.Element {
               <DeviceRow name={device.name} os={device.os} />
               {device.libraries.map((library) => (
                 <FolderRows
-                  key={library.path}
-                  node={library}
+                  key={library.node.path}
+                  node={library.node}
+                  name={library.name}
                   depth={1}
                   expanded={expanded}
                   onToggle={toggle}
@@ -615,6 +638,7 @@ function FolderRows({
   depth,
   expanded,
   onToggle,
+  name,
   isRoot = false,
   remote = false
 }: {
@@ -622,6 +646,8 @@ function FolderRows({
   depth: number
   expanded: Set<string>
   onToggle: (path: string) => void
+  /** What this one row says, when it is not what the node is called. Children keep theirs. */
+  name?: string
   isRoot?: boolean
   /** Set for a library another machine is serving, which is disconnected rather than removed. */
   remote?: boolean
@@ -631,7 +657,7 @@ function FolderRows({
   const isOpen = expanded.has(node.path)
   const isActive = view.mode === 'folder' && view.dir === node.path
   // The virtual root above every library folder has no name of its own.
-  const label = isRoot ? 'Library' : node.name
+  const label = isRoot ? 'Library' : (name ?? node.name)
   const drop = useFolderDrop(node.path)
 
   // A top-level node is one of the library's own folders: one segment, and not the
