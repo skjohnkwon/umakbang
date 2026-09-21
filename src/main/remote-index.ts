@@ -67,10 +67,31 @@ export function fetchRemoteIndex(
 
       const all: Track[] = []
       let batch: Track[] = []
+      /** Patch rows, applied at the end so a later patch always beats the saved index. */
+      const later = new Map<string, Track>()
+      const gone = new Set<string>()
       lines.on('line', (line) => {
         if (!line) return
         try {
-          const track = JSON.parse(line) as Track
+          const parsed = JSON.parse(line) as Track | { added?: Track[]; removed?: string[] }
+          /*
+           * The stream carries the saved index and the journal beside it, so a line is
+           * either a track or a patch. A patch is what the serving machine has done since
+           * its last scan - a project it packed, a sample it copied - and without reading
+           * them a puller sees the library as it was rather than as it is.
+           */
+          if ('added' in parsed || 'removed' in parsed) {
+            const patch = parsed as { added?: Track[]; removed?: string[] }
+            for (const path of patch.removed ?? []) gone.add(path)
+            for (const track of patch.added ?? []) {
+              if (track?.path) {
+                gone.delete(track.path)
+                later.set(track.path, track)
+              }
+            }
+            return
+          }
+          const track = parsed as Track
           if (!track.path) return
           all.push(track)
           batch.push(track)
@@ -83,8 +104,14 @@ export function fetchRemoteIndex(
         }
       })
       lines.on('close', () => {
+        // The journal wins: it describes what happened after the index was written.
+        const merged = all.filter((track) => !gone.has(track.path) && !later.has(track.path))
+        for (const track of later.values()) {
+          merged.push(track)
+          batch.push(track)
+        }
         if (batch.length) onBatch(batch)
-        resolve({ tracks: all })
+        resolve({ tracks: merged })
       })
       source.on('error', (error: Error) =>
         resolve({ tracks: all, error: `${remote.deviceName}: ${error.message}` })
