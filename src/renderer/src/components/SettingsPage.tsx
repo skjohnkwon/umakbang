@@ -38,6 +38,7 @@ import {
 import type {
   RemoteDevice,
   RemoteServerState,
+  RemoteStats,
   TailnetStatus,
   Track
 } from '@shared/types'
@@ -101,6 +102,7 @@ const SECTIONS = [
   // Named for the feature as the sidebar names it, not "Downloads": that row is the OS folder
   // of that name, a place you file things out of rather than a thing you do.
   { id: 'downloads', label: 'YT2MP3' },
+  { id: 'remote', label: 'Remote' },
   { id: 'backup', label: 'Backup' },
   { id: 'window', label: 'Window' },
   { id: 'updates', label: 'Updates' },
@@ -549,6 +551,10 @@ export function SettingsPage(): React.JSX.Element {
           </Section>
         </div>
 
+        <div className={cn('mx-auto max-w-[560px] space-y-4', show('remote'))}>
+          <RemoteSection />
+        </div>
+
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('updates'))}>
           <UpdateSection />
         </div>
@@ -637,6 +643,207 @@ function UpdateSection(): React.JSX.Element {
  * thing to want and nothing about it is dangerous.
  */
 /**
+ * The other machines, and what this one gives them.
+ *
+ * Separate from Library because it is not about this library at all: it is about which
+ * machines can see it and where things land when they come back the other way. The tailnet
+ * diagnostics stay under Developer for now - this is the part somebody actually sets.
+ */
+function RemoteSection(): React.JSX.Element {
+  const settings = useLibrary((s) => s.settings)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const roots = useLibrary((s) => s.roots)
+  const [server, setServer] = useState<RemoteServerState | null>(null)
+
+  useEffect(() => {
+    void window.umakbang.remoteServerState().then(setServer)
+  }, [settings.shareLibrary])
+
+  const mounted = roots.filter((root) => root.remote)
+
+  return (
+    <>
+      <Section
+        title="Sharing"
+        hint="Other machines on your tailnet, and nothing else, can read this library."
+      >
+        <Row
+          label="Share this library"
+          hint={
+            !settings.shareLibrary
+              ? 'Off. No other machine can reach this one.'
+              : server?.listening
+                ? `Answering on ${server.address}. Read-only: nothing reachable this way can change a file.`
+                : (server?.reason ?? 'Starting…')
+          }
+        >
+          <Switch
+            checked={settings.shareLibrary}
+            onChange={(shareLibrary) => {
+              patchSettings({ shareLibrary })
+              // The server is started and stopped by the main process, which reads this
+              // setting - so it has to be told, rather than finding out on the next launch.
+              void window.umakbang.remoteRestartServer().then(setServer)
+            }}
+          />
+        </Row>
+      </Section>
+
+      <Section
+        title="Copying here"
+        hint="A library on another machine is read-only, so bringing a file over is always a copy - nothing leaves the machine that owns it."
+      >
+        <Row label="Copy files to" hint={settings.remoteDownloadDir || 'Not set yet.'}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              void window.umakbang
+                .pickDirectory(
+                  'Where files copied from other machines land',
+                  settings.remoteDownloadDir || undefined
+                )
+                .then((dir) => dir && patchSettings({ remoteDownloadDir: dir }))
+            }}
+          >
+            Choose…
+          </Button>
+        </Row>
+      </Section>
+
+      <Section title="Libraries from other machines">
+        {mounted.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground/60">
+            None yet. Settings → Developer → Tailnet lists the machines that are serving one.
+          </p>
+        ) : (
+          mounted.map((root) => (
+            <Row
+              key={root.path}
+              label={root.label}
+              hint={`${root.remote?.deviceName} · ${root.path}`}
+            >
+              <span className="text-[11px] text-muted-foreground/60">Read-only</span>
+            </Row>
+          ))
+        )}
+      </Section>
+    </>
+  )
+}
+
+/** Bytes, at the precision a monitor wants: enough to see a transfer, never a long number. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function formatUptime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+/**
+ * What the server has been asked for, as it is asked.
+ *
+ * Polled rather than pushed all the way to the renderer: the counters are already cached in
+ * the browser process, so a read is a property access, and a panel nobody has open should
+ * not be costing anything at all - which is why the interval only runs while this is
+ * mounted.
+ *
+ * Refusals are given their own count and drawn in place. They are almost all the containment
+ * check doing its job, and a number that quietly climbs while nothing is being transferred
+ * is the one thing here worth noticing.
+ */
+function ServerMonitor({ peers }: { peers: RemoteDevice[] }): React.JSX.Element | null {
+  const [stats, setStats] = useState<RemoteStats | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      const next = await window.umakbang.remoteStats()
+      if (!cancelled) {
+        setStats(next)
+        setNow(Date.now())
+      }
+    }
+    void tick()
+    const timer = setInterval(() => void tick(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  /** Tailnet addresses back to machine names, so a log line says who rather than which IP. */
+  const names = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const peer of peers) {
+      if (peer.node.ipv4) map.set(peer.node.ipv4, peer.node.hostName || peer.node.name)
+    }
+    return map
+  }, [peers])
+
+  if (!stats) return null
+
+  return (
+    <div className="rounded-md border bg-card/40 px-2.5 py-2">
+      <div className="tnum flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span>up {formatUptime(now - stats.startedAt)}</span>
+        <span>{stats.requests.toLocaleString()} requests</span>
+        <span>{formatBytes(stats.bytesOut)} out</span>
+        {stats.refused > 0 && (
+          <span className="text-kind-project">{stats.refused} refused</span>
+        )}
+        {stats.inFlight > 0 && <span className="text-primary">{stats.inFlight} in flight</span>}
+      </div>
+
+      {stats.recent.length === 0 ? (
+        <p className="mt-1.5 text-[11px] text-muted-foreground/50">
+          Nothing has asked for anything yet.
+        </p>
+      ) : (
+        <div className="mt-1.5 flex flex-col gap-px">
+          {stats.recent.slice(0, 12).map((entry) => (
+            <div
+              key={`${entry.at}-${entry.path}-${entry.ms}-${entry.bytes}`}
+              className="tnum flex items-baseline gap-2 text-[10.5px]"
+            >
+              <span
+                className={cn(
+                  'w-7 shrink-0',
+                  entry.status >= 400 ? 'text-kind-project' : 'text-muted-foreground/60'
+                )}
+              >
+                {entry.status}
+              </span>
+              <span className="shrink-0 text-muted-foreground/80">{entry.path}</span>
+              <span className="truncate text-foreground/70">{entry.detail}</span>
+              <span className="ml-auto shrink-0 text-muted-foreground/45">
+                {names.get(entry.peer) ?? entry.peer}
+              </span>
+              <span className="w-14 shrink-0 text-right text-muted-foreground/45">
+                {formatBytes(entry.bytes)}
+              </span>
+              <span className="w-12 shrink-0 text-right text-muted-foreground/45">
+                {entry.ms}ms
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * What the tailnet looks like from here, while it is being built.
  *
  * A diagnostic rather than the Devices list that will live in the sidebar: it shows the
@@ -649,6 +856,7 @@ function UpdateSection(): React.JSX.Element {
  * and a line saying *umakbang is not running there* answers it where an empty list does not.
  */
 function TailnetSection(): React.JSX.Element {
+  const roots = useLibrary((s) => s.roots)
   const [state, setState] = useState<{
     tailnet: TailnetStatus
     devices: RemoteDevice[]
@@ -704,6 +912,8 @@ function TailnetSection(): React.JSX.Element {
         </Button>
       </Row>
 
+      {server?.listening && <ServerMonitor peers={state?.devices ?? []} />}
+
       {tailnet && tailnet.state !== 'running' && (
         <p className="text-[11px] text-muted-foreground/70">
           {tailnet.reason ?? 'Tailscale is not running.'}
@@ -748,15 +958,42 @@ function TailnetSection(): React.JSX.Element {
             {device.node.ipv4 ?? 'no address'} · {device.node.name}
           </div>
 
-          {device.hello?.libraries.map((library) => (
-            <div key={library.id} className="mt-1 pl-3.5 text-[11px]">
-              <span className="text-foreground/80">{library.label}</span>
-              <span className="tnum ml-2 text-[10.5px] text-muted-foreground/50">
-                {library.id}
-                {library.generation === undefined ? ' · never scanned' : ''}
-              </span>
-            </div>
-          ))}
+          {device.hello?.libraries.map((library) => {
+            const mounted = roots.some(
+              (root) =>
+                root.remote?.deviceId === device.hello?.device.id && root.path === library.path
+            )
+            return (
+              <div key={library.id} className="mt-1 flex items-center gap-2 pl-3.5 text-[11px]">
+                <span className="text-foreground/80">{library.label}</span>
+                <span className="tnum text-[10.5px] text-muted-foreground/50">
+                  {library.generation === undefined ? 'never scanned' : library.id}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="ml-auto"
+                  disabled={mounted || !device.node.ipv4 || library.generation === undefined}
+                  onClick={() => {
+                    const hello = device.hello
+                    if (!hello || !device.node.ipv4) return
+                    void window.umakbang.remoteMountLibrary(
+                      {
+                        deviceId: hello.device.id,
+                        deviceName: device.node.hostName || device.node.name,
+                        host: device.node.ipv4,
+                        libraryId: library.id
+                      },
+                      library.path,
+                      library.label
+                    )
+                  }}
+                >
+                  {mounted ? 'Added' : 'Add as root'}
+                </Button>
+              </div>
+            )
+          })}
 
           {device.serving && device.hello?.libraries.length === 0 && (
             <div className="mt-1 pl-3.5 text-[11px] text-muted-foreground/60">

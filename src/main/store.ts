@@ -22,6 +22,7 @@ import {
   DEFAULT_SETTINGS,
   STEM_SPLITTERS,
   type LibraryRoot,
+  type RemoteRootRef,
   type Settings,
   type UserData
 } from '../shared/types'
@@ -134,6 +135,11 @@ export function initStore(): void {
   // serves or dials, and it must not come from an import - see `deviceId` in `Settings`.
   if (!userData.settings.deviceId) {
     userData.settings.deviceId = randomUUID()
+  }
+
+  // Only when empty, so choosing somewhere else sticks - the same shape as the stem folder.
+  if (!userData.settings.remoteDownloadDir) {
+    userData.settings.remoteDownloadDir = app.getPath('downloads')
   }
 
   userData.settings.quickMove ??= []
@@ -425,11 +431,41 @@ export function updateSettings(patch: Partial<Settings>): Settings {
  */
 export function addRoot(
   path: string,
-  preferredLabel?: string
+  preferredLabel?: string,
+  remote?: RemoteRootRef
 ): { settings: Settings; added: LibraryRoot | null; reason?: string } {
   const roots = userData.settings.roots
-  const existing = roots.find((root) => samePath(root.path, path))
+  // Scoped by device, because two machines can serve the same path and they are not the
+  // same library - and a remote root never conflicts with a local folder of that name.
+  const existing = roots.find(
+    (root) => root.remote?.deviceId === remote?.deviceId && samePath(root.path, path)
+  )
   if (existing) return { settings: userData.settings, added: null, reason: 'already' }
+
+  // Containment only means anything within one machine's filesystem. A remote root is in
+  // somebody else's namespace, so it can neither hold nor sit inside one of ours.
+  if (remote) {
+    /**
+     * A remote root that collides is disambiguated by the machine it came from, not by a
+     * number. Two libraries both called `SECRET SAUCE` is exactly the case this feature
+     * creates, and `SECRET SAUCE (2)` says nothing about which is which - where
+     * `SECRET SAUCE (jkpc)` is the only thing anybody wants to know.
+     */
+    const taken = new Set(roots.map((root) => root.label.toLowerCase()))
+    const base = preferredLabel || labelForRoot(path, [])
+    let label = base
+    if (taken.has(label.toLowerCase())) {
+      label = `${base} (${remote.deviceName})`
+      // Only if the same machine serves two libraries of the same name, which is its own
+      // kind of unusual - a number is a fair answer to that one.
+      for (let n = 2; taken.has(label.toLowerCase()); n++) {
+        label = `${base} (${remote.deviceName} ${n})`
+      }
+    }
+    const added: LibraryRoot = { path, label, remote }
+    const settings = updateSettings({ roots: [...roots, added] })
+    return { settings, added }
+  }
 
   const parent = roots.find((root) => isUnder(path, root.path))
   if (parent) {

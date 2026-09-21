@@ -221,12 +221,24 @@ export async function describeTree(full: string, roots: LibraryRoot[]): Promise<
  * What a folder being watched needs after something in it changed: re-reading the one
  * folder is cheap enough to do on every save, where re-walking its subtree would not be.
  */
-export async function describeDir(dir: string, roots: LibraryRoot[]): Promise<Track[]> {
+/**
+ * What a folder holds, and whether it could be read at all.
+ *
+ * The flag is the whole point of the return shape. This used to answer `[]` for a folder it
+ * merely could not open - a permission, an unplugged drive, a share that dropped - which is
+ * indistinguishable from a folder somebody emptied. The caller has to be able to tell them
+ * apart before it deletes anything: "there is nothing here" and "I could not look" must not
+ * lead to the same place.
+ */
+export async function describeDir(
+  dir: string,
+  roots: LibraryRoot[]
+): Promise<{ tracks: Track[]; read: boolean }> {
   let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
   } catch {
-    return []
+    return { tracks: [], read: false }
   }
   const out: Track[] = []
   for (const entry of entries) {
@@ -234,7 +246,7 @@ export async function describeDir(dir: string, roots: LibraryRoot[]): Promise<Tr
     const track = await describeFile(join(dir, entry.name), roots)
     if (track) out.push(track)
   }
-  return out
+  return { tracks: out, read: true }
 }
 
 async function walk(dir: string, roots: LibraryRoot[], out: Track[]): Promise<void> {

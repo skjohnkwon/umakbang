@@ -15,7 +15,13 @@ import { app, utilityProcess } from 'electron'
 import { createHash } from 'node:crypto'
 import { get as httpGet } from 'node:http'
 import { join } from 'node:path'
-import type { RemoteDevice, RemoteHello, RemoteLibrary, RemoteServerState } from '../shared/types'
+import type {
+  RemoteDevice,
+  RemoteHello,
+  RemoteLibrary,
+  RemoteServerState,
+  RemoteStats
+} from '../shared/types'
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
 import { getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
@@ -40,6 +46,18 @@ const START_TIMEOUT_MS = 5_000
 
 let child: Electron.UtilityProcess | null = null
 let state: RemoteServerState = { listening: false, port: REMOTE_PORT }
+/**
+ * The last counters the server pushed up.
+ *
+ * Cached rather than fetched on demand: asking the child would mean correlating a reply,
+ * and the child already sends a snapshot whenever anything changes. A read is then a
+ * property access, which is what a panel polling every couple of seconds should cost.
+ */
+let stats: RemoteStats | null = null
+
+export function remoteStats(): RemoteStats | null {
+  return stats
+}
 
 export function remoteServerState(): RemoteServerState {
   return state
@@ -131,6 +149,10 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
         forked.postMessage({ type: 'init', config } satisfies RemoteCommand)
         return
       }
+      if (event.type === 'stats') {
+        stats = event.stats
+        return
+      }
       clearTimeout(timer)
       if (event.type === 'listening') {
         settle({ listening: true, address: event.address, port: event.port })
@@ -167,6 +189,9 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
 export function stopRemoteServer(): void {
   const current = child
   child = null
+  // Counters describe a running server. Left behind, they would read as live traffic on a
+  // machine that has stopped answering.
+  stats = null
   if (!current) return
   current.postMessage({ type: 'stop' } satisfies RemoteCommand)
   current.kill()

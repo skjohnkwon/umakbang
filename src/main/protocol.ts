@@ -17,6 +17,10 @@ import { Readable } from 'node:stream'
 import { extname } from 'node:path'
 import { aiffToWav, type RewrapResult } from './aiff'
 import { UMAKBANG_FILE_SCHEME, fromUmakbangFileUrl, urlFamily } from '../shared/url'
+import { relFor, rootFor, withinRoot } from '../shared/roots'
+import type { LibraryRoot } from '../shared/types'
+import { REMOTE_PORT } from './remote'
+import { getUserData } from './store'
 
 /** Must run before the app 'ready' event. */
 export function registerFileSchemePrivileges(): void {
@@ -102,6 +106,75 @@ const MIME_TYPES: Record<string, string> = {
   '.webm': 'audio/webm'
 }
 
+/**
+ * The same bytes, from the machine that has them.
+ *
+ * This is the whole of what "a remote root is a root" costs. The renderer asks for a path
+ * exactly as it always has - `player.ts` still does `element.src = fileUrl(track.path)` and
+ * knows nothing about any of this - and the only question here is whether that path belongs
+ * to a folder on this disk or to one on a peer's.
+ *
+ * `Range` is forwarded and the upstream status comes back untouched, because seeking is the
+ * point: a media element asks for a few kilobytes at a time and will not show a duration,
+ * let alone scrub, without honest 206s. The content type is decided here rather than taken
+ * from the peer, which deliberately answers `octet-stream` - one place deciding it is one
+ * place to get it wrong.
+ */
+async function serveRemote(
+  root: LibraryRoot,
+  filePath: string,
+  request: Request,
+  mimeType: string
+): Promise<Response> {
+  const remote = root.remote
+  if (!remote) return new Response('Not found', { status: 404 })
+
+  /**
+   * Within the root, with no label on the front.
+   *
+   * The label is this machine's name for the folder and nothing more - the same library is
+   * `SECRET SAUCE` on the machine serving it and `SECRET SAUCE (jkpc)` here, precisely
+   * because they had to be told apart locally. Sending ours asked the peer for a folder
+   * that does not exist on it, and every remote file came back 404 as "can't decode".
+   */
+  const rel = relFor([root], filePath)
+  const within = rel ? withinRoot(rel) : ''
+  if (!within) return new Response('Not found', { status: 404 })
+
+  const url =
+    `http://${remote.host}:${REMOTE_PORT}/file` +
+    `?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(within)}`
+
+  const range = request.headers.get('range')
+  const upstream = await fetch(url, { headers: range ? { Range: range } : undefined })
+
+  // 416 is an answer, not a failure: a media element that seeks past the end has to be told
+  // so, and passing it through with its Content-Range is how the local path replies too.
+  if (upstream.status === 416) {
+    return new Response(null, {
+      status: 416,
+      headers: {
+        ...baseHeaders(mimeType),
+        'Content-Range': upstream.headers.get('content-range') ?? 'bytes */0'
+      }
+    })
+  }
+  if (upstream.status !== 200 && upstream.status !== 206) {
+    return new Response('Not found', { status: upstream.status === 404 ? 404 : 502 })
+  }
+
+  // `baseHeaders` rather than a hand-written pair, and that is not tidiness: it carries
+  // `Access-Control-Allow-Origin`, without which an <audio> element still plays and the
+  // waveform builder's `fetch()` silently does not - a remote row that sounds right and
+  // draws nothing.
+  const headers = new Headers(baseHeaders(mimeType))
+  for (const name of ['content-length', 'content-range']) {
+    const value = upstream.headers.get(name)
+    if (value) headers.set(name, value)
+  }
+  return new Response(upstream.body, { status: upstream.status, headers })
+}
+
 export function registerFileProtocol(): void {
   protocol.handle(UMAKBANG_FILE_SCHEME, async (request) => {
     const filePath = fromUmakbangFileUrl(request.url)
@@ -109,6 +182,24 @@ export function registerFileProtocol(): void {
 
     const ext = extname(filePath).toLowerCase()
     const visual = urlFamily(request.url) === 'visual'
+
+    // Which machine has it. `rootFor` folds separators and matches the root's own prefix
+    // case-insensitively, so a Windows path asked for from a Mac resolves without anything
+    // here knowing that is what happened.
+    const root = rootFor(getUserData().settings.roots, filePath)
+    if (root?.remote) {
+      try {
+        const mimeType = visual
+          ? (VISUAL_MIME_TYPES[ext] ?? 'application/octet-stream')
+          : (MIME_TYPES[ext] ?? 'application/octet-stream')
+        // AIFF is served raw rather than rewrapped: the rewrap reads the whole file off
+        // disk, and there is no disk here. A remote AIFF surfaces as unplayable, which is
+        // honest, and is what the local path did before `aiff.ts` existed.
+        return await serveRemote(root, filePath, request, mimeType)
+      } catch {
+        return new Response('Not reachable', { status: 504 })
+      }
+    }
 
     if (visual) {
       try {

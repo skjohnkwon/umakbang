@@ -21,7 +21,9 @@ import type {
   MetadataPatch,
   PlatformInfo,
   RemoteDevice,
+  RemoteRootRef,
   RemoteServerState,
+  RemoteStats,
   TailnetStatus,
   ScanProgress,
   Settings,
@@ -239,7 +241,7 @@ const api = {
   refreshFolder: (dir: string): Promise<string> =>
     ipcRenderer.invoke('library:refreshFolder', dir),
   onFolderChanged: (
-    handler: (payload: { dir: string; tracks: Track[] }) => void
+    handler: (payload: { dir: string; tracks: Track[]; prune?: boolean }) => void
   ): (() => void) => subscribe('library:folder', handler),
 
   onLibraryReset: (handler: (payload: { roots: LibraryRoot[] }) => void): (() => void) =>
@@ -427,10 +429,44 @@ const api = {
   remoteServerState: (): Promise<RemoteServerState> => ipcRenderer.invoke('remote:serverState'),
   remoteRestartServer: (): Promise<RemoteServerState> =>
     ipcRenderer.invoke('remote:restartServer'),
+  /** What the server has answered since it started. Null when it is not running. */
+  remoteStats: (): Promise<RemoteStats | null> => ipcRenderer.invoke('remote:stats'),
+  /** Copies remote files into the configured download folder. Never a move - see `remote-download.ts`. */
+  remoteDownload: (paths: string[]): Promise<{ written: string[]; failures: string[] }> =>
+    ipcRenderer.invoke('remote:download', paths),
+  /**
+   * Progress for files being copied from another machine. `received` and `total` are -1
+   * when a file is done or has failed, which takes its row out of the list either way.
+   */
+  onRemoteDownload: (
+    handler: (payload: {
+      path: string
+      received: number
+      total: number
+      /** Where it is landing - the row drawn while it is on its way. */
+      target?: string
+      /** Bytes per second over the last window, not the whole transfer. */
+      bps?: number
+      /** Checking what landed against the original's hash. */
+      verifying?: boolean
+    }) => void
+  ): (() => void) => subscribe('remote:downloadProgress', handler),
+  /** What this machine is called on the tailnet, for the "copy to" label. */
+  remoteSelfName: (): Promise<string> => ipcRenderer.invoke('remote:selfName'),
+  /** Adds a peer's library to this one as a root. It behaves as any other root after that. */
+  remoteMountLibrary: (
+    remote: RemoteRootRef,
+    path: string,
+    label: string
+  ): Promise<{ ok: boolean; reason?: string; root?: LibraryRoot }> =>
+    ipcRenderer.invoke('remote:mountLibrary', remote, path, label),
 
   /* --- os integration --- */
   /** The OS's own icon for a file, as a data URL. Null when it has none. */
   fileIcon: (path: string): Promise<string | null> => ipcRenderer.invoke('shell:fileIcon', path),
+  /** Unpacks a .zip into a folder beside it, named after the archive. */
+  extractArchive: (path: string): Promise<{ dir?: string; error?: string }> =>
+    ipcRenderer.invoke('fs:extractArchive', path),
   reveal: (path: string): Promise<void> => ipcRenderer.invoke('shell:reveal', path),
   openExternally: (path: string): Promise<string | null> => ipcRenderer.invoke('shell:open', path),
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:writeText', text),

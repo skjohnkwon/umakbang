@@ -101,7 +101,17 @@ import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
-import { listRemoteDevices, remoteServerState, startRemoteServer, stopRemoteServer } from './remote'
+import { downloadRemote } from './remote-download'
+import { extractArchive } from './archives'
+import { readTailnet } from './tailscale'
+import { hostname } from 'node:os'
+import {
+  listRemoteDevices,
+  remoteServerState,
+  remoteStats,
+  startRemoteServer,
+  stopRemoteServer
+} from './remote'
 import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemProgress } from './stems'
 import {
   cancel as cancelYoutube,
@@ -130,9 +140,10 @@ import type {
   UndoOutcome,
   UndoProgress,
   UndoSummary,
-  UpdateStatus
+  UpdateStatus,
+  RemoteRootRef
 } from '../shared/types'
-import { rootFor } from '../shared/roots'
+import { indexKeyFor, rootFor } from '../shared/roots'
 import {
   lastSegment,
   remapBackup,
@@ -684,12 +695,21 @@ function watchFolder(dir: string | null): void {
 }
 
 /** Re-reads a folder and tells the renderer what is in it now. */
-async function refreshFolder(dir: string): Promise<void> {
+/**
+ * Re-reads one folder and tells the renderer what is in it.
+ *
+ * `prune` is set when a person asked - the Refresh button - and left off when the watcher
+ * asked. The difference matters: a watcher tick is a guess that something moved and can fire
+ * during any transient failure, while Refresh is somebody saying "read this again, I know it
+ * changed". Only the second is allowed to delete rows, and only when the folder was actually
+ * read - see `describeDir`.
+ */
+async function refreshFolder(dir: string, prune = false): Promise<void> {
   const target = mainWindow
   if (!target || target.isDestroyed()) return
-  const tracks = await describeDir(dir, getUserData().settings.roots)
+  const { tracks, read } = await describeDir(dir, getUserData().settings.roots)
   if (target.isDestroyed()) return
-  target.webContents.send('library:folder', { dir, tracks })
+  target.webContents.send('library:folder', { dir, tracks, prune: prune && read })
 }
 
 async function pickAndOpenFolder(): Promise<string | null> {
@@ -1143,6 +1163,44 @@ function registerIpc(): void {
   /* --- the tailnet --- */
   ipcMain.handle('remote:devices', () => listRemoteDevices())
   ipcMain.handle('remote:serverState', () => remoteServerState())
+  ipcMain.handle('remote:stats', () => remoteStats())
+  ipcMain.handle('remote:download', async (_event, paths: string[]) => {
+    const result = await downloadRemote(
+      paths,
+      (path, received, total, target, bps, verifying) => {
+        // -1 means finished or failed; the renderer takes the row out of the map either way.
+        mainWindow?.webContents.send('remote:downloadProgress', {
+          path,
+          received,
+          total,
+          target,
+          bps,
+          verifying
+        })
+      }
+    )
+    /*
+     * The folder is re-read here rather than left for somebody to press Refresh.
+     *
+     * Nothing else would tell it: the folder watcher follows the folder being *looked at*,
+     * and during a copy that is the remote one - so a file landing in the local library
+     * fires no watch at all. And while a copy is running the only thing on disk is a
+     * `.part`, which is not indexable, so a refresh at that moment is honestly empty and
+     * looks like the copy failed.
+     *
+     * This is the one moment the app knows for certain that a folder changed, because it
+     * is the thing that changed it.
+     */
+    if (result.written.length > 0) {
+      await refreshFolder(getUserData().settings.remoteDownloadDir, true)
+    }
+    return result
+  })
+  /** What this machine is called on the tailnet, for the "copy to" label. */
+  ipcMain.handle('remote:selfName', async (): Promise<string> => {
+    const tailnet = await readTailnet()
+    return tailnet.self?.hostName || tailnet.self?.name || hostname()
+  })
   ipcMain.handle('remote:restartServer', () => startRemoteServer())
 
   ipcMain.handle('library:pickFolder', () => pickAndOpenFolder())
@@ -1152,13 +1210,30 @@ function registerIpc(): void {
     return added?.path ?? null
   })
   ipcMain.handle('library:addFolder', () => pickAndOpenFolder())
+  /**
+   * Mounts a peer's library as a root of this one.
+   *
+   * It is an ordinary root from here on - the sidebar lists it, the explorer walks into it,
+   * the player plays out of it - which is the whole design. The only thing that knows it is
+   * remote is the scanner, which downloads its index instead of walking, and the protocol
+   * handler, which fetches its bytes instead of opening them.
+   */
+  ipcMain.handle(
+    'remote:mountLibrary',
+    (_event, remote: RemoteRootRef, path: string, label: string) => {
+      const { settings, added, reason } = addRoot(path, label, remote)
+      if (!added) return { ok: false, reason: reason ?? 'already open' }
+      scanAdditional(added, settings.roots)
+      return { ok: true, root: added }
+    }
+  )
   ipcMain.handle('library:removeFolder', (_event, label: string) => {
     const dropped = getUserData().settings.roots.find((root) => root.label === label)
     const settings = removeRoot(label)
     // Removing the folder from the library is the moment its saved index stops being
     // worth anything - left behind it is a 200MB file nothing will ever read again, or
     // worse, replay stale rows if the same folder is re-added someday.
-    if (dropped) clearIndex(dropped.path)
+    if (dropped) clearIndex(indexKeyFor(dropped))
     // Same reason as in `scanAdditional`: a record written against a set of roots that no
     // longer exists would journal its inverse patch into a file nothing reads, or nowhere.
     forget()
@@ -1241,7 +1316,7 @@ function registerIpc(): void {
 
   /** The refresh button - the same re-read the watcher does, asked for by hand. */
   ipcMain.handle('library:refreshFolder', async (_event, dir: string) => {
-    await refreshFolder(dir)
+    await refreshFolder(dir, true)
     return dir
   })
 
@@ -1691,6 +1766,16 @@ function registerIpc(): void {
     }
     const error = await shell.openPath(path)
     return error || null
+  })
+  /**
+   * Unpacks an archive into a folder beside it, then re-reads that folder so the result is
+   * on screen. Same reasoning as a finished copy: this is a moment the app knows for certain
+   * that a folder changed, because it is the thing that changed it.
+   */
+  ipcMain.handle('fs:extractArchive', async (_event, path: string) => {
+    const result = await extractArchive(path)
+    if (result.dir) await refreshFolder(dirname(path), true)
+    return result
   })
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {
     clipboard.writeText(text)

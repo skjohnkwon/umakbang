@@ -28,12 +28,16 @@ export function resolveInLibrary(library: RemoteLibrary, rel: string): string | 
   // check and open something else entirely.
   if (!rel || rel.includes('\0')) return null
 
-  // The index prefixes every relative path with the root's *label*, which the user can
-  // rename - so it is stripped by agreement rather than derived from the folder name.
-  let within = rel.replace(/\\/g, '/')
-  if (within === library.label) within = ''
-  else if (within.startsWith(`${library.label}/`)) within = within.slice(library.label.length + 1)
-
+  /**
+   * The path is within the root, with no label on it.
+   *
+   * It used to strip a leading label, which was wrong twice over. A label is the *local*
+   * name for a folder - the same library is `SECRET SAUCE` here and `SECRET SAUCE (jkpc)`
+   * on the machine that mounted it - so it could never be agreed on across the wire. And
+   * stripping one made a real subfolder of that name unreachable: `SECRET SAUCE/x.wav`
+   * under a root labelled `SECRET SAUCE` resolved to the file one level up.
+   */
+  const within = rel.replace(/\\/g, '/').replace(/^\/+/, '')
   const candidate = resolve(library.path, within)
 
   try {

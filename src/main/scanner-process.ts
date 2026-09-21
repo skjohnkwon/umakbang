@@ -18,12 +18,13 @@ import type {
   Track,
   TrackMetadata
 } from '../shared/types'
-import { relFor } from '../shared/roots'
+import { indexKeyFor, relFor } from '../shared/roots'
 import { plausibleBpm } from '../shared/tempo'
 import { startScan, type ScanHandle } from './scanner'
 import { readFlpTempo } from './flp'
 import { flushMetadataCache, initMetadataCache } from './metadata-cache'
 import { initIndexStore, loadIndex, saveIndex } from './index-store'
+import { fetchRemoteIndex } from './remote-index'
 
 export type ScannerCommand =
   | { type: 'init'; dataDir: string }
@@ -175,7 +176,87 @@ function fixRelativePaths(root: LibraryRoot, tracks: Track[]): void {
   }
 }
 
+/**
+ * A root that lives on another machine: downloaded rather than walked.
+ *
+ * The saved index goes out first, exactly as a local root's does, so a library that has been
+ * opened before is on screen before the peer has even answered - and stays on screen if the
+ * peer turns out to be asleep. The fetch then replaces it wholesale. There is no walk to
+ * revalidate against and no per-file `stat` worth doing over a network: the peer's index is
+ * already the answer, and it is authoritative in a way nothing here could improve on.
+ */
+async function scanRemote(root: LibraryRoot, current: () => boolean): Promise<void> {
+  const startedAt = Date.now()
+  const key = indexKeyFor(root)
+  log(`fetching ${root.label} from ${root.remote?.deviceName} (${root.remote?.host})`)
+
+  const cached = loadIndex(key)
+  if (cached && current()) {
+    fixRelativePaths(root, cached)
+    for (let i = 0; i < cached.length; i += 1000) {
+      if (!current()) return
+      post({ type: 'tracks', tracks: cached.slice(i, i + 1000) })
+    }
+    post({
+      type: 'progress',
+      progress: {
+        phase: 'walking',
+        found: cached.length,
+        probed: 0,
+        total: cached.length,
+        revalidating: true
+      }
+    })
+    log(`restored ${cached.length} remote rows from cache (+${Date.now() - startedAt}ms)`)
+  }
+
+  let sent = 0
+  const result = await fetchRemoteIndex(root, (batch) => {
+    if (!current()) return
+    fixRelativePaths(root, batch)
+    sent += batch.length
+    post({ type: 'tracks', tracks: batch })
+    post({
+      type: 'progress',
+      progress: { phase: 'walking', found: sent, probed: 0, total: sent, revalidating: true }
+    })
+  })
+  if (!current()) return
+
+  if (result.error) {
+    // Reported, not fatal. Whatever the cache put on screen is still true of the machine
+    // that is not answering, and throwing it away would turn a sleeping peer into an empty
+    // library.
+    post({ type: 'error', stage: 'remote', message: result.error })
+    post({
+      type: 'progress',
+      progress: { phase: 'done', found: cached?.length ?? 0, probed: 0, total: cached?.length ?? 0 }
+    })
+    log(`remote fetch failed: ${result.error}`)
+    return
+  }
+
+  fixRelativePaths(root, result.tracks)
+  saveIndex(key, result.tracks)
+
+  // Rows the peer no longer has. Sent for the same reason a local scan sends them: a row
+  // the renderer is still holding names a file that is not there any more.
+  if (cached) {
+    const live = new Set(result.tracks.map((track) => track.path))
+    const gone = cached.filter((track) => !live.has(track.path)).map((track) => track.path)
+    if (gone.length) post({ type: 'removed', paths: gone })
+  }
+
+  post({
+    type: 'progress',
+    progress: { phase: 'done', found: result.tracks.length, probed: 0, total: result.tracks.length }
+  })
+  log(`fetched ${result.tracks.length} rows in ${Date.now() - startedAt}ms`)
+}
+
 async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void> {
+  if (root.remote) return scanRemote(root, current)
+
   const startedAt = Date.now()
   log(`scanning ${root.label}: ${root.path}`)
 

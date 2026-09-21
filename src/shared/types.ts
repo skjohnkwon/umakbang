@@ -131,11 +131,31 @@ export interface ColumnState {
  * One folder the library is built from. See `src/shared/roots.ts` for why the label is
  * stored rather than derived.
  */
+/**
+ * Where a root lives, when it does not live on this machine.
+ *
+ * `path` on the root stays the *peer's* path - `Z:\SECRET SAUCE` on a Mac - because every
+ * row in that library says so, and rewriting a third of a million of them into a local
+ * fiction would buy nothing. Nothing on this machine ever opens it; it is an address in the
+ * peer's namespace, and `rootFor`/`relFor` already compare paths case-insensitively with
+ * separators folded, so a Windows path resolves here without special-casing.
+ */
+export interface RemoteRootRef {
+  deviceId: string
+  /** For the UI, so a row can say which machine rather than which address. */
+  deviceName: string
+  /** The tailnet address to dial. */
+  host: string
+  libraryId: string
+}
+
 export interface LibraryRoot {
-  /** Absolute path of the folder on disk. */
+  /** Absolute path of the folder on disk - or on the peer's disk, when `remote` is set. */
   path: string
   /** First segment of every relative path underneath it. Assigned once, never changed. */
   label: string
+  /** Set when this root is served by another machine. Absent for an ordinary folder. */
+  remote?: RemoteRootRef
 }
 
 export interface Settings {
@@ -482,6 +502,18 @@ export interface Settings {
    */
   deviceId: string
   /**
+   * Where a file copied off another machine lands.
+   *
+   * A remote library is read-only, so bringing a file over is a copy and never a move -
+   * nothing leaves the machine that owns it. This is the one place those copies go, rather
+   * than asking each time: the answer is the same every time, and being asked is what makes
+   * people stop doing it.
+   *
+   * Seeded to the system Downloads folder on first run, then left alone so choosing
+   * somewhere else sticks.
+   */
+  remoteDownloadDir: string
+  /**
    * Whether this machine answers for its library on the tailnet.
    *
    * On by default: the tailnet is already the trust boundary, what is served is read-only,
@@ -541,6 +573,39 @@ export interface RemoteHello {
   protocol: number
   device: { id: string; name: string; os: string; version: string }
   libraries: RemoteLibrary[]
+}
+
+/** One request the server answered, for the monitor. */
+export interface RemoteRequestLog {
+  at: number
+  /** The tailnet address it came from, which the UI maps back to a device name. */
+  peer: string
+  method: string
+  /** Pathname only. The query carries file paths and belongs in `detail`, shortened. */
+  path: string
+  /** Enough to tell two requests apart at a glance - a file's name, a library's label. */
+  detail?: string
+  status: number
+  bytes: number
+  ms: number
+}
+
+/**
+ * What the server has been doing, for the monitor in Settings.
+ *
+ * Counted in the process that serves, because it is the only one that sees a request. Pushed
+ * to the parent rather than pulled: a pull needs the two ends to correlate a reply, and the
+ * numbers are small enough that sending them on a throttle costs nothing.
+ */
+export interface RemoteStats {
+  startedAt: number
+  requests: number
+  bytesOut: number
+  /** Answered 4xx or 5xx. Mostly the containment check, which is worth watching. */
+  refused: number
+  inFlight: number
+  /** Newest first, capped. */
+  recent: RemoteRequestLog[]
 }
 
 /** Whether this machine is answering on the tailnet, and on what address - or why not. */
@@ -890,6 +955,7 @@ export const DEFAULT_SETTINGS: Settings = {
   resetOnLaunch: false,
   // Seeded on first run by `initStore`, which is the only place that can generate one.
   deviceId: '',
+  remoteDownloadDir: '',
   shareLibrary: true
 }
 
