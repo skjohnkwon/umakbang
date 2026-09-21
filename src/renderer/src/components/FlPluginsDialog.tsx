@@ -48,7 +48,8 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
   const matching = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return (catalog ?? []).filter((plugin) => {
-      if (formats.size > 0 && !formats.has(plugin.format)) return false
+      // Any format matches: a plugin FL scanned as both VST3 and AU belongs in both chips.
+      if (formats.size > 0 && !plugin.formats.some((format) => formats.has(format))) return false
       return !needle || plugin.name.toLowerCase().includes(needle)
     })
   }, [catalog, query, formats])
@@ -59,7 +60,8 @@ export function FlPluginsDialog({ onClose }: { onClose: () => void }): React.JSX
   /** Formats present, commonest first. Read off the catalogue - they differ per machine. */
   const formatCounts = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const plugin of catalog ?? []) counts.set(plugin.format, (counts.get(plugin.format) ?? 0) + 1)
+    for (const plugin of catalog ?? [])
+      for (const format of plugin.formats) counts.set(format, (counts.get(format) ?? 0) + 1)
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [catalog])
 
@@ -337,7 +339,7 @@ function PluginPane({
                 />
                 <span className="truncate">{plugin.name}</span>
                 <span className="ml-auto shrink-0 text-[10.5px] text-muted-foreground/50">
-                  {plugin.format}
+                  {plugin.formats.join(' + ')}
                 </span>
               </div>
             )

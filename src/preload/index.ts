@@ -481,7 +481,8 @@ const api = {
     plugins: Array<{
       name: string
       kind: 'generator' | 'effect'
-      format: string
+      /** Every format the scan filed it under - a plugin is often VST3 and AudioUnit both. */
+      formats: string[]
       favourite: boolean
     }>
     from: string

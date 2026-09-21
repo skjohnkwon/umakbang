@@ -55,12 +55,21 @@ export interface FlPlugin {
   /** The name FL shows, which is the file's own name without `.fst`. */
   name: string
   kind: PluginKind
-  /** `VST3`, `VST`, `AudioUnit`, `Fruity`, `New` - the folder the scan filed it under. */
-  format: string
+  /**
+   * Every folder the scan filed it under - `VST3`, `VST`, `AudioUnit`, `Fruity`, `New`.
+   *
+   * Plural because most plugins are more than one of these. FL's own manager shows OTT
+   * twice, as `VST3 + VST` and as `AU`, and the scan agrees: two `OTT.fst`, one per format
+   * folder. Recording only the first one found made filtering lie - ask for VST3 and OTT
+   * vanished, because `readdir` happened to reach `AudioUnit/` first.
+   */
+  formats: string[]
   /** Whether it is in the favourites tree, which is what puts it in the picker. */
   favourite: boolean
-  /** Where the scan's copy is, which is what a favourite is copied from. */
+  /** The scan copy a favourite is copied from - `installedPaths[0]`, or '' for built-ins. */
   installed: string
+  /** Every scan copy, which is what removing from the scan has to move. */
+  installedPaths: string[]
   /** Where the favourite's copy is, when there is one. */
   favouritePath?: string
 }
@@ -85,18 +94,44 @@ async function entries(dir: string): Promise<Dirent[]> {
   }
 }
 
-/** Every `.fst` under a folder, as name -> path. Depth is small and FL's, not ours. */
-async function fstUnder(dir: string, into: Map<string, string>, depth = 0): Promise<void> {
+/**
+ * Every `.fst` under a folder, as name -> paths. Depth is small and FL's, not ours.
+ *
+ * A name can arrive several times because FL files the same plugin under each format it
+ * found, so every path is kept. They still collapse to one entry later: the favourites tree
+ * is flat and keyed by filename, so `OTT.fst` is one favourite however many formats back it.
+ */
+async function fstUnder(dir: string, into: Map<string, string[]>, depth = 0): Promise<void> {
   if (depth > 6) return
   for (const entry of await entries(dir)) {
     const full = join(dir, entry.name)
     if (entry.isDirectory()) await fstUnder(full, into, depth + 1)
     else if (entry.name.toLowerCase().endsWith('.fst')) {
-      // First wins. FL files the same plugin under several formats - VST3, AudioUnit, New -
-      // and they are one plugin to anybody choosing one.
-      if (!into.has(entry.name.slice(0, -4))) into.set(entry.name.slice(0, -4), full)
+      const name = entry.name.slice(0, -4)
+      const seen = into.get(name)
+      if (seen) seen.push(full)
+      else into.set(name, [full])
     }
   }
+}
+
+/**
+ * Which copy a favourite is made from, when the scan holds several.
+ *
+ * Ordered so the portable formats win. This app's whole point is two machines, and a
+ * favourite copied from `VST3/` names a plugin that exists on the PC too; one copied from
+ * `AudioUnit/` names something Windows has never heard of.
+ */
+const FORMAT_PREFERENCE = ['VST3', 'VST', 'AudioUnit', 'New', 'Fruity']
+
+function preferred(paths: string[]): string[] {
+  return [...paths].sort((a, b) => {
+    const rank = (path: string): number => {
+      const at = FORMAT_PREFERENCE.indexOf(formatOf(path))
+      return at === -1 ? FORMAT_PREFERENCE.length : at
+    }
+    return rank(a) - rank(b) || a.localeCompare(b)
+  })
 }
 
 /**
@@ -108,19 +143,21 @@ async function fstUnder(dir: string, into: Map<string, string>, depth = 0): Prom
 export async function readFlCatalog(database: string): Promise<FlCatalog> {
   const plugins: FlPlugin[] = []
   for (const { dir, kind } of KINDS) {
-    const installed = new Map<string, string>()
-    const favourites = new Map<string, string>()
+    const installed = new Map<string, string[]>()
+    const favourites = new Map<string, string[]>()
     await fstUnder(join(database, 'Installed', dir), installed)
     await fstUnder(join(database, dir), favourites)
 
-    for (const [name, path] of installed) {
-      const favouritePath = favourites.get(name)
+    for (const [name, paths] of installed) {
+      const ordered = preferred(paths)
+      const favouritePath = favourites.get(name)?.[0]
       plugins.push({
         name,
         kind,
-        format: formatOf(path),
+        formats: [...new Set(ordered.map(formatOf))],
         favourite: favouritePath !== undefined,
-        installed: path,
+        installed: ordered[0],
+        installedPaths: ordered,
         favouritePath
       })
     }
@@ -132,9 +169,17 @@ export async function readFlCatalog(database: string): Promise<FlCatalog> {
      * because they are not plugins anybody installed. Leaving them out would make the list
      * disagree with the browser, and un-favouriting one has to stay possible.
      */
-    for (const [name, path] of favourites) {
+    for (const [name, paths] of favourites) {
       if (installed.has(name)) continue
-      plugins.push({ name, kind, format: 'Built in', favourite: true, installed: '', favouritePath: path })
+      plugins.push({
+        name,
+        kind,
+        formats: ['Built in'],
+        favourite: true,
+        installed: '',
+        installedPaths: [],
+        favouritePath: paths[0]
+      })
     }
   }
   plugins.sort((a, b) => a.name.localeCompare(b.name))
@@ -209,20 +254,23 @@ export async function removeFromScan(
   const failures: string[] = []
 
   for (const plugin of plugins) {
-    if (!plugin.installed) {
+    if (plugin.installedPaths.length === 0) {
       failures.push(`${plugin.name} is built into FL and cannot be removed.`)
       continue
     }
     try {
       await mkdir(aside, { recursive: true })
-      let target = join(aside, `${plugin.name}.fst`)
-      try {
-        await stat(target)
-        target = join(aside, `${plugin.name}-${Date.now()}.fst`)
-      } catch {
-        // Nothing there, which is the ordinary case.
+      // Every format, or the ones left behind put the plugin straight back in FL's list.
+      for (const path of plugin.installedPaths) {
+        let target = join(aside, `${formatOf(path)}-${plugin.name}.fst`)
+        try {
+          await stat(target)
+          target = join(aside, `${formatOf(path)}-${plugin.name}-${Date.now()}.fst`)
+        } catch {
+          // Nothing there, which is the ordinary case.
+        }
+        await rename(path, target)
       }
-      await rename(plugin.installed, target)
       // A favourite pointing at a plugin FL no longer knows about is a dead menu entry.
       if (plugin.favouritePath) await unlink(plugin.favouritePath).catch(() => undefined)
       changed++
