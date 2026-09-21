@@ -710,6 +710,21 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       byPath.set(track.path, track)
       tracks.push(track)
     }
+    /*
+     * A path the scanner just sent is a path that is there, whatever we thought.
+     *
+     * Rows dimmed earlier are skipped by the loop above - `byPath` already holds them - so
+     * without this a scan that finds a file again leaves it struck through for the rest of
+     * the session. It matters most for a peer's library, where the scan is the only thing
+     * that ever confirms a file: there is no folder here to re-read.
+     *
+     * Guarded rather than unconditional: this runs per 1,000-row batch of a full scan, and
+     * nothing is dimmed for almost all of them.
+     */
+    if (get().unreachable.size > 0) {
+      get().clearUnreachable(incoming.map((track) => track.path))
+    }
+
     // Nothing arrived, so nothing has to be recomputed. This is the whole of a revalidation
     // pass: the walk re-sends every row the index replay already put here, and a *structural*
     // bump per batch is what makes `buildTree` fold in a tail and `useVisibleRows` re-derive

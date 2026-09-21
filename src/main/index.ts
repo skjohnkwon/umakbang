@@ -624,6 +624,21 @@ function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
 }
 
 /**
+ * Pulls one root in again, without touching the set of roots.
+ *
+ * `scanAdditional` is for a root that has just been *added*, so it calls `forget()` and
+ * republishes the undo journal - a record written against the old set of roots can send its
+ * inverse patch to the wrong index. Nothing has changed here, so none of that applies, and
+ * dropping somebody's undo history because they pressed Refresh would be its own bug.
+ */
+function rescanRoot(root: LibraryRoot): void {
+  if (!mainWindow || scanning) return
+  ensureScanner()
+  scanning = true
+  if (scannerReady) send({ type: 'scan', roots: [root], replace: false })
+}
+
+/**
  * Opens the library folders an import was told the whereabouts of.
  *
  * Without this an import on a fresh machine finished on the same empty welcome screen it
@@ -716,6 +731,24 @@ async function refreshFolder(dir: string, prune = false, journalAdded = false): 
   const target = mainWindow
   if (!target || target.isDestroyed()) return
   const roots = getUserData().settings.roots
+
+  /*
+   * Another machine's folder is not ours to read.
+   *
+   * `describeDir` is a local `readdir`, and a remote root's path is a path on the machine
+   * serving it - `E:\SECRET SAUCE` seen from a Mac. The read fails, which correctly blocks
+   * the prune, but the renderer still gets an empty folder and dims every row in it as
+   * gone: press Refresh on a peer's library and the whole thing goes struck through.
+   *
+   * The peer's index is the only authority on what it holds, so Refresh asks it again
+   * rather than asking this filesystem about somewhere it has never been.
+   */
+  const root = rootFor(roots, dir)
+  if (root?.remote) {
+    if (prune) rescanRoot(root)
+    return
+  }
+
   const { tracks, read } = await describeDir(dir, roots)
 
   /*
