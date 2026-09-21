@@ -737,9 +737,15 @@ function ChangelogList({ running }: { running: string }): React.JSX.Element | nu
             {expanded && (
               <ul className="space-y-1 px-2.5 pb-2 pl-7">
                 {entry.changes.map((change) => (
+                  /*
+                   * The bullet is the character itself, not `\2022`. This is a JSX attribute
+                   * rather than a JS string, so nothing unescapes it on the way through:
+                   * a doubled backslash reached the stylesheet as an escaped backslash and
+                   * drew a literal "\2022" over the start of every line.
+                   */
                   <li
                     key={change}
-                    className="relative text-[11.5px] leading-relaxed text-muted-foreground before:absolute before:-left-2.5 before:text-muted-foreground/40 before:content-['\\2022']"
+                    className="relative text-[11.5px] leading-relaxed text-muted-foreground before:absolute before:-left-2.5 before:text-muted-foreground/40 before:content-['•']"
                   >
                     {change}
                   </li>
