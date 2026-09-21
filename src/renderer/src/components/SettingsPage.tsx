@@ -831,6 +831,8 @@ function FlPluginManager(): React.JSX.Element {
   const [missing, setMissing] = useState(false)
   const [query, setQuery] = useState('')
   const [only, setOnly] = useState<'all' | 'favourites' | 'others'>('all')
+  /** Formats to keep. Empty means all of them, which is what opening the page should show. */
+  const [formats, setFormats] = useState<Set<string>>(() => new Set())
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
@@ -853,9 +855,25 @@ function FlPluginManager(): React.JSX.Element {
     return (catalog ?? []).filter((plugin) => {
       if (only === 'favourites' && !plugin.favourite) return false
       if (only === 'others' && plugin.favourite) return false
+      if (formats.size > 0 && !formats.has(plugin.format)) return false
       return !needle || plugin.name.toLowerCase().includes(needle)
     })
-  }, [catalog, query, only])
+  }, [catalog, query, only, formats])
+
+  /**
+   * The formats actually present, with counts, commonest first.
+   *
+   * Read off the catalogue rather than listed here: FL files a plugin under the folder it
+   * found it in, and which of those exist depends on the machine - there is no AudioUnit on
+   * Windows, and `New` only appears once FL has scanned something it had not seen before.
+   */
+  const formatCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const plugin of catalog ?? []) {
+      counts.set(plugin.format, (counts.get(plugin.format) ?? 0) + 1)
+    }
+    return [...counts].sort((a, b) => b[1] - a[1])
+  }, [catalog])
 
   const favourites = (catalog ?? []).filter((plugin) => plugin.favourite).length
   /** What the buttons act on: the selection, or everything the search left if there is none. */
@@ -949,6 +967,48 @@ function FlPluginManager(): React.JSX.Element {
           </Button>
         ))}
       </div>
+
+      {formatCounts.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1">
+          {formatCounts.map(([format, count]) => {
+            const on = formats.has(format)
+            return (
+              <button
+                key={format}
+                type="button"
+                onClick={() =>
+                  setFormats((current) => {
+                    const next = new Set(current)
+                    // Off again when it was the only one on, rather than leaving a filter
+                    // nobody can clear without knowing which chip to press.
+                    if (next.has(format)) next.delete(format)
+                    else next.add(format)
+                    return next
+                  })
+                }
+                className={cn(
+                  'rounded border px-1.5 py-px text-[10.5px]',
+                  on
+                    ? 'border-primary/30 bg-primary/15 text-primary'
+                    : 'border-border/60 text-muted-foreground hover:bg-secondary/60'
+                )}
+              >
+                {format}
+                <span className="tnum pl-1 text-muted-foreground/50">{count}</span>
+              </button>
+            )
+          })}
+          {formats.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setFormats(new Set())}
+              className="px-1 text-[10.5px] text-muted-foreground/60 hover:text-foreground"
+            >
+              clear
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <span>
