@@ -27,6 +27,7 @@ import { Hint } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
 import { ColorPicker, ACCENT_PRESETS, SURFACE_PRESETS } from '@/components/ColorPicker'
 import { Clock } from 'lucide-react'
+import { formatHours } from '@/lib/stats'
 import { usePlayer } from '@/state/player'
 import { FlPluginsDialog } from '@/components/FlPluginsDialog'
 import { useLibrary } from '@/state/library'
@@ -44,7 +45,7 @@ import type {
   TailnetStatus,
   Track
 } from '@shared/types'
-import { useFolderTree } from '@/hooks/useLibraryView'
+import { useFolderTree, useProjectFor } from '@/hooks/useLibraryView'
 import { folderTags } from '@/lib/analysis-scope'
 import { cancelReprocess, reprocessProgress, subscribeReprocess } from '@/lib/analysis'
 import { useAudioOutput } from '@/lib/audio-output'
@@ -1498,6 +1499,17 @@ function PlayerDetailSection(): React.JSX.Element {
   const saved = useLibrary((s) => s.settings.playerDetails)
   const patchSettings = useLibrary((s) => s.patchSettings)
   const current = usePlayer((s) => s.current)
+  /*
+   * Read the same way the transport strip reads them, because the preview claiming to be
+   * "the track playing now" and then disagreeing with the line six inches below it is worse
+   * than no preview. A detected key is shown as its relative pair there and was shown bare
+   * here, and the project time was the literal string `4.2 h`, which `formatHours` cannot
+   * even produce.
+   */
+  const detectedKey = useLibrary((s) => s.detectedKey)
+  const keyDetected =
+    current !== null && detectedKey[current.pathKey ?? current.path] !== undefined
+  const project = useProjectFor(current)
 
   const chosen = useMemo(
     () => (saved.length > 0 ? normalizeDetailFields(saved) : [...DEFAULT_DETAIL_FIELDS]),
@@ -1526,6 +1538,18 @@ function PlayerDetailSection(): React.JSX.Element {
     musicalKey: 'F#m'
   }
 
+  /*
+   * The playing track's own project time, and a stand-in only when nothing is playing. A
+   * track with no matching project shows nothing here, which is what the strip does: the
+   * alternative is a preview inventing a number for a beat that has none.
+   */
+  const projectHours =
+    project?.projectSeconds !== undefined && project.projectSeconds > 0
+      ? project.projectSeconds / 3600
+      : current
+        ? null
+        : 4.2
+
   const toggle = (field: DetailField): void => {
     const next = chosen.includes(field)
       ? chosen.filter((entry) => entry !== field)
@@ -1543,12 +1567,13 @@ function PlayerDetailSection(): React.JSX.Element {
         <div className="truncate text-[12px] font-medium leading-tight">{sample.name}</div>
         <div className="mt-0.5 flex items-center gap-1.5">
           <span className="tnum truncate text-[10.5px] text-muted-foreground">
-            {formatDetails(sample, chosen) || (chosen.includes('projectTime') ? '' : 'nothing selected')}
+            {formatDetails(sample, chosen, keyDetected) ||
+              (chosen.includes('projectTime') ? '' : 'nothing selected')}
           </span>
-          {chosen.includes('projectTime') && (
+          {chosen.includes('projectTime') && projectHours !== null && (
             <span className="tnum flex shrink-0 items-center gap-0.5 text-[10.5px] text-muted-foreground">
               <Clock className="h-2.5 w-2.5" />
-              4.2 h
+              {formatHours(projectHours)}
             </span>
           )}
         </div>
