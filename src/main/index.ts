@@ -108,6 +108,7 @@ import { readTailnet } from './tailscale'
 import { hostname } from 'node:os'
 import {
   listRemoteDevices,
+  remotePlugins,
   remoteServerState,
   remoteStats,
   startRemoteServer,
@@ -1680,6 +1681,7 @@ function registerIpc(): void {
    * reason a finished copy is: this is the moment the app knows a folder changed.
    */
   ipcMain.handle('remote:packPreview', (_event, flpPath: string) => previewPack(flpPath))
+  ipcMain.handle('remote:plugins', (_event, host: string) => remotePlugins(host))
   ipcMain.handle('plugins:local', () =>
     readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
   )

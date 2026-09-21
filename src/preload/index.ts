@@ -433,6 +433,11 @@ const api = {
     missingPlugins: string[]
     error?: string
   }> => ipcRenderer.invoke('remote:packPreview', flpPath),
+  /** Plugins FL has found on a peer, asked of that peer. Null when it will not say. */
+  remotePluginList: (
+    host: string
+  ): Promise<{ names: string[]; from: string; missing?: boolean } | null> =>
+    ipcRenderer.invoke('remote:plugins', host),
   /** Plugins FL has found on this machine. */
   localPlugins: (): Promise<{ names: string[]; from: string; missing?: boolean }> =>
     ipcRenderer.invoke('plugins:local'),
