@@ -23,7 +23,7 @@ import type {
   RemoteStats
 } from '../shared/types'
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
-import { exportBackup, getDataDir, getUserData } from './store'
+import { MACHINE_PATH_SETTINGS, exportBackup, getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
 import { defaultFlUserData, type PluginInventory } from './plugins'
 
@@ -137,8 +137,10 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
     libraries: librariesFromSettings(settings.deviceId),
     dataDir: getDataDir(),
     flUserData: settings.flUserData || defaultFlUserData(),
-    // Already without the keys that describe this machine - see `exportBackup`.
-    settings: exportBackup().settings as Record<string, unknown>
+    // Without the keys that describe this install, and without the ones naming folders on
+    // its disk - see `MACHINE_PATH_SETTINGS`. Stripped here as well as on arrival, so an
+    // older peer asking this one never receives a path it would then act on.
+    settings: shareableSettings()
   }
 
   const forked = utilityProcess.fork(join(__dirname, 'remote-server.js'), [], {
@@ -292,6 +294,13 @@ export function remotePlugins(host: string): Promise<PluginInventory | null> {
     })
     request.on('error', () => resolve(null))
   })
+}
+
+/** What this machine is willing to say about how it is set up. */
+function shareableSettings(): Record<string, unknown> {
+  const settings = { ...exportBackup().settings } as Record<string, unknown>
+  for (const key of MACHINE_PATH_SETTINGS) delete settings[key]
+  return settings
 }
 
 /** A peer's preferences, for adopting. Null when it will not say. */

@@ -76,7 +76,8 @@ import {
   setRating,
   setTags,
   updateSettings,
-  LOCAL_ONLY_SETTINGS
+  LOCAL_ONLY_SETTINGS,
+  MACHINE_PATH_SETTINGS
 } from './store'
 import { appendIndexPatch, clearIndex, initIndexStore } from './index-store'
 import {
@@ -856,6 +857,9 @@ async function syncSettingsFromPeers(): Promise<{
 
   const safe: Record<string, unknown> = { ...best.settings }
   for (const key of LOCAL_ONLY_SETTINGS) delete safe[key]
+  // A folder on their disk is not a folder on this one. Stripped on arrival as well as at
+  // the source, because a peer on an older build still sends them.
+  for (const key of MACHINE_PATH_SETTINGS) delete safe[key]
   const settings = updateSettings(safe as Partial<Settings>)
   mainWindow?.webContents.send('library:settings', { settings })
   // The server was handed its config at startup and has to be told when what it serves

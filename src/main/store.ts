@@ -113,6 +113,29 @@ export function initStore(): void {
     userData.settings.stemSplitter = DEFAULT_SETTINGS.stemSplitter
   }
 
+  /*
+   * Folder settings that came from the wrong kind of machine, emptied so the seeds below
+   * fill them again.
+   *
+   * A settings sync used to carry these, so a Mac ended up with
+   * `C:\Users\deadm\Music\umakbang downloads` for its downloads folder. The seeding only
+   * runs on an empty value, so it would have stayed that way for good - and the symptom is
+   * a download that fails rather than anything naming the cause. `MACHINE_PATH_SETTINGS`
+   * stops it arriving; this clears what already did.
+   *
+   * A drive letter on a Unix machine and a leading slash on Windows are the two spellings
+   * that can only have come from somewhere else. Anything subtler is left alone: a path that
+   * merely does not exist yet is not the same as a path that could never exist here.
+   */
+  const settingsByKey = userData.settings as unknown as Record<string, unknown>
+  for (const key of MACHINE_PATH_SETTINGS) {
+    const value = settingsByKey[key]
+    if (typeof value !== 'string' || value === '') continue
+    const foreign =
+      process.platform === 'win32' ? value.startsWith('/') : /^[A-Za-z]:[\\/]/.test(value)
+    if (foreign) settingsByKey[key] = ''
+  }
+
   // Where a download lands when there is no folder on screen to put it in. Seeded the same
   // way and for the same reason as the stem folder above: a path spelled out in the source is
   // a path that does not exist on somebody else's machine, and the folder is created before
@@ -664,6 +687,28 @@ const LOCAL_ONLY = [
  * adopting another's device id.
  */
 export const LOCAL_ONLY_SETTINGS: readonly string[] = LOCAL_ONLY
+
+/**
+ * Settings that name a place on a disk, which do not survive the trip to another machine.
+ *
+ * Separate from `LOCAL_ONLY` because they are not local *to an install* - they are ordinary
+ * preferences, they belong in an export, and an import asks where each folder lives now.
+ * A sync has no such step: it happens on launch with nobody watching, so a path can only
+ * arrive wrong. `C:\Users\deadm\Music\umakbang downloads` on a Mac is not a folder that
+ * will be created, it is a download that fails with nothing said.
+ *
+ * Absolute paths only. `randomExcludeDirs` is relative to the library root and written with
+ * forward slashes, so it means the same thing on either machine - and where a library does
+ * not have that folder it excludes nothing, which costs nothing.
+ */
+export const MACHINE_PATH_SETTINGS: readonly string[] = [
+  'stemOutputDir',
+  'remoteDownloadDir',
+  'flUserData',
+  'youtubeDir',
+  // Each entry is an absolute path to a folder to file things into.
+  'quickMove'
+]
 
 export function exportBackup(): SettingsBackup {
   const settings: Partial<Settings> = { ...userData.settings }
