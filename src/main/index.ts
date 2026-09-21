@@ -110,6 +110,8 @@ import {
   listRemoteDevices,
   remotePlugins,
   remoteServerState,
+  stopWatchingRemoteServer,
+  watchRemoteServer,
   remoteStats,
   startRemoteServer,
   stopRemoteServer
@@ -1947,6 +1949,10 @@ if (!app.requestSingleInstanceLock()) {
           ? `umakbang: serving on ${state.address}:${state.port}`
           : `umakbang: not serving (${state.reason})`
       )
+      // And keeps it up. A server that died is invisible from this end - the window carries
+      // on - so the only thing that would have noticed is another machine failing to reach
+      // this one. It also covers opening umakbang before Tailscale has connected.
+      watchRemoteServer()
     })
 
     app.on('activate', () => {
@@ -1960,6 +1966,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('before-quit', () => {
+    stopWatchingRemoteServer()
     stopRemoteServer()
     send({ type: 'cancel' })
     scanner?.kill()

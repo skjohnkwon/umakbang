@@ -45,6 +45,17 @@ const PROBE_TIMEOUT_MS = 1_500
 /** How long the child gets to bind before the attempt is called failed. */
 const START_TIMEOUT_MS = 5_000
 
+/**
+ * How often the server is checked on while the app is open.
+ *
+ * Half a minute is chosen against what is actually being waited for. A crashed server is
+ * invisible from this end - the window carries on, and the only sign is another machine
+ * quietly failing to reach this one, which nobody notices until they try. Thirty seconds
+ * is a bound on how long that can last, and it costs one `tailscale status` when something
+ * is wrong and a property read when it is not.
+ */
+const WATCH_INTERVAL_MS = 30_000
+
 let child: Electron.UtilityProcess | null = null
 let state: RemoteServerState = { listening: false, port: REMOTE_PORT }
 /**
@@ -186,6 +197,47 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
       else settle(stopped)
     })
   })
+}
+
+let watchdog: NodeJS.Timeout | null = null
+
+/**
+ * Keeps the server up for as long as the app is.
+ *
+ * It exists because there was nothing to bring one back: the child is a separate process
+ * precisely so a fault in it costs a respawn rather than the app, and then nothing ever
+ * respawned it - the app carried on, silently unreachable, until somebody restarted it.
+ *
+ * It doubles as the answer to a tailnet that was not there at startup. A machine that opens
+ * umakbang before Tailscale finishes connecting failed to bind once and stayed failed; now
+ * it simply starts serving when the address turns up.
+ *
+ * Deliberately not a retry with a backoff. There is nothing to back off from - the check is
+ * cheap and the thing it is waiting for is an address appearing - and a backoff would mean
+ * the longest waits happen exactly when a machine has been unreachable longest.
+ */
+export function watchRemoteServer(): void {
+  if (watchdog) return
+  watchdog = setInterval(() => {
+    void (async () => {
+      // Sharing being off is not a failure to recover from; it is the setting doing its job.
+      if (!getUserData().settings.shareLibrary) return
+      if (child && state.listening) return
+      const before = state.reason
+      const next = await startRemoteServer()
+      // Said only when it changes, or a machine with Tailscale off writes a line every
+      // thirty seconds for as long as it is open.
+      if (next.listening) console.log(`umakbang: serving again on ${next.address}:${next.port}`)
+      else if (next.reason !== before) console.log(`umakbang: not serving (${next.reason})`)
+    })()
+  }, WATCH_INTERVAL_MS)
+  // Nothing here should hold the process open on its own.
+  watchdog.unref?.()
+}
+
+export function stopWatchingRemoteServer(): void {
+  if (watchdog) clearInterval(watchdog)
+  watchdog = null
 }
 
 export function stopRemoteServer(): void {
