@@ -64,7 +64,7 @@ function Field({
 }): React.JSX.Element {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+      <span className="mb-0.5 block text-[10.5px] text-muted-foreground/80">
         {label}
       </span>
       {children}
@@ -282,7 +282,7 @@ export function LayerList({
     <>
       <div className="flex min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-1 border-b px-2 py-1.5">
-        <span className="mr-auto text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+        <span className="mr-auto text-[10px] font-semibold text-muted-foreground/70">
           Add layer
         </span>
         <Button variant="ghost" size="sm" onClick={() => setMediaPicker('audio')}>
@@ -839,7 +839,7 @@ function VisualizersFields({
                 />
                 {enabled && (
                   <label className="mt-1 block pl-5">
-                    <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                    <span className="mb-0.5 block text-[10px] text-muted-foreground/70">
                       Orientation
                     </span>
                     <select

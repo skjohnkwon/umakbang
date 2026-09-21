@@ -142,7 +142,7 @@ function Panel({
       )}
     >
       <header className="flex h-[17px] shrink-0 items-center justify-between pl-2 pr-0.5">
-        <span className="text-[9.5px] font-medium uppercase tracking-[0.09em] text-muted-foreground/70">
+        <span className="text-[9.5px] font-medium tracking-[0.09em] text-muted-foreground/70">
           {name}
         </span>
         <div className="flex items-center gap-0.5">
@@ -179,7 +179,7 @@ function PanelToggle({
       type="button"
       title={title}
       onClick={onClick}
-      className="flex h-4 items-center rounded px-1 text-[9px] font-medium uppercase tracking-[0.08em] text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
+      className="flex h-4 items-center rounded px-1 text-[9px] font-medium tracking-[0.08em] text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
     >
       {label}
     </button>

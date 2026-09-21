@@ -327,7 +327,7 @@ export function StatsPage(): React.JSX.Element {
               title="Over time"
               subtitle={
                 busiestMonth
-                  ? `Busiest month: ${busiestMonth.label} - ${busiestMonth.count} projects`
+                  ? `Busiest month: ${busiestMonth.label}, ${busiestMonth.count} projects`
                   : undefined
               }
               actions={(['hours', 'count'] as const).map((metric) => (
@@ -560,7 +560,7 @@ export function StatsPage(): React.JSX.Element {
             are treated as unreliable.{' '}
             {rangeId === 'all'
               ? `Those ${(stats.counted - stats.dated).toLocaleString()} undated projects still count toward the totals here, but are left out of anything plotted against time.`
-              : `A date range can only hold projects with a usable date, so undated ones are excluded from these figures entirely - switch to All to count them.`}
+              : `A date range can only hold projects with a usable date, so undated ones are excluded from these figures entirely. Switch to All to count them.`}
           </span>
         </p>
       </motion.div>

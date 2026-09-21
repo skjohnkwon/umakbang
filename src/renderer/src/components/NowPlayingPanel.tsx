@@ -131,7 +131,7 @@ export function NowPlayingPanel(): React.JSX.Element {
       </div>
 
       <header className="flex h-[30px] shrink-0 items-center justify-between border-b px-2.5">
-        <span className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="text-[10.5px] font-medium text-muted-foreground">
           Visualizers
         </span>
         <div className="flex items-center gap-0.5">

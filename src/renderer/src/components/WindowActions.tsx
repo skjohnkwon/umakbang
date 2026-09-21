@@ -42,7 +42,7 @@ export function WindowActions({
     <div className="app-no-drag flex items-center gap-0.5">
       {!stage && (
       <Hint
-        label={noLibrary ? 'Open a folder first - there is nothing to play yet' : 'Mini player'}
+        label={noLibrary ? 'Open a folder first' : 'Mini player'}
         side={side}
       >
         <Button
@@ -60,7 +60,7 @@ export function WindowActions({
       <Hint
         label={
           noLibrary
-            ? 'Open a folder first - there is nothing to visualize yet'
+            ? 'Open a folder first'
             : settings.visualizerOnly
               ? 'Show library'
               : 'Visualizers only'

@@ -133,7 +133,7 @@ export default function App(): React.JSX.Element {
   useEffect(
     () =>
       connectUpdates((version) =>
-        useLibrary.getState().notify(`umakbang ${version} is ready - it will install when you quit.`)
+        useLibrary.getState().notify(`umakbang ${version} is ready. It installs when you quit.`)
       ),
     []
   )

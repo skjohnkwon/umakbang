@@ -99,7 +99,7 @@ export function NoResults({ scanning }: { scanning: boolean }): React.JSX.Elemen
     <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
       <SearchX className="h-6 w-6 text-muted-foreground/50" />
       <p className="text-[12.5px] text-muted-foreground">
-        {scanning ? 'Still indexing - results will appear as they are found.' : 'Nothing here.'}
+        {scanning ? 'Still indexing. Results appear as they are found.' : 'Nothing here.'}
       </p>
       {!scanning && (
         <p className="max-w-[360px] text-[11.5px] leading-relaxed text-muted-foreground/60">

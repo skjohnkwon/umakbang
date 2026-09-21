@@ -188,7 +188,7 @@ export function ColorPicker({
         <button
           type="button"
           aria-label={`${label}: ${current}`}
-          title={`${label} - ${current}`}
+          title={`${label}, ${current}`}
           style={{ backgroundColor: current }}
           className={cn(
             'h-[14px] w-[14px] shrink-0 rounded-[4px] border border-border shadow-[inset_0_0_0_1px_rgba(0,0,0,0.12)]',
@@ -201,7 +201,7 @@ export function ColorPicker({
 
       <PopoverContent align="end" className="w-[228px] p-2.5">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="text-[11px] font-medium text-muted-foreground">
             {label}
           </span>
           {onReset && (

@@ -1613,7 +1613,7 @@ export function FileTable({
                 header and the rows agree on how wide a row is. */}
             <div className="flex flex-col" style={{ minWidth: minRowWidth }}>
               <div
-                className="sticky top-0 z-10 grid h-[24px] shrink-0 items-center border-b bg-card pl-2 pr-3 text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground"
+                className="sticky top-0 z-10 grid h-[24px] shrink-0 items-center border-b bg-card pl-2 pr-3 text-[10.5px] font-medium text-muted-foreground"
                 style={{ gridTemplateColumns: template }}
               >
                 {visible.map((column) => (
@@ -1804,8 +1804,8 @@ function packWarning(preview: PackPreview): string {
   if (preview.missingPlugins.length > 0) {
     parts.push(
       `FL on this machine does not have ${listNames(preview.missingPlugins)}. ` +
-        'The project will open with them stubbed out, and saving it here writes that back - ' +
-        'their settings would be lost.'
+        'The project will open with them stubbed out. Saving it here writes that back ' +
+        'and their settings would be lost.'
     )
   }
   if (preview.elsewhere.length > 0) {

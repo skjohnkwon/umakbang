@@ -74,7 +74,7 @@ function Browser(): React.JSX.Element {
     <div className="flex min-h-0 flex-1">
       <nav className="scroll-thin w-[168px] shrink-0 overflow-y-auto border-r bg-card/30 py-2">
         <div className="flex items-center gap-1 px-3 pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <span className="text-[10px] font-semibold text-muted-foreground/70">
             Videos
           </span>
           <Hint label="Close" side="right">
@@ -612,7 +612,7 @@ function ExportDialog({
         <div className="grid gap-4 px-4 py-3 sm:grid-cols-[1fr_320px]">
           <section className="min-w-0 space-y-3">
             <label className="block">
-              <span className="mb-1 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+              <span className="mb-1 block text-[10.5px] text-muted-foreground/80">
                 Quality
               </span>
               <select
@@ -689,7 +689,7 @@ function ExportDialog({
 
           <section className="min-w-0 border-t pt-3 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+              <span className="text-[10.5px] font-semibold text-muted-foreground/80">
                 Project exports
               </span>
               <span className="text-[10.5px] tabular-nums text-muted-foreground/60">

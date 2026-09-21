@@ -337,7 +337,7 @@ export function NowPlayingBar(): React.JSX.Element {
               </PopoverTrigger>
             </Hint>
             <PopoverContent align="start" side="top" className="w-72 p-1">
-              <div className="px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="px-2 py-1 text-[10.5px] font-semibold text-muted-foreground">
                 Queue &middot; {queue.length}
               </div>
               <div className="scroll-thin max-h-[260px] overflow-y-auto">
@@ -626,7 +626,7 @@ function ProjectTime({ track }: { track: Track }): React.JSX.Element | null {
     <button
       type="button"
       onClick={() => revealTrack(project)}
-      title={`Time on project - ${project.name}, click to show it`}
+      title={`Time on project ${project.name}, click to show it`}
       className="tnum flex shrink-0 items-center gap-0.5 text-[10.5px] text-muted-foreground hover:text-primary"
     >
       <Clock className="h-2.5 w-2.5" />

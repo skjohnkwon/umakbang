@@ -89,7 +89,7 @@ export function ContextMenuLabel({
 }): React.JSX.Element {
   return (
     <ContextMenuPrimitive.Label
-      className={cn('truncate px-2 py-1 text-[10.5px] uppercase tracking-wider text-muted-foreground', className)}
+      className={cn('truncate px-2 py-1 text-[10.5px] text-muted-foreground', className)}
     >
       {children}
     </ContextMenuPrimitive.Label>

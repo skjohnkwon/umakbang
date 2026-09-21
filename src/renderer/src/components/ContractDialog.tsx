@@ -105,7 +105,7 @@ export function ContractDialog({ titles }: { titles: string[] }): React.JSX.Elem
 
       <div className="flex min-h-0">
         <div className="scroll-thin w-[460px] shrink-0 space-y-3 overflow-y-auto border-r px-4 py-3">
-          <Field label="Track titles" hint="One per line - each becomes a named Master.">
+          <Field label="Track titles" hint="One per line. Each becomes a named Master.">
             <textarea
               value={names}
               onChange={(event) => setNames(event.target.value)}
@@ -180,7 +180,7 @@ export function ContractDialog({ titles }: { titles: string[] }): React.JSX.Elem
           </label>
 
           <p className="text-[11px] text-muted-foreground/70">
-            Written to {data?.outputDir || 'nowhere yet - set a folder in Contracts'} as Markdown
+            Written to {data?.outputDir || 'nowhere yet. Set a folder in Contracts'} as Markdown
             and PDF.
           </p>
         </div>

@@ -30,9 +30,9 @@ export function InputSourceButton({
   const label = !supported
     ? 'Desktop audio is Windows only'
     : error && !desktop
-      ? `Desktop audio unavailable - ${error}`
+      ? `Desktop audio unavailable. ${error}`
       : desktop
-        ? 'Listening to desktop audio - switch back to the player'
+        ? 'Listening to desktop audio, switch back to the player'
         : 'Visualize desktop audio'
 
   return (

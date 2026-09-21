@@ -132,7 +132,7 @@ export function StatTile({
 }): React.JSX.Element {
   return (
     <motion.div variants={staggerItem} className="rounded-lg border bg-card/40 px-3 py-2.5">
-      <div className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="text-[10.5px] font-medium text-muted-foreground">
         {label}
       </div>
       <div className="tnum mt-0.5 truncate text-[19px] font-semibold leading-tight" title={value}>

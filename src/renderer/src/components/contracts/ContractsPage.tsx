@@ -39,7 +39,7 @@ export function ContractsPage(): React.JSX.Element {
     <div className="flex min-h-0 flex-1">
       <nav className="scroll-thin w-[168px] shrink-0 overflow-y-auto border-r bg-card/30 py-2">
         <div className="flex items-center gap-1 px-3 pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <span className="text-[10px] font-semibold text-muted-foreground/70">
             Contracts
           </span>
           <Hint label="Close (Esc)" side="right">
@@ -245,7 +245,7 @@ function TermsSection(): React.JSX.Element {
   return (
     <Section
       title="Your terms"
-      hint="The producer side of every contract - who you are and what governs the deal."
+      hint="Who you are and what governs the deal."
     >
       <Row label="Full legal name">
         <Input

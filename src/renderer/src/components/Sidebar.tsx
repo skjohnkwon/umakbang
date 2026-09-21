@@ -541,7 +541,7 @@ function SectionLabel({
   return (
     <div
       className={cn(
-        'flex shrink-0 items-center gap-1 px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70',
+        'flex shrink-0 items-center gap-1 px-3 pb-1 pt-1 text-[10px] font-semibold text-muted-foreground/70',
         className
       )}
     >

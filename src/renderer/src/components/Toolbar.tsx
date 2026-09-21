@@ -160,7 +160,7 @@ export function Toolbar({
               aria-label={undo.label}
               title={
                 undo.depth > 1
-                  ? `${undo.label} - ${undo.depth} operations to step back through`
+                  ? `${undo.label}, ${undo.depth} operations to step back through`
                   : undo.label
               }
               disabled={undoRunning}
@@ -205,7 +205,7 @@ export function Toolbar({
             aria-label={redo.label}
             title={
               redo.depth > 1
-                ? `${redo.label} - ${redo.depth} operations to step forward through`
+                ? `${redo.label}, ${redo.depth} operations to step forward through`
                 : redo.label
             }
             onClick={() => void runRedo()}
@@ -217,7 +217,7 @@ export function Toolbar({
       </div>
 
       <Hint
-        label={canGoUp ? 'Up one level (Backspace) - or drop here to move up' : 'Up one level'}
+        label={canGoUp ? 'Up one level (Backspace), or drop here to move up' : 'Up one level'}
         side="bottom"
       >
         <Button
@@ -295,7 +295,7 @@ export function Toolbar({
       {stemJob && (
         <span
           className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground"
-          title={`Splitting ${baseName(stemJob.path)} - ${stemJob.phase}`}
+          title={`Splitting ${baseName(stemJob.path)}, ${stemJob.phase}`}
         >
           {/* The spinner is the part that carries the message; the words can go. */}
           <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
@@ -699,7 +699,7 @@ function FoldersToggle(): React.JSX.Element {
           ? 'This view is already a flat list of files'
           : recursive
             ? `Showing every file beneath ${atRoot ? 'the library' : 'this folder'}, no folder rows`
-            : `Drop the folders - show every file beneath ${atRoot ? 'the library' : 'this folder'}`
+            : `Drop the folders, show every file beneath ${atRoot ? 'the library' : 'this folder'}`
       }
       side="bottom"
     >

@@ -168,7 +168,7 @@ export function SettingsPage(): React.JSX.Element {
             without this the only way back is to remember that "Files" in the sidebar is
             also the exit. */}
         <div className="flex items-center gap-1.5 px-3 pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <span className="text-[10px] font-semibold text-muted-foreground/70">
             Settings
           </span>
           <Hint label="Close settings (Esc)" side="right">
@@ -236,7 +236,7 @@ export function SettingsPage(): React.JSX.Element {
 
           <Section
             title="Visualizers"
-            hint="The ramp everything is tinted with, quiet on the left, loud on the right."
+            hint="Quiet on the left, loud on the right."
           >
             <Row label="Gradient">
               <div className="flex flex-wrap items-center gap-1">
@@ -302,7 +302,7 @@ export function SettingsPage(): React.JSX.Element {
 
             <Row
               label="Headroom"
-              hint="Space above the normal 0dB point in both the level and spectrum visualizers."
+              hint="Headroom above 0dB in the visualizers."
             >
               <div className="flex w-full items-center gap-2">
                 <input
@@ -328,7 +328,7 @@ export function SettingsPage(): React.JSX.Element {
 
             <Row
               label="Waveform colour"
-              hint="Spectrum tints each column by where its energy sits - bass low on the ramp, cymbals high."
+              hint="Tints each column by where its energy sits."
             >
               <div className="flex items-center gap-1">
                 {(['spectrum', 'accent'] as const).map((mode) => (
@@ -451,7 +451,7 @@ export function SettingsPage(): React.JSX.Element {
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('backup'))}>
           <Section
             title="Backup"
-            hint="Everything umakbang remembers, in one .umak file: preferences, tags, ratings and detected tempo, plus the file index, probe results and cached waveforms."
+            hint="Everything umakbang remembers, in one .umak file."
           >
             <Row label="Write bundles to" hint={settings.bundleExportDir || 'Not set yet.'}>
               <Button
@@ -504,20 +504,14 @@ export function SettingsPage(): React.JSX.Element {
               </Button>
             </div>
             <p className="text-[11px] leading-snug text-muted-foreground/60">
-              A bundle opens indexed rather than spending a minute rebuilding what it already
-              knows, so it is what a restore or a stick wants. Writing one takes a few
-              seconds and leaves a <code className="rounded bg-secondary px-1 py-px">.part</code>{' '}
-              file beside it until it is finished. Where the window sits stays with the
-              machine. <strong className="font-medium text-muted-foreground/80">
+              A bundle opens indexed instead of rescanning.{' '}
+              <strong className="font-medium text-muted-foreground/80">
                 One is written on its own once a day
               </strong>{' '}
-              into the same folder, as{' '}
-              <code className="rounded bg-secondary px-1 py-px">umakbang-auto.umak</code>,
-              replacing the day before's. Importing asks where each folder lives here, opens
-              the ones that were libraries, and brings the rest across; the index comes back
-              only for folders still at the same path, and anything that moved is rebuilt by a
-              scan. Older <code className="rounded bg-secondary px-1 py-px">.json</code>{' '}
-              settings files still import.
+              as <code className="rounded bg-secondary px-1 py-px">umakbang-auto.umak</code>.
+              Importing asks where each folder lives here. Older{' '}
+              <code className="rounded bg-secondary px-1 py-px">.json</code> settings still
+              import.
             </p>
           </Section>
         </div>
@@ -540,7 +534,7 @@ export function SettingsPage(): React.JSX.Element {
               label="Visualizers only"
               hint={
                 noLibrary
-                  ? 'Open a folder first - there is nothing to visualize yet.'
+                  ? 'Open a folder first.'
                   : 'Hide the library and fill the window.'
               }
             >
@@ -597,13 +591,13 @@ function UpdateSection(): React.JSX.Element {
       case 'downloading':
         return status.percent === undefined
           ? `Downloading ${status.available ?? 'an update'}…`
-          : `Downloading ${status.available ?? 'an update'} - ${status.percent}%`
+          : `Downloading ${status.available ?? 'an update'}, ${status.percent}%`
       case 'ready':
         return `${status.available} is ready. It installs when you quit.`
       case 'error':
         return `Could not check: ${status.reason ?? 'unknown error'}`
       case 'disabled':
-        return `Updates are off - ${status.reason ?? 'not available in this build'}.`
+        return `Updates are off. ${status.reason ?? 'Not available in this build'}.`
       default:
         return 'Checked automatically, twelve hours apart.'
     }
@@ -673,7 +667,7 @@ function RemoteSection(): React.JSX.Element {
     <>
       <Section
         title="Sharing"
-        hint="Other machines on your tailnet, and nothing else, can read this library."
+        hint="Only machines on your tailnet can read this library."
       >
         <Row
           label="Share this library"
@@ -681,7 +675,7 @@ function RemoteSection(): React.JSX.Element {
             !settings.shareLibrary
               ? 'Off. No other machine can reach this one.'
               : server?.listening
-                ? `Answering on ${server.address}. Read-only: nothing reachable this way can change a file.`
+                ? `Answering on ${server.address}. Read-only.`
                 : (server?.reason ?? 'Starting…')
           }
         >
@@ -699,7 +693,7 @@ function RemoteSection(): React.JSX.Element {
 
       <Section
         title="Copying here"
-        hint="A library on another machine is read-only, so bringing a file over is always a copy - nothing leaves the machine that owns it."
+        hint="Another machine's library is read-only, so this is always a copy."
       >
         <Row label="Copy files to" hint={settings.remoteDownloadDir || 'Not set yet.'}>
           <Button
@@ -721,13 +715,13 @@ function RemoteSection(): React.JSX.Element {
 
       <Section
         title="Settings"
-        hint="Whichever machine's settings were changed most recently win, and this happens on every launch as well."
+        hint="The most recently changed settings win. Runs on launch too."
       >
         <Row
           label="Take the newest settings"
           hint={
             syncNote ??
-            'Asks every machine that is serving, and adopts the one changed most recently. Nothing is sent: a machine that is behind catches up on its own next launch.'
+            'Asks every machine that is serving and adopts the newest.'
           }
         >
           <Button
@@ -754,7 +748,7 @@ function RemoteSection(): React.JSX.Element {
       <Section title="Libraries from other machines">
         {mounted.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
-            None yet. Settings → Developer → Tailnet lists the machines that are serving one.
+            None yet. Developer → Tailnet lists what is serving.
           </p>
         ) : (
           mounted.map((root) => (
@@ -837,14 +831,14 @@ function FlPluginsRow(): React.JSX.Element {
   return (
     <Section
       title="FL plugins"
-      hint="A favourite is what appears when you add a plugin to a channel. FL adds them one at a time; this does not."
+      hint="What appears when you add a plugin to a channel."
     >
       <Row
         label="Favourites"
         hint={
           summary
             ? `${summary.favourites.toLocaleString()} of ${summary.total.toLocaleString()} plugins FL has found.`
-            : 'Reading FL&apos;s plugin database…'
+            : 'Reading…'
         }
       >
         <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
@@ -888,7 +882,7 @@ function PluginsSection(): React.JSX.Element {
     <>
       <Section
         title="This machine"
-        hint="Read from FL Studio's own plugin database - what FL has found, which is what decides whether a project opens."
+        hint="Read from FL Studio's own plugin database."
       >
         <Row
           label="Plugin database folder"
@@ -896,7 +890,7 @@ function PluginsSection(): React.JSX.Element {
             mine === null
               ? 'Looking…'
               : mine.missing
-                ? `Nothing at ${mine.from}. FL writes that folder when it scans for plugins - so either it has not, or this is pointing somewhere else. The FL Studio user data folder works too; it is found inside.`
+                ? `Nothing at ${mine.from}. Point this at the database or the user data folder.`
                 : `${mine.names.length} plugins, read from ${mine.from}`
           }
         >
@@ -921,11 +915,11 @@ function PluginsSection(): React.JSX.Element {
 
       <Section
         title="Other machines"
-        hint="Each reports its own. A machine has to be running umakbang and sharing for it to answer."
+        hint="Each machine reports its own. It has to be running and sharing."
       >
         {devices.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
-            Nothing is serving right now. Settings → Developer → Tailnet lists what it can see.
+            Nothing is serving. Developer → Tailnet lists what it can see.
           </p>
         ) : (
           devices.map((device) => {
@@ -979,13 +973,13 @@ function PluginsSection(): React.JSX.Element {
                       <>
                         {both.missingHere.length > 0 && (
                           <PluginList
-                            title="Not here - their projects will open stubbed"
+                            title="Not here. Their projects open stubbed."
                             names={both.missingHere}
                           />
                         )}
                         {both.missingThere.length > 0 && (
                           <PluginList
-                            title="Not there - projects made here will open stubbed"
+                            title="Not there. Projects made here open stubbed."
                             names={both.missingThere}
                           />
                         )}
@@ -1160,7 +1154,7 @@ function TailnetSection(): React.JSX.Element {
   return (
     <Section
       title="Tailnet"
-      hint="Serving is read-only and reaches no further than the tailnet."
+      hint="Read-only, and no further than the tailnet."
     >
       <Row
         label="This machine"
@@ -1168,7 +1162,7 @@ function TailnetSection(): React.JSX.Element {
           server === undefined
             ? 'Checking.'
             : server.listening
-              ? `Serving on ${server.address}:${server.port}. Bound to the tailnet address only - not the LAN, and not localhost.`
+              ? `Serving on ${server.address}:${server.port}. Tailnet only.`
               : (server.reason ?? 'Not serving.')
         }
       >
@@ -1307,8 +1301,8 @@ function DeveloperSection(): React.JSX.Element {
             label="Start fresh on next launch"
             hint={
               settings.resetOnLaunch
-                ? 'On. Every launch opens on the welcome screen with no library, no tags and default settings. Turn this off and the next launch puts your real library, tags and ratings back exactly as they were - nothing has been deleted, only moved aside.'
-                : 'Next launch comes up as a brand-new install: welcome screen, no library, default settings. Reversible - your real profile is moved aside, and switching this back off restores it on the following launch.'
+                ? 'On. Every launch opens as a new install. Your real profile is moved aside, not deleted.'
+                : 'Next launch comes up as a new install. Reversible.'
             }
           >
             <Switch
@@ -1324,7 +1318,7 @@ function DeveloperSection(): React.JSX.Element {
       <Section title="Pages">
         <Row
           label="Stats"
-          hint="Off takes it out of the sidebar. Nothing is worked out for it either - every figure on that page is derived on the page and nowhere else."
+          hint="Off takes it out of the sidebar and stops it computing."
         >
           <Switch
             checked={settings.showStats}
@@ -1338,8 +1332,8 @@ function DeveloperSection(): React.JSX.Element {
           label="Show the tutorial again"
           hint={
             noLibrary
-              ? 'Open a folder first - the tour points at things in the library.'
-              : 'Twenty seconds, seven steps, stoppable at any point.'
+              ? 'Open a folder first.'
+              : 'Seven steps, stoppable at any point.'
           }
         >
           <Button
@@ -1453,7 +1447,7 @@ function OutputSection(): React.JSX.Element {
         label="Play through"
         hint={
           chosen
-            ? 'Only umakbang moves - your DAW and everything else keep their own output.'
+            ? 'Only umakbang moves. Other apps keep their own output.'
             : 'Follows whatever the system is set to.'
         }
       >
@@ -1485,8 +1479,7 @@ function OutputSection(): React.JSX.Element {
 
       {unlabelled && (
         <p className="text-[11px] text-muted-foreground/60">
-          The system didn&rsquo;t hand over the device names, so they are numbered here.
-          Pick one and press play to find out which it is.
+          No names came from the system, so they are numbered. Press play to find out which.
         </p>
       )}
     </Section>
@@ -1543,7 +1536,7 @@ function PlayerDetailSection(): React.JSX.Element {
   return (
     <Section
       title="Track details"
-      hint="What the player lists under the name. Order follows the order you switch them on."
+      hint="What the player lists under the name."
     >
       {/* The preview: the same markup the transport strip uses for its identity block. */}
       <div className="rounded-md border bg-card/50 p-2.5">
@@ -1559,8 +1552,8 @@ function PlayerDetailSection(): React.JSX.Element {
             </span>
           )}
         </div>
-        <div className="mt-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/50">
-          {current ? 'Preview - the track playing now' : 'Preview'}
+        <div className="mt-1.5 text-[10px] text-muted-foreground/50">
+          {current ? 'Preview, the track playing now' : 'Preview'}
         </div>
       </div>
 
@@ -1630,14 +1623,14 @@ function AnalysisSection({
   return (
     <Section
       title="Tempo and key analysis"
-      hint="Tag a folder, then pick that tag here. Subfolders without tags of their own are included."
+      hint="Tag a folder, then pick that tag here. Subfolders included."
     >
       <Row
         label="Analyse"
         hint={
           tag
             ? `Only files under folders tagged “${tag}”.`
-            : 'Everything - every file you browse gets decoded once.'
+            : 'Everything you browse gets decoded once.'
         }
       >
         <select
@@ -1655,7 +1648,7 @@ function AnalysisSection({
       </Row>
       <Row
         label="Estimate key from audio"
-        hint="Tempo is accurate; key is a guess and often wrong. Keys from tags and file names are unaffected."
+        hint="Tempo is accurate. Key is a guess and often wrong."
       >
         <Switch
           checked={detectKey}
@@ -1666,7 +1659,7 @@ function AnalysisSection({
       {detectKey && (
         <Row
           label="Key detector"
-          hint="Essentia is the engine behind the web tools that do this well. Measured on this library it is not reliably better, but it is right on cases the built-in one splits. Switching re-analyses everything."
+          hint="Right on cases the built-in detector splits. Switching re-analyses everything."
         >
           <SegmentedControl
             value={keyEngine}
@@ -1682,7 +1675,7 @@ function AnalysisSection({
       {detectKey && keyEngine === 'essentia' && (
         <Row
           label="Key profile"
-          hint="What the chroma is scored against. bgate and edma were derived from electronic music; the other two from classical listening tests."
+          hint="What the chroma is scored against. bgate and edma suit electronic music."
         >
           <SegmentedControl
             value={keyProfile}
@@ -1701,7 +1694,7 @@ function AnalysisSection({
 
       <Row
         label="Files at once"
-        hint="How many are analysed in parallel. More is faster; each one in flight holds a decoded file."
+        hint="How many are analysed at once. More is faster and uses more memory."
       >
         <SegmentedControl
           value={String(concurrency)}
@@ -1720,8 +1713,7 @@ function AnalysisSection({
 
       {options.length === 0 && (
         <p className="text-[11px] text-muted-foreground/60">
-          No folder carries a tag yet. Right-click a folder and choose “Edit tags…” to give it
-          one.
+          No folder carries a tag yet. Right-click one and choose “Edit tags…”.
         </p>
       )}
     </Section>
@@ -1747,7 +1739,7 @@ function KeyCommandRow(): React.JSX.Element {
 
   const test = async (): Promise<void> => {
     if (!current) {
-      setResult('Play something first - the test runs against the current track.')
+      setResult('Play something first. The test runs against the current track.')
       return
     }
     setTesting(true)
@@ -1757,7 +1749,7 @@ function KeyCommandRow(): React.JSX.Element {
     setResult(
       answer
         ? `${current.name} → ${answer.slice(0, 60)}`
-        : 'No output - the command failed or printed nothing.'
+        : 'No output. The command failed or printed nothing.'
     )
   }
 
@@ -1765,8 +1757,8 @@ function KeyCommandRow(): React.JSX.Element {
     <div className="space-y-1.5">
       <div className="text-[12.5px]">External key detector</div>
       <p className="text-[11px] leading-snug text-muted-foreground/60">
-        A command run once per file, with <code>{'{file}'}</code> replaced by its path. What
-        it prints is read as the key. Leave empty to use the built-in detector.
+        Run once per file, with <code>{'{file}'}</code> as its path. What it prints is the
+        key. Empty uses the built-in detector.
       </p>
       <div className="flex items-center gap-1.5">
         <Input
@@ -1813,7 +1805,7 @@ function StemSection(): React.JSX.Element {
   return (
     <Section
       title="Stems"
-      hint="Splits vocals from the instrumental using LALAL.AI. Files are uploaded to their service, and it bills by the audio minute."
+      hint="Splits vocals from the instrumental with LALAL.AI. Billed by the minute."
     >
       <div className="space-y-1.5">
         <div className="text-[12.5px]">Licence key</div>
@@ -1839,12 +1831,12 @@ function StemSection(): React.JSX.Element {
         {minutes !== undefined && (
           <p className="text-[11px] text-muted-foreground">
             {minutes === null
-              ? 'The service would not answer - check the key.'
+              ? 'The service would not answer. Check the key.'
               : `${minutes.toFixed(1)} minutes left on the account.`}
           </p>
         )}
         <p className="text-[11px] leading-snug text-muted-foreground/60">
-          Kept out of settings exports, since an export is something people pass around.
+          Kept out of settings exports.
         </p>
       </div>
 
@@ -1876,7 +1868,7 @@ function StemSection(): React.JSX.Element {
 
       <Row
         label="Model"
-        hint="Perseus unless a particular voice comes out better on an older one."
+        hint="Perseus unless an older one suits the voice better."
       >
         <select
           value={settings.stemSplitter}
@@ -1926,7 +1918,7 @@ function DownloadSection(): React.JSX.Element {
   return (
     <Section
       title="YT2MP3"
-      hint="Pulls the audio off a link and writes it into the folder you are browsing. Whether a given link is yours to take is between you and whoever published it."
+      hint="Pulls the audio off a link into the folder you are browsing."
     >
       <div className="space-y-1.5">
         <div className="text-[12.5px]">Downloader</div>
@@ -1944,15 +1936,14 @@ function DownloadSection(): React.JSX.Element {
         </div>
         {tool?.error && <p className="text-[11px] text-destructive">{tool.error}</p>}
         <p className="text-[11px] leading-snug text-muted-foreground/60">
-          Fetched rather than bundled, and replaced by itself once a week: sites change how
-          they serve audio often enough that a build frozen on release day stops working
-          within a month. It lives beside umakbang&rsquo;s own data, not in your library.
+          Fetched rather than bundled, and updated weekly. It lives beside
+          umakbang&rsquo;s own data, not in your library.
         </p>
       </div>
 
       <Row
         label="Save as"
-        hint="MP3 re-encodes what came down, which costs a second lossy generation. The original stream is the better audio and is usually .m4a."
+        hint="MP3 re-encodes what came down. The original stream is better audio."
       >
         <SegmentedControl
           value={settings.youtubeFormat}
@@ -1969,7 +1960,7 @@ function DownloadSection(): React.JSX.Element {
       {settings.youtubeFormat === 'mp3' && (
         <Row
           label="Bitrate"
-          hint="What comes down is already lossy, so a higher rate here mostly buys file size."
+          hint="Already lossy, so a higher rate mostly buys file size."
         >
           <SegmentedControl
             value={String(settings.youtubeBitrate)}
@@ -1988,7 +1979,7 @@ function DownloadSection(): React.JSX.Element {
         label="Fallback folder"
         hint={
           settings.youtubeDir ||
-          'Where a download goes when you are not standing in a folder - the saved views have nowhere of their own.'
+          'Where a download goes when you are not in a folder.'
         }
       >
         <Button
@@ -2048,7 +2039,7 @@ function RandomExcludeSection({
   return (
     <Section
       title="Not your own work"
-      hint="Folders the random beat button skips and the stats page leaves out, subfolders included."
+      hint="Folders the random button skips and stats leave out."
     >
       {dirs.length === 0 && (
         <p className="text-[11.5px] text-muted-foreground/70">
@@ -2097,7 +2088,7 @@ function FavourUnratedToggle(): React.JSX.Element {
   return (
     <Row
       label="Lean towards unrated"
-      hint="Unrated beats come up four times as often. Rated ones still come up, so the dice never run dry once most of the library has stars on it."
+      hint="Unrated beats come up four times as often."
     >
       <Switch
         checked={favour}
@@ -2135,7 +2126,7 @@ function QuickMoveSection({
   return (
     <Section
       title="Quick access"
-      hint="Drawn in the sidebar, and listed under “Move to” in the right-click menu."
+      hint="Drawn in the sidebar and under “Move to”."
     >
       {targets.length === 0 && (
         <p className="text-[11.5px] text-muted-foreground/70">
@@ -2241,7 +2232,7 @@ function ShortcutsSection(): React.JSX.Element {
   return (
     <Section
       title="Shortcuts"
-      hint="The keys umakbang invented. Ctrl/⌘ combinations - copy, paste, undo, select all - are left alone deliberately: they come from the system and every other app agrees about them."
+      hint="The keys umakbang invented. Ctrl/⌘ combinations are left to the system."
     >
       {SHORTCUT_ACTIONS.map((action) => {
         const key = shortcutKey(shortcuts, action.id)
@@ -2314,7 +2305,7 @@ function UndoSection(): React.JSX.Element {
   return (
     <Section
       title="Undo"
-      hint="Ctrl+Z steps back through file operations - moves, copies, renames and new folders. A delete goes to the Recycle Bin rather than onto this list, since there is no reliable way to bring one back."
+      hint="Steps back through moves, copies, renames and new folders. Deletes go to the Recycle Bin."
     >
       <Row
         label="Operations to remember"
@@ -2351,7 +2342,7 @@ function Section({
 }): React.JSX.Element {
   return (
     <section className="mb-4 last:mb-1">
-      <h3 className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <h3 className="text-[10.5px] font-semibold text-muted-foreground">
         {title}
       </h3>
       {hint && <p className="mb-1 text-[11px] text-muted-foreground/60">{hint}</p>}
@@ -2382,7 +2373,7 @@ function ReprocessRow(): React.JSX.Element {
   return (
     <Row
       label="Reprocess analysed files"
-      hint="Re-runs tempo and key for every file that has an analysed value, using the current detector. Tempos and keys read from tags or file names are left alone. Runs in the background."
+      hint="Re-runs tempo and key. Values from tags and file names are left alone."
     >
       {running ? (
         <div className="flex items-center gap-2">

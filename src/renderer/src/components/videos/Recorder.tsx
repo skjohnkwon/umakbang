@@ -173,13 +173,13 @@ export function Recorder(): React.JSX.Element {
 
               <div className="grid grid-cols-3 gap-2">
                 <label className="block">
-                  <span className="mb-0.5 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="mb-0.5 block text-[10.5px] text-muted-foreground/80">
                     Name
                   </span>
                   <Input value={name} onChange={(event) => setName(event.target.value)} />
                 </label>
                 <label className="block">
-                  <span className="mb-0.5 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="mb-0.5 block text-[10.5px] text-muted-foreground/80">
                     Frame rate
                   </span>
                   <select
@@ -193,7 +193,7 @@ export function Recorder(): React.JSX.Element {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-0.5 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="mb-0.5 block text-[10.5px] text-muted-foreground/80">
                     Size
                   </span>
                   <select

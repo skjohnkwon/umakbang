@@ -80,7 +80,7 @@ export function DropdownMenuLabel({
 }: React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label>): React.JSX.Element {
   return (
     <DropdownMenuPrimitive.Label
-      className={cn('px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground', className)}
+      className={cn('px-2 py-1 text-[10.5px] font-semibold text-muted-foreground', className)}
       {...props}
     />
   )

@@ -171,7 +171,7 @@ export function TagEditor({
             title={
               count === paths.length
                 ? tag
-                : `${tag} - on ${count} of ${paths.length} selected files`
+                : `${tag}, on ${count} of ${paths.length} selected files`
             }
           >
             <span className={count === paths.length ? undefined : 'opacity-60'}>{tag}</span>

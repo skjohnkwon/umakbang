@@ -46,7 +46,7 @@ export function TagBar({ height }: { height: number }): React.JSX.Element {
   return (
     <div data-tour="tags" className="shrink-0 px-2 pt-3">
       <div className="flex items-center justify-between px-1 pb-1">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+        <span className="text-[10px] font-semibold text-muted-foreground/70">
           Tags
         </span>
         {tagFilter.length > 0 && (
@@ -110,9 +110,9 @@ export function TagBar({ height }: { height: number }): React.JSX.Element {
                 type="button"
                 title={
                   dead
-                    ? `Nothing tagged ${tag} is also tagged ${tagFilter.join(' and ')} - ${count} in the library`
+                    ? `Nothing tagged ${tag} is also tagged ${tagFilter.join(' and ')}, ${count} in the library`
                     : active
-                      ? `${available} ${available === 1 ? 'file' : 'files'} - ${count} tagged ${tag} in the library`
+                      ? `${available} ${available === 1 ? 'file' : 'files'}, ${count} tagged ${tag} in the library`
                       : `${available} of the ${count} tagged ${tag}`
                 }
                 aria-pressed={active}

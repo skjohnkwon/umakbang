@@ -131,7 +131,7 @@ export function StemDialog({
                   {job.done}/{job.total}
                 </span>
               </div>
-              <div className="text-[10.5px] uppercase tracking-wider text-muted-foreground/70">
+              <div className="text-[10.5px] text-muted-foreground/70">
                 {job.phase}
                 {job.percent !== undefined ? ` · ${Math.round(job.percent)}%` : ''}
               </div>

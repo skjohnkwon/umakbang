@@ -184,7 +184,7 @@ export function DownloadPage(): React.JSX.Element {
             <>
               <section className="space-y-2.5 rounded-md border bg-card/40 px-3 py-3">
                 <label className="block">
-                  <span className="mb-1 block text-[10.5px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="mb-1 block text-[10.5px] text-muted-foreground/80">
                     Link
                   </span>
                   <Input
@@ -268,7 +268,7 @@ export function DownloadPage(): React.JSX.Element {
                         Stop
                       </Button>
                     </div>
-                    <div className="text-[10.5px] uppercase tracking-wider text-muted-foreground/70">
+                    <div className="text-[10.5px] text-muted-foreground/70">
                       {job.phase === 'converting' ? 'encoding' : job.phase}
                       {job.percent !== undefined ? ` · ${Math.round(job.percent)}%` : ''}
                     </div>
