@@ -9,6 +9,7 @@ import {
   Loader2,
   Package,
   Plus,
+  RefreshCw,
   RotateCcw,
   X
 } from 'lucide-react'
@@ -28,7 +29,12 @@ import {
   normalizeDetailFields,
   type DetailField
 } from '@/lib/player-details'
-import type { Track } from '@shared/types'
+import type {
+  RemoteDevice,
+  RemoteServerState,
+  TailnetStatus,
+  Track
+} from '@shared/types'
 import { useFolderTree } from '@/hooks/useLibraryView'
 import { folderTags } from '@/lib/analysis-scope'
 import { cancelReprocess, reprocessProgress, subscribeReprocess } from '@/lib/analysis'
@@ -617,6 +623,139 @@ function UpdateSection(): React.JSX.Element {
  * The tour replay is outside the gate, since wanting the introduction again is an ordinary
  * thing to want and nothing about it is dangerous.
  */
+/**
+ * What the tailnet looks like from here, while it is being built.
+ *
+ * A diagnostic rather than the Devices list that will live in the sidebar: it shows the
+ * facts the sidebar will later draw as rows - who is reachable, who is serving, what they
+ * are serving - so the networking can be tested against a real second machine before there
+ * is any UI depending on it.
+ *
+ * Every peer is listed, including the ones that are asleep or not running umakbang, because
+ * "why is my other machine not here" is the question this whole feature will generate most,
+ * and a line saying *umakbang is not running there* answers it where an empty list does not.
+ */
+function TailnetSection(): React.JSX.Element {
+  const [state, setState] = useState<{
+    tailnet: TailnetStatus
+    devices: RemoteDevice[]
+    server: RemoteServerState
+  } | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setBusy(true)
+    try {
+      // Together, because a device list that disagrees with this machine's own state is
+      // the confusing case - "nobody can see me" reads very differently when the answer is
+      // that this end is not listening.
+      const [listed, server] = await Promise.all([
+        window.umakbang.remoteDevices(),
+        window.umakbang.remoteServerState()
+      ])
+      setState({ ...listed, server })
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const server = state?.server
+  const tailnet = state?.tailnet
+
+  return (
+    <Section
+      title="Tailnet"
+      hint="Serving is read-only and reaches no further than the tailnet."
+    >
+      <Row
+        label="This machine"
+        hint={
+          server === undefined
+            ? 'Checking.'
+            : server.listening
+              ? `Serving on ${server.address}:${server.port}. Bound to the tailnet address only - not the LAN, and not localhost.`
+              : (server.reason ?? 'Not serving.')
+        }
+      >
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refresh()}>
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}
+          Refresh
+        </Button>
+      </Row>
+
+      {tailnet && tailnet.state !== 'running' && (
+        <p className="text-[11px] text-muted-foreground/70">
+          {tailnet.reason ?? 'Tailscale is not running.'}
+        </p>
+      )}
+
+      {state && state.devices.length === 0 && tailnet?.state === 'running' && (
+        <p className="text-[11px] text-muted-foreground/70">
+          No other machines in this tailnet.
+        </p>
+      )}
+
+      {state?.devices.map((device) => (
+        <div
+          key={device.node.id}
+          className="rounded-md border bg-card/40 px-2.5 py-1.5 text-[11.5px]"
+        >
+          <div className="flex items-center gap-2">
+            <span
+              aria-hidden
+              className={cn(
+                'h-1.5 w-1.5 shrink-0 rounded-full',
+                device.serving
+                  ? 'bg-primary'
+                  : device.node.online
+                    ? 'bg-muted-foreground/50'
+                    : 'bg-muted-foreground/25'
+              )}
+            />
+            <span className="font-medium">{device.node.hostName || device.node.name}</span>
+            <span className="text-[10.5px] text-muted-foreground/60">{device.node.os}</span>
+            <span className="ml-auto text-[10.5px] text-muted-foreground/60">
+              {device.serving
+                ? `umakbang ${device.hello?.device.version ?? ''}`
+                : device.node.online
+                  ? (device.reason ?? 'Not serving.')
+                  : 'Offline'}
+            </span>
+          </div>
+
+          <div className="tnum mt-0.5 pl-3.5 text-[10.5px] text-muted-foreground/50">
+            {device.node.ipv4 ?? 'no address'} · {device.node.name}
+          </div>
+
+          {device.hello?.libraries.map((library) => (
+            <div key={library.id} className="mt-1 pl-3.5 text-[11px]">
+              <span className="text-foreground/80">{library.label}</span>
+              <span className="tnum ml-2 text-[10.5px] text-muted-foreground/50">
+                {library.id}
+                {library.generation === undefined ? ' · never scanned' : ''}
+              </span>
+            </div>
+          ))}
+
+          {device.serving && device.hello?.libraries.length === 0 && (
+            <div className="mt-1 pl-3.5 text-[11px] text-muted-foreground/60">
+              Serving, but no library is open there.
+            </div>
+          )}
+        </div>
+      ))}
+    </Section>
+  )
+}
+
 function DeveloperSection(): React.JSX.Element {
   const settings = useLibrary((s) => s.settings)
   const patchSettings = useLibrary((s) => s.patchSettings)
@@ -659,6 +798,8 @@ function DeveloperSection(): React.JSX.Element {
           </Row>
         )}
       </Section>
+
+      <TailnetSection />
 
       <Section title="Tour">
         <Row
