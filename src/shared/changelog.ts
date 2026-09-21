@@ -20,6 +20,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.3.0',
+    date: '2026-09-21',
+    changes: [
+      'Favourite forty plugins at once. FL offers it one plugin at a time, which is fine for the one you just installed and miserable for the forty you have had for a year. Settings, Plugins opens a manager with the scan on one side and your favourites on the other: search it, narrow it by format, select a run and move the lot across. It refuses to write while FL is open and says so before you pick anything, because FL rewrites that database when it quits and would throw the change away.',
+      'A plugin can be more than one format, and is now filed under every one it was found in. 63 of the 606 here were kept under only the first, so filtering to VST3 hid plugins that had a VST3.',
+      'Your settings follow you between machines. Each one records when its own settings last changed, that stamp travels with them, and the newest wins - so there is no machine to elect as the authority and nothing to configure. It happens on launch, with a button for when you want it sooner.',
+      'Folders are deliberately left out of that. A path names a place on a disk, and the disk is the thing two machines do not share, so a downloads folder arriving from the other computer could only ever be wrong - and because those settings are filled in only when empty, it would have stayed wrong for good. Any that already arrived are mended.',
+      'Another machine is a Devices section under Folders, grouped by the computer serving it, rather than a row in the folder tree indistinguishable from a folder on this disk. It is out of the Folders menu too, where it used to be listed among your own folders as something to remove.',
+      'The library count and the whole Stats page are about your own music again. Mounting another machine was adding its files to the list behind both, so a third of a million files quietly joined your library and every figure on a page about your own work answered for two people at once.',
+      'Packing a project brings the audio FL consolidated for it. Those tracks are recorded as a variable rather than a path, so they did not look like library files and were left out - one project here packed fifteen samples and silently dropped four tracks of its own audio, under a note saying they were "factory content, most likely".',
+      'Stats can be switched off in Settings, Pages, which takes its sidebar entry with it and stops anything being computed for it.',
+      'The library dropdown is gone from the title bar. Everything in it is reachable without it: the plus in the sidebar adds a folder, a right-click on a folder removes it, and Rescan Library is in the application menu beside the other library-wide actions.'
+    ]
+  },
+  {
     version: '0.2.0',
     date: '2026-09-21',
     changes: [
