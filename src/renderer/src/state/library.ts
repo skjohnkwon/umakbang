@@ -35,6 +35,8 @@ import { inAnalysisScope } from '@/lib/analysis-scope'
 import { plausibleBpm } from '@shared/tempo'
 import { pathKey } from '@shared/path-key'
 import { absolutePath, baseName, parentPath, relativePath, samePath } from '@/lib/paths'
+import { relFor, rootFor } from '@shared/roots'
+import { classifyKind } from '@shared/files'
 
 /**
  * The key a track's own entries live under, in tags, ratings, notes and the detected maps.
@@ -287,7 +289,11 @@ interface LibraryState {
   adoptRoots: (roots: LibraryRoot[]) => void
   addTracks: (incoming: Track[]) => void
   /** A folder was re-read: fold in what it holds now. `dir` is absolute. */
-  applyFolder: (dir: string, incoming: Track[]) => void
+  /**
+   * `prune` is set only when a person pressed Refresh *and* the folder was genuinely read.
+   * It is what turns a dim into a deletion - see the note inside.
+   */
+  applyFolder: (dir: string, incoming: Track[], prune?: boolean) => void
   removeTracks: (paths: string[]) => void
   /**
    * Marks files as ones umakbang can no longer read, so their rows dim instead of going.
@@ -361,6 +367,51 @@ interface LibraryState {
    * exists. Returns an error message, or null when it worked.
    */
   renameTag: (from: string, to: string) => string | null
+  /**
+   * Whether a path lives on a peer rather than on this machine.
+   *
+   * The one question every write has to ask. A remote library is read-only - `fs-ops` runs
+   * here, against a path that names nothing here, so a rename would fail confusingly and a
+   * move of a mixed selection would half-happen. The menu hides the actions; this is what
+   * stops the keyboard, which never goes near a menu.
+   */
+  isRemote: (path: string) => boolean
+  /** True when any of these are on a peer. What a multi-selection has to ask. */
+  anyRemote: (paths: string[]) => boolean
+  /** Unpacks a .zip into a folder beside it, then shows what came out. */
+  extractArchive: (path: string) => Promise<void>
+  /** Copies remote files into the download folder. Never a move - the source is read-only. */
+  copyRemoteHere: (paths: string[]) => Promise<void>
+  /**
+   * Puts a row in the destination folder for a file that is still on its way.
+   *
+   * There is nothing on disk to list until the copy finishes - only a `.part`, which is not
+   * an indexable extension - so without this the folder stays empty while the bytes arrive
+   * and the copy looks like it failed.
+   */
+  addPendingTrack: (target: string, size: number) => void
+  /**
+   * Files being copied from another machine, as a fraction 0..1, keyed by their remote path.
+   *
+   * A map in the store rather than a field on `Track`, for the same reason `unreachable` is:
+   * tracks are interned and mutated in place, so a field on one would not repaint its row,
+   * and this is not a fact about the file - it is what is happening to it right now.
+   *
+   * -1 means "started, size unknown", which the row draws as an indeterminate bar.
+   */
+  downloading: Map<string, number>
+  setDownloadProgress: (
+    path: string,
+    received: number,
+    total: number,
+    target?: string,
+    bps?: number,
+    verifying?: boolean
+  ) => void
+  /** Bytes per second for the copy in flight, or 0. Shown beside the percentage. */
+  downloadSpeed: number
+  /** True while what landed is being checked against the original's hash. */
+  verifying: boolean
   setSort: (key: SortKey) => void
   patchSettings: (patch: Partial<Settings>) => void
 
@@ -532,6 +583,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   // file at once.
   recursive: false,
   typeFilter: { kinds: [], exts: [] },
+  downloading: new Map(),
+  downloadSpeed: 0,
+  verifying: false,
   tagFilter: [],
   importing: null,
   revealNonce: 0,
@@ -653,7 +707,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
    * timestamp moved is updated in place *and* has everything derived from its contents thrown
    * away: the waveform, the tempo and the key all described the take before this one.
    */
-  applyFolder: (dir, incoming) => {
+  applyFolder: (dir, incoming, prune = false) => {
     const { byPath, tracks } = get()
     const stale: string[] = []
     const arrived: Track[] = []
@@ -726,7 +780,21 @@ export const useLibrary = create<LibraryState>((set, get) => ({
      * line is the next full scan: it walks the disk for real and sends `removed`, and that
      * diff is allowed to delete rows because it has actually looked.
      */
-    if (gone.length > 0) get().markUnreachable(gone)
+    if (gone.length > 0) {
+      /*
+       * Refresh is allowed to delete; the watcher is not.
+       *
+       * The dimming below exists because a watcher tick cannot tell a deleted file from a
+       * folder it could not read - a permission, an unplugged drive - and pruning on that
+       * would empty a folder out of the index while looking like a tidy-up. Neither half of
+       * that applies here: `prune` is only ever set when somebody pressed Refresh, which is
+       * a person saying "read this again, I know it changed", and `refreshFolder` only sets
+       * it when the read actually succeeded. Asking to re-read and then being shown the file
+       * you just deleted, still struck through, is the app disagreeing with the disk.
+       */
+      if (prune) get().removeTracks(gone)
+      else get().markUnreachable(gone)
+    }
     // Anything the folder does hold is reachable, whatever we thought a moment ago. Cheap:
     // `clearUnreachable` returns straight back out while nothing is marked, which is almost
     // always, so the ordinary save-and-refresh pays nothing for this.
@@ -993,6 +1061,100 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     set({ tags: next })
   },
 
+  isRemote: (path) => Boolean(rootFor(get().roots, path)?.remote),
+
+  anyRemote: (paths) => {
+    const { roots } = get()
+    return paths.some((path) => Boolean(rootFor(roots, path)?.remote))
+  },
+
+  setDownloadProgress: (path, received, total, target, bps, verifying) => {
+    const next = new Map(get().downloading)
+    /*
+     * Keyed by where it is going, not where it came from.
+     *
+     * The row worth watching is the one in the folder it is arriving into - standing in the
+     * remote folder watching a bar is not what anybody does after pressing copy. It also
+     * means the bar and the eventual file share a key, so the row does not jump when the
+     * copy lands.
+     */
+    const key = target ?? path
+    if (received < 0) {
+      next.delete(key)
+      // A copy that failed leaves nothing on disk, so the row it was drawing has to go with
+      // it. One that succeeded is replaced by the real thing when the folder re-reads, and
+      // removing it here first is what stops the two versions fighting over the same path.
+      get().removeTracks([key])
+    } else {
+      next.set(key, total > 0 ? Math.min(1, received / total) : -1)
+      if (target) get().addPendingTrack(target, total)
+    }
+    // A fresh Map every time: the table subscribes by identity, and mutating in place would
+    // move the bar without repainting anything.
+    set({
+      downloading: next,
+      downloadSpeed: next.size === 0 ? 0 : (bps ?? 0),
+      verifying: next.size > 0 && Boolean(verifying)
+    })
+  },
+
+  addPendingTrack: (target, size) => {
+    const { byPath, roots } = get()
+    if (byPath.has(target)) return
+    const rel = relFor(roots, target)
+    // Landing somewhere outside the library is allowed - it is just a folder on disk - but
+    // there is no row to draw for it, and inventing one would put a file in a tree it does
+    // not belong to.
+    if (!rel) return
+    const name = baseName(target)
+    const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+    const cut = rel.lastIndexOf('/')
+    get().addTracks([
+      {
+        path: target,
+        rel,
+        dir: parentPath(target),
+        relDir: cut === -1 ? '' : rel.slice(0, cut),
+        name,
+        ext,
+        size,
+        mtimeMs: Date.now(),
+        kind: classifyKind(ext),
+        // Not until it is all here. A half-written file handed to the transport is a decode
+        // error, and the row already says what is happening to it.
+        playable: false
+      }
+    ])
+  },
+
+  extractArchive: async (path) => {
+    const name = baseName(path)
+    get().notify(`Unpacking ${name}…`)
+    const result = await window.umakbang.extractArchive(path)
+    if (result.error) {
+      get().notify(result.error, 'error')
+      return
+    }
+    get().notify(`Unpacked ${name} into ${baseName(result.dir ?? '')}.`)
+  },
+
+  copyRemoteHere: async (paths) => {
+    const label = paths.length === 1 ? baseName(paths[0]) : `${paths.length} files`
+    get().notify(`Copying ${label}…`)
+    const result = await window.umakbang.remoteDownload(paths)
+    if (result.failures.length > 0) {
+      // Named rather than counted when it is one thing: "1 file failed" tells you nothing
+      // you can act on, and these fail for reasons worth reading.
+      get().notify(result.failures[0], 'error')
+      return
+    }
+    get().notify(
+      result.written.length === 1
+        ? `Copied ${baseName(result.written[0])}.`
+        : `Copied ${result.written.length} files.`
+    )
+  },
+
   renameTag: (from, to) => {
     const next = to.trim()
     if (!next) return 'A tag needs a name.'
@@ -1136,6 +1298,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   clearClipboard: () => set({ clipboard: null }),
 
   transferPaths: async (paths, destination, mode) => {
+    if (get().anyRemote([...paths, destination])) {
+      get().notify('That library is on another machine - umakbang can browse it but not change it.', 'error')
+      return
+    }
     if (paths.length === 0) return
     const result = await window.umakbang.transfer(paths, destination, mode)
     applyTransfer(result, mode)
@@ -1179,6 +1345,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   pasteInto: async (relDir) => {
+    if (get().anyRemote([absolutePath(get().roots, relDir)])) {
+      get().notify('That library is on another machine - umakbang can browse it but not change it.', 'error')
+      return
+    }
     const { clipboard, roots } = get()
     if (!clipboard || roots.length === 0) return
     const destination = absolutePath(roots, relDir)
@@ -1195,6 +1365,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   duplicatePaths: async (paths) => {
+    if (get().anyRemote(paths)) {
+      get().notify('That library is on another machine - umakbang can browse it but not change it.', 'error')
+      return
+    }
     if (paths.length === 0) return
     // Each entry is copied beside itself rather than into one shared folder, so
     // duplicating a multi-folder selection doesn't quietly gather it all in one place.
@@ -1223,6 +1397,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   trashPaths: async (paths) => {
+    if (get().anyRemote(paths)) {
+      get().notify('That library is on another machine - umakbang can browse it but not delete from it.', 'error')
+      return
+    }
     if (paths.length === 0) return
     const result = await window.umakbang.trash(paths)
 
@@ -1269,6 +1447,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   runRedo: async () => runReversal('redo'),
 
   createFolder: async (relDir, name) => {
+    if (get().anyRemote([absolutePath(get().roots, relDir)])) {
+      get().notify('That library is on another machine - umakbang can browse it but not change it.', 'error')
+      return null
+    }
     const { roots } = get()
     if (roots.length === 0) return 'No library is open.'
     const result = await window.umakbang.createFolder(absolutePath(roots, relDir), name)
@@ -1288,6 +1470,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   createFolderWithSelection: async (relDir, name, paths) => {
+    if (get().anyRemote([absolutePath(get().roots, relDir), ...paths])) {
+      get().notify('That library is on another machine - umakbang can browse it but not change it.', 'error')
+      return null
+    }
     const { roots } = get()
     if (roots.length === 0) return 'No library is open.'
     if (paths.length === 0) return 'Nothing is selected.'
@@ -1315,6 +1501,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   renameEntry: async (path, newName, directory) => {
+    if (get().anyRemote([path])) {
+      get().notify('That library is on another machine - umakbang can browse it but not rename in it.', 'error')
+      return null
+    }
     const result = await window.umakbang.renameEntry(path, newName)
     if (result.error) {
       // The rename popover shows the sentence; this is what makes the row behind it agree.
@@ -2307,8 +2497,11 @@ export function connectLibraryEvents(): () => void {
   const unsubscribes = [
     window.umakbang.onLibraryReset(({ roots }) => useLibrary.getState().resetLibrary(roots)),
     window.umakbang.onLibraryRoots(({ roots }) => useLibrary.getState().adoptRoots(roots)),
-    window.umakbang.onFolderChanged(({ dir, tracks }) =>
-      useLibrary.getState().applyFolder(dir, tracks)
+    window.umakbang.onRemoteDownload(({ path, received, total, target, bps, verifying }) =>
+      useLibrary.getState().setDownloadProgress(path, received, total, target, bps, verifying)
+    ),
+    window.umakbang.onFolderChanged(({ dir, tracks, prune }) =>
+      useLibrary.getState().applyFolder(dir, tracks, prune)
     ),
     window.umakbang.onTracks((tracks) => useLibrary.getState().addTracks(tracks)),
     window.umakbang.onRemoved((paths) => useLibrary.getState().removeTracks(paths)),

@@ -15,6 +15,17 @@ import type { LibraryRoot } from './types'
  * label that drifted would silently orphan a folder's sort order, its tags and its pins.
  */
 
+/**
+ * The key a root's saved index is filed under.
+ *
+ * A path alone is not unique once roots can be remote: two machines can both serve
+ * `Z:\SECRET SAUCE`, and they are not the same library. The device id scopes it. Local
+ * roots keep the bare path so no existing index is orphaned by this existing.
+ */
+export function indexKeyFor(root: LibraryRoot): string {
+  return root.remote ? `${root.remote.deviceId}|${root.path}` : root.path
+}
+
 /** A label the given roots don't already use, derived from the folder's own name. */
 export function labelForRoot(path: string, existing: LibraryRoot[]): string {
   const base = path.split(/[\\/]/).filter(Boolean).pop() ?? path

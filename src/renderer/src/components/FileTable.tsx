@@ -551,6 +551,13 @@ export function FileTable({
   const recursive = useLibrary((s) => s.recursive)
   const savedColumns = useLibrary((s) => s.settings.columns)
   const quickMove = useLibrary((s) => s.settings.quickMove)
+  const anyRemote = useLibrary((s) => s.anyRemote)
+  const downloading = useLibrary((s) => s.downloading)
+  // Asked once: it names the machine, which does not change while the app is open.
+  const [localName, setLocalName] = useState<string>()
+  useEffect(() => {
+    void window.umakbang.remoteSelfName().then(setLocalName)
+  }, [])
   const randomExcludeDirs = useLibrary((s) => s.settings.randomExcludeDirs)
   // Subscribed once here and read by the key handler, like every other setting the rows
   // need - a `useLibrary` per row is the subscription this table exists to avoid.
@@ -1000,6 +1007,15 @@ export function FileTable({
       openExternally: () => {
         const [path] = selectedRef.current.paths
         if (path) void window.umakbang.openExternally(path)
+      },
+      extract: () => {
+        const [path] = selectedRef.current.paths
+        if (path) void useLibrary.getState().extractArchive(path)
+      },
+      copyHere: () => {
+        const paths = selectedRef.current.tracks.map((track) => track.path)
+        if (paths.length === 0) return
+        void useLibrary.getState().copyRemoteHere(paths)
       },
       goToFolder: () => {
         const track = selectedRef.current.tracks[0]
@@ -1471,6 +1487,18 @@ export function FileTable({
     clipboardCount: clipboard?.paths.length ?? 0,
     revealLabel,
     quickMove,
+    /**
+     * Where it would land matters as much as what is selected.
+     *
+     * Both are asked because the two failures are different: acting *on* remote files, and
+     * pasting or making a folder *into* a remote folder. A mixed selection counts as remote
+     * - half a move is worse than none.
+     */
+    localName,
+    readOnly:
+      anyRemote(selected.paths) ||
+      ((menuTarget.dir ?? currentDir) !== null &&
+        anyRemote([absolutePath(roots, (menuTarget.dir ?? currentDir) as string)])),
     actions
   }
 
@@ -1638,6 +1666,7 @@ export function FileTable({
                       analysing={analysing.has(row.track.path)}
                       unreachable={unreachable.has(row.track.path)}
                       splitting={stemJob?.path === row.track.path}
+                      downloading={downloading.get(row.track.path)}
                       keyDetected={detectedKey[key] !== undefined}
                       keyUnsure={(detectedKeyFit[key] ?? 1) < UNSURE_KEY_FIT}
                       note={notes[key] ?? ''}
@@ -1848,6 +1877,8 @@ interface FileCellContext {
   analysing: boolean
   /** Stems are being separated for this file right now. */
   splitting: boolean
+  /** 0..1 while this file is being copied from another machine, -1 if the size is unknown. */
+  downloading?: number
   /**
    * The file is not where umakbang left it - moved or deleted outside the app, or on
    * something that stopped answering. The row stays and dims; see `applyFolder`.
@@ -1906,6 +1937,33 @@ function fileCell(id: ColumnId, ctx: FileCellContext): React.ReactNode {
         />
       )
     case 'waveform':
+      /*
+       * A file on its way over draws its progress where its waveform will be.
+       *
+       * The same slot rather than a second column: this is the one place on the row already
+       * given over to saying something about the audio, and a bar that appears somewhere
+       * else moves every other cell while you are watching it. It also answers the question
+       * a waveform could not yet answer anyway - there are no bytes here to draw from until
+       * the copy finishes.
+       */
+      if (ctx.downloading !== undefined) {
+        const fraction = ctx.downloading
+        return (
+          <div className="flex h-full items-center pr-2" title="Copying from another machine">
+            <div className="h-1 w-full overflow-hidden rounded bg-secondary">
+              <div
+                className={cn(
+                  'h-full bg-primary',
+                  // A size the peer never declared: nothing to be a fraction of, so it
+                  // paces instead of lying about how far along it is.
+                  fraction < 0 ? 'w-1/3 animate-pulse' : 'transition-[width] duration-200'
+                )}
+                style={fraction < 0 ? undefined : { width: `${Math.round(fraction * 100)}%` }}
+              />
+            </div>
+          </div>
+        )
+      }
       // No bytes to draw from, and asking for them is a `fetch` per row that can only 404.
       if (ctx.unreachable) return <span />
       return track.playable ? (
@@ -2230,6 +2288,7 @@ const FileRow = memo(function FileRow({
   track,
   analysing,
   splitting,
+  downloading,
   unreachable,
   keyDetected,
   keyUnsure,
@@ -2263,6 +2322,8 @@ const FileRow = memo(function FileRow({
   analysing: boolean
   /** Stems are being separated for this file right now. */
   splitting: boolean
+  /** 0..1 while this file is being copied from another machine, -1 if the size is unknown. */
+  downloading?: number
   /**
    * The file is no longer where umakbang left it. A plain boolean resolved by the table from
    * one subscription, so `memo` compares it the way it compares everything else - a mutable
@@ -2305,6 +2366,7 @@ const FileRow = memo(function FileRow({
     showFolder,
     analysing,
     splitting,
+  downloading,
     unreachable,
     keyDetected,
     keyUnsure,

@@ -131,11 +131,31 @@ export interface ColumnState {
  * One folder the library is built from. See `src/shared/roots.ts` for why the label is
  * stored rather than derived.
  */
+/**
+ * Where a root lives, when it does not live on this machine.
+ *
+ * `path` on the root stays the *peer's* path - `Z:\SECRET SAUCE` on a Mac - because every
+ * row in that library says so, and rewriting a third of a million of them into a local
+ * fiction would buy nothing. Nothing on this machine ever opens it; it is an address in the
+ * peer's namespace, and `rootFor`/`relFor` already compare paths case-insensitively with
+ * separators folded, so a Windows path resolves here without special-casing.
+ */
+export interface RemoteRootRef {
+  deviceId: string
+  /** For the UI, so a row can say which machine rather than which address. */
+  deviceName: string
+  /** The tailnet address to dial. */
+  host: string
+  libraryId: string
+}
+
 export interface LibraryRoot {
-  /** Absolute path of the folder on disk. */
+  /** Absolute path of the folder on disk - or on the peer's disk, when `remote` is set. */
   path: string
   /** First segment of every relative path underneath it. Assigned once, never changed. */
   label: string
+  /** Set when this root is served by another machine. Absent for an ordinary folder. */
+  remote?: RemoteRootRef
 }
 
 export interface Settings {
@@ -473,6 +493,18 @@ export interface Settings {
    * an index cache quietly wrong from then on.
    */
   deviceId: string
+  /**
+   * Where a file copied off another machine lands.
+   *
+   * A remote library is read-only, so bringing a file over is a copy and never a move -
+   * nothing leaves the machine that owns it. This is the one place those copies go, rather
+   * than asking each time: the answer is the same every time, and being asked is what makes
+   * people stop doing it.
+   *
+   * Seeded to the system Downloads folder on first run, then left alone so choosing
+   * somewhere else sticks.
+   */
+  remoteDownloadDir: string
   /**
    * Whether this machine answers for its library on the tailnet.
    *
@@ -909,6 +941,7 @@ export const DEFAULT_SETTINGS: Settings = {
   resetOnLaunch: false,
   // Seeded on first run by `initStore`, which is the only place that can generate one.
   deviceId: '',
+  remoteDownloadDir: '',
   shareLibrary: true
 }
 

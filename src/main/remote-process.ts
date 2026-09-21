@@ -17,6 +17,7 @@
  * whole library to an airport.
  */
 
+import { createHash } from 'node:crypto'
 import { createReadStream, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createGzip } from 'node:zlib'
@@ -255,6 +256,35 @@ function sendFile(request: IncomingMessage, response: ServerResponse, file: stri
 }
 
 /**
+ * A file's SHA-256, for the other end to check what it received against.
+ *
+ * Worth the read. A file is fetched as several ranges at once and written into one
+ * preallocated file at offsets - a range that arrives short, or lands at the wrong place,
+ * produces a file of exactly the right size with the wrong bytes in it, which no amount of
+ * checking `content-length` would notice.
+ *
+ * Streamed rather than read whole: this is asked about the same files that are large enough
+ * to be worth fetching in parallel in the first place.
+ */
+function sendHash(response: ServerResponse, file: string): void {
+  let size: number
+  try {
+    size = statSync(file).size
+  } catch {
+    fail(response, 404)
+    return
+  }
+  const hash = createHash('sha256')
+  const source = createReadStream(file)
+  source.on('error', () => {
+    if (!response.headersSent) fail(response, 500)
+    else response.destroy()
+  })
+  source.on('data', (chunk) => hash.update(chunk))
+  source.on('end', () => sendJson(response, { algo: 'sha256', hex: hash.digest('hex'), size }))
+}
+
+/**
  * The route table.
  *
  * Everything that names a path goes through `resolveInLibrary`, without exception - a route
@@ -295,6 +325,22 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
         return
       }
       sendGzipped(response, patchFileFor(library.path))
+      return
+    }
+
+    case '/hash': {
+      const library = libraryOf(params)
+      const rel = params.get('rel')
+      if (!library || !rel) {
+        fail(response, 404)
+        return
+      }
+      const file = resolveInLibrary(library, rel)
+      if (!file) {
+        fail(response, 404)
+        return
+      }
+      sendHash(response, file)
       return
     }
 

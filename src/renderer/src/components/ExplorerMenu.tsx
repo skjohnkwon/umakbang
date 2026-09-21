@@ -5,6 +5,8 @@ import {
   Clapperboard,
   ClipboardPaste,
   Copy,
+  Download,
+  FolderArchive,
   CopyPlus,
   Dices,
   ExternalLink,
@@ -60,6 +62,10 @@ export interface ExplorerActions {
   newFolder: (relDir: string) => void
   /** Makes a folder in `relDir` and moves the selection into it. */
   newFolderWithSelection: (relDir: string) => void
+  /** Copies the selection off the machine it lives on, into the download folder. */
+  copyHere: () => void
+  /** Unpacks a .zip into a folder beside it. */
+  extract: () => void
   /** Files the selection into one of the configured folders. */
   moveTo: (destination: string) => void
   /** Asks for a folder and files the selection into that. */
@@ -101,6 +107,18 @@ export interface MenuContext {
   revealLabel: string
   /** The folders offered under "Move to", from settings. */
   quickMove: QuickMoveTarget[]
+  /**
+   * Set when what was right-clicked lives on another machine.
+   *
+   * Everything that would change a file is left out of the menu rather than shown greyed:
+   * a remote library is read-only, that is not a temporary condition to be explained per
+   * item, and a list of a dozen disabled entries is worse to read than a shorter list.
+   * What stays is everything that only reads - play, reveal, copy the path, make a video
+   * of it.
+   */
+  readOnly?: boolean
+  /** This machine's name, for the one action a remote selection does offer. */
+  localName?: string
   actions: ExplorerActions
 }
 
@@ -156,6 +174,7 @@ function useTrashKey(): string {
 /** The full menu for a row, acting on the whole selection it belongs to. */
 export function SelectionMenuItems({ context }: { context: MenuContext }): React.JSX.Element {
   const { selected, targetDir, clipboardCount, revealLabel, quickMove, actions } = context
+  const writable = !context.readOnly
   const chord = useChord()
   const renameKey = useRenameKey()
   const trashKey = useTrashKey()
@@ -194,63 +213,91 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
           Open in default app
         </ContextMenuItem>
       )}
-
-      <ContextMenuSeparator />
-      <ContextMenuItem onSelect={actions.cut}>
-        <Scissors className="h-3.5 w-3.5" />
-        Cut
-        <Shortcut>{chord('X')}</Shortcut>
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={actions.copy}>
-        <Copy className="h-3.5 w-3.5" />
-        Copy
-        <Shortcut>{chord('C')}</Shortcut>
-      </ContextMenuItem>
-      <ContextMenuItem
-        disabled={clipboardCount === 0 || targetDir === null}
-        onSelect={() => targetDir !== null && actions.paste(targetDir)}
-      >
-        <ClipboardPaste className="h-3.5 w-3.5" />
-        {/* Says where it lands, because a right-click on a folder pastes *into* it. */}
-        {single && only.directory ? 'Paste into folder' : 'Paste'}
-        <Shortcut>{chord('V')}</Shortcut>
-      </ContextMenuItem>
-      <ContextMenuItem onSelect={actions.duplicate}>
-        <CopyPlus className="h-3.5 w-3.5" />
-        Duplicate
-        <Shortcut>{chord('D')}</Shortcut>
-      </ContextMenuItem>
-
-      <ContextMenuSeparator />
-      <ContextMenuItem disabled={!single} onSelect={actions.rename}>
-        <PenLine className="h-3.5 w-3.5" />
-        Rename…
-        <Shortcut>{renameKey}</Shortcut>
-      </ContextMenuItem>
-      {taggableCount > 0 && (
-        <ContextMenuItem onSelect={actions.renameWithMetadata}>
-          <Type className="h-3.5 w-3.5" />
-          {taggableCount === 1 ? 'Rename with key and BPM' : `Rename ${taggableCount} with key and BPM`}
+      {/* The only action a remote selection gets that puts bytes anywhere, and it puts them
+          *here*: the library it came from is read-only and nothing leaves it. Which is why
+          this says copy and not move, however much the gesture looks like filing. */}
+      {context.readOnly && selected.tracks.length > 0 && (
+        <ContextMenuItem onSelect={actions.copyHere}>
+          <Download className="h-3.5 w-3.5" />
+          {selected.tracks.length === 1
+            ? `Copy to ${context.localName ?? 'this machine'}`
+            : `Copy ${selected.tracks.length.toLocaleString()} to ${context.localName ?? 'this machine'}`}
         </ContextMenuItem>
       )}
-      <ContextMenuItem onSelect={actions.remove}>
-        <Trash2 className="h-3.5 w-3.5" />
-        Delete
-        <Shortcut>{trashKey}</Shortcut>
-      </ContextMenuItem>
 
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        disabled={targetDir === null}
-        onSelect={() => targetDir !== null && actions.newFolder(targetDir)}
-      >
-        <FolderPlus className="h-3.5 w-3.5" />
-        New folder…
-      </ContextMenuItem>
+      {/* Beside opening it rather than down among the file operations: unpacking an archive
+          is how you look inside one, which is the same question as opening it. Only `.zip` -
+          see `archives.ts` for why the others are not offered. */}
+      {writable && singleFile && file?.ext === 'zip' && (
+        <ContextMenuItem onSelect={actions.extract}>
+          <FolderArchive className="h-3.5 w-3.5" />
+          Extract here
+        </ContextMenuItem>
+      )}
+
+      {writable && (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={actions.cut}>
+            <Scissors className="h-3.5 w-3.5" />
+            Cut
+            <Shortcut>{chord('X')}</Shortcut>
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={actions.copy}>
+            <Copy className="h-3.5 w-3.5" />
+            Copy
+            <Shortcut>{chord('C')}</Shortcut>
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={clipboardCount === 0 || targetDir === null}
+            onSelect={() => targetDir !== null && actions.paste(targetDir)}
+          >
+            <ClipboardPaste className="h-3.5 w-3.5" />
+            {/* Says where it lands, because a right-click on a folder pastes *into* it. */}
+            {single && only.directory ? 'Paste into folder' : 'Paste'}
+            <Shortcut>{chord('V')}</Shortcut>
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={actions.duplicate}>
+            <CopyPlus className="h-3.5 w-3.5" />
+            Duplicate
+            <Shortcut>{chord('D')}</Shortcut>
+          </ContextMenuItem>
+
+          <ContextMenuSeparator />
+          <ContextMenuItem disabled={!single} onSelect={actions.rename}>
+            <PenLine className="h-3.5 w-3.5" />
+            Rename…
+            <Shortcut>{renameKey}</Shortcut>
+          </ContextMenuItem>
+          {taggableCount > 0 && (
+            <ContextMenuItem onSelect={actions.renameWithMetadata}>
+              <Type className="h-3.5 w-3.5" />
+              {taggableCount === 1
+                ? 'Rename with key and BPM'
+                : `Rename ${taggableCount} with key and BPM`}
+            </ContextMenuItem>
+          )}
+          <ContextMenuItem onSelect={actions.remove}>
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+            <Shortcut>{trashKey}</Shortcut>
+          </ContextMenuItem>
+
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={targetDir === null}
+            onSelect={() => targetDir !== null && actions.newFolder(targetDir)}
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            New folder…
+          </ContextMenuItem>
+        </>
+      )}
       {/* Gathering what is already selected, which is the way a folder usually comes to be
           wanted: you find the three takes of one beat and then need somewhere to put them.
           Doing it by hand is make the folder, lose the selection, find the files again. */}
-      <ContextMenuItem
+      {writable && (
+        <ContextMenuItem
         disabled={targetDir === null}
         onSelect={() => targetDir !== null && actions.newFolderWithSelection(targetDir)}
       >
@@ -258,9 +305,11 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
         {selected.paths.length === 1
           ? 'New folder with this item…'
           : `New folder with ${selected.paths.length.toLocaleString()} items…`}
-      </ContextMenuItem>
+        </ContextMenuItem>
+      )}
       {/* The folders you file into most, from settings - the common case is two clicks
           rather than a drag across the whole tree. */}
+      {writable && (
       <ContextMenuSub>
         <ContextMenuSubTrigger>
           <FolderInput className="h-3.5 w-3.5" />
@@ -289,9 +338,10 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
           </ContextMenuItem>
         </ContextMenuSubContent>
       </ContextMenuSub>
+      )}
       {/* The one action that sends a file off the machine, and it costs money per audio
           minute - so it asks before it goes. */}
-      {playableCount > 0 && (
+      {writable && playableCount > 0 && (
         <ContextMenuItem onSelect={actions.splitStems}>
           <Split className="h-3.5 w-3.5" />
           {playableCount === 1 ? 'Split vocals…' : `Split vocals from ${playableCount} files…`}
@@ -402,23 +452,27 @@ export function FolderMenuItems({
   return (
     <>
       <ContextMenuLabel>{label}</ContextMenuLabel>
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        disabled={clipboardCount === 0 || targetDir === null}
-        onSelect={() => targetDir !== null && actions.paste(targetDir)}
-      >
-        <ClipboardPaste className="h-3.5 w-3.5" />
-        Paste
-        <Shortcut>{chord('V')}</Shortcut>
-      </ContextMenuItem>
-      <ContextMenuItem
-        disabled={targetDir === null}
-        onSelect={() => targetDir !== null && actions.newFolder(targetDir)}
-      >
-        <FolderPlus className="h-3.5 w-3.5" />
-        New folder…
-        <Shortcut>{chord('⇧', 'N')}</Shortcut>
-      </ContextMenuItem>
+      {!context.readOnly && (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={clipboardCount === 0 || targetDir === null}
+            onSelect={() => targetDir !== null && actions.paste(targetDir)}
+          >
+            <ClipboardPaste className="h-3.5 w-3.5" />
+            Paste
+            <Shortcut>{chord('V')}</Shortcut>
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={targetDir === null}
+            onSelect={() => targetDir !== null && actions.newFolder(targetDir)}
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            New folder…
+            <Shortcut>{chord('⇧', 'N')}</Shortcut>
+          </ContextMenuItem>
+        </>
+      )}
 
       <ContextMenuSeparator />
       <ContextMenuItem onSelect={actions.selectAll}>
