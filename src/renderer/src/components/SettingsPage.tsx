@@ -798,12 +798,12 @@ function PluginsSection(): React.JSX.Element {
         hint="Read from FL Studio's own plugin database - what FL has found, which is what decides whether a project opens."
       >
         <Row
-          label="FL Studio user data folder"
+          label="Plugin database folder"
           hint={
             mine === null
               ? 'Looking…'
               : mine.missing
-                ? `Nothing at ${mine.from}. FL writes that folder when it scans for plugins, so either it has not, or this is pointing somewhere else.`
+                ? `Nothing at ${mine.from}. FL writes that folder when it scans for plugins - so either it has not, or this is pointing somewhere else. The FL Studio user data folder works too; it is found inside.`
                 : `${mine.names.length} plugins, read from ${mine.from}`
           }
         >
@@ -812,7 +812,10 @@ function PluginsSection(): React.JSX.Element {
             size="sm"
             onClick={() => {
               void window.umakbang
-                .pickDirectory('Where FL Studio keeps its user data', settings.flUserData || undefined)
+                .pickDirectory(
+                  "FL Studio's plugin database, or the user data folder holding it",
+                  settings.flUserData || undefined
+                )
                 .then((dir) => dir && patchSettings({ flUserData: dir }))
             }}
           >

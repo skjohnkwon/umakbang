@@ -506,11 +506,17 @@ export interface Settings {
    */
   remoteDownloadDir: string
   /**
-   * Where FL Studio keeps its user data, for reading which plugins it has found.
+   * Where FL Studio's plugin database is, for reading which plugins it has found.
    *
-   * Seeded to the usual place on first run. A setting rather than a constant because a
-   * producer who moved their FL data folder has moved the only thing that answers "will
-   * this project open here".
+   * The database itself, or the user data folder holding it - `readPluginInventory` takes
+   * either, because the row asks for one and shows the other and picking the wrong one is
+   * the obvious mistake.
+   *
+   * Seeded to the usual place on first run and a setting rather than a constant because the
+   * usual place is often wrong: FL's own folder setting moves, and a producer whose user
+   * data sits on the drive their samples are on has moved the only thing that answers "will
+   * this project open here". The name is `flUserData` because renaming a persisted key costs
+   * a migration this app deliberately does not have.
    */
   flUserData: string
   /**
