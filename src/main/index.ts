@@ -1185,7 +1185,7 @@ function registerIpc(): void {
   ipcMain.handle('remote:download', async (_event, paths: string[]) => {
     const result = await downloadRemote(
       paths,
-      (path, received, total, target, bps, verifying) => {
+      (path, received, total, target, bps, verifying, row) => {
         // -1 means finished or failed; the renderer takes the row out of the map either way.
         mainWindow?.webContents.send('remote:downloadProgress', {
           path,
@@ -1193,7 +1193,8 @@ function registerIpc(): void {
           total,
           target,
           bps,
-          verifying
+          verifying,
+          row
         })
       }
     )
@@ -1803,16 +1804,20 @@ function registerIpc(): void {
     readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
   )
   ipcMain.handle('remote:pack', async (_event, flpPath: string) => {
-    const result = await packRemote(flpPath, (path, received, total, target, bps, verifying) => {
-      mainWindow?.webContents.send('remote:downloadProgress', {
-        path,
-        received,
-        total,
-        target,
-        bps,
-        verifying
-      })
-    })
+    const result = await packRemote(
+      flpPath,
+      (path, received, total, target, bps, verifying, row) => {
+        mainWindow?.webContents.send('remote:downloadProgress', {
+          path,
+          received,
+          total,
+          target,
+          bps,
+          verifying,
+          row
+        })
+      }
+    )
     if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true)
     return result
   })

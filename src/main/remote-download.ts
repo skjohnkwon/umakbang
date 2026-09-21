@@ -12,7 +12,7 @@
  */
 
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, rename, stat, truncate, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, rename, rm, stat, truncate, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { Agent, get as httpGet } from 'node:http'
 import { extname, join } from 'node:path'
@@ -22,6 +22,7 @@ import { relFor, rootFor, withinRoot } from '../shared/roots'
 import { REMOTE_PORT } from './remote'
 import { getUserData } from './store'
 import { defaultFlUserData, readPluginInventory } from './plugins'
+import { zipDir } from './archives'
 
 /**
  * The file's own name, whichever machine's separators the path uses.
@@ -334,7 +335,9 @@ export async function downloadRemote(
     total: number,
     target?: string,
     bps?: number,
-    verifying?: boolean
+    verifying?: boolean,
+    /** Whether the destination should show a row while this arrives. */
+    row?: boolean
   ) => void = () => undefined
 ): Promise<DownloadResult> {
   const { settings } = getUserData()
@@ -367,7 +370,7 @@ export async function downloadRemote(
     const target = await freeName(destination, leafName(path))
     try {
       await copyOne(root, within, target, (received, total, bps, verifying) =>
-        onProgress(path, received, total, target, bps, verifying)
+        onProgress(path, received, total, target, bps, verifying, true)
       )
       written.push(target)
     } catch (error) {
@@ -375,7 +378,7 @@ export async function downloadRemote(
     } finally {
       // Whatever happened, the row stops claiming to be downloading. A failed copy that
       // left a bar on screen for the session would be worse than the failure.
-      onProgress(path, -1, -1, target)
+      onProgress(path, -1, -1, target, 0, false, true)
     }
   }
 
@@ -499,7 +502,8 @@ export async function packRemote(
     total: number,
     target?: string,
     bps?: number,
-    verifying?: boolean
+    verifying?: boolean,
+    row?: boolean
   ) => void = () => undefined
 ): Promise<PackResult> {
   const { settings } = getUserData()
@@ -524,7 +528,9 @@ export async function packRemote(
   // existing folder: a package is a snapshot, and mixing two is how you get a project
   // playing a sample from a different version of itself.
   const stem = manifest.flp.name.replace(/\.flp$/i, '')
-  const dir = await freeDir(destination, stem)
+  // Assembled in a working folder and zipped at the end, so nothing half-built is ever
+  // sitting in the library under the name the finished package will take.
+  const dir = await freeDir(destination, `${stem}.packing`)
   await mkdir(dir, { recursive: true })
 
   const failures: string[] = []
@@ -535,18 +541,40 @@ export async function packRemote(
     const target = await freeName(dir, item.name)
     try {
       await copyOne(root, item.rel, target, (received, total, bps, verifying) =>
-        onProgress(flpPath, received, total, target, bps, verifying)
+        // `row: false` - the files of a package are not rows anybody wants to watch. Drawn,
+        // they appear and vanish one at a time inside a folder that is still being built,
+        // and the whole thing is replaced by the zip a moment later anyway.
+        onProgress(flpPath, received, total, target, bps, verifying, false)
       )
     } catch (error) {
       failures.push(`${item.name}: ${(error as Error).message}`)
+    } finally {
+      /*
+       * Every file clears its own progress, not just the project.
+       *
+       * Progress is keyed by where a file is going, so a package of seventeen leaves
+       * seventeen entries behind - which is seventeen rows still claiming to be arriving,
+       * and a toolbar reading "copying 17" for the rest of the session, after a pack that
+       * finished perfectly well. `downloadRemote` has always done this in its own `finally`;
+       * packing reached past it to `copyOne` and did not.
+       */
+      onProgress(flpPath, -1, -1, target, 0, false, false)
     }
   }
-  onProgress(flpPath, -1, -1, flpPath)
 
   if (failures.length > 0) {
-    return { dir, elsewhere: manifest.elsewhere, plugins: manifest.plugins, error: failures[0] }
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined)
+    return { elsewhere: manifest.elsewhere, plugins: manifest.plugins, error: failures[0] }
   }
-  return { dir, elsewhere: manifest.elsewhere, plugins: manifest.plugins }
+
+  // One file, the way FL's own loop packages are: the project and its samples flat inside a
+  // zip named after the project.
+  const zip = await freeName(destination, `${stem}.zip`)
+  const failed = await zipDir(dir, zip)
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined)
+  if (failed) return { elsewhere: manifest.elsewhere, plugins: manifest.plugins, error: failed }
+
+  return { dir: zip, elsewhere: manifest.elsewhere, plugins: manifest.plugins }
 }
 
 /** A folder beside the others that nothing is using. */

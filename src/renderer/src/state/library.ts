@@ -416,7 +416,8 @@ interface LibraryState {
     total: number,
     target?: string,
     bps?: number,
-    verifying?: boolean
+    verifying?: boolean,
+    row?: boolean
   ) => void
   /** Bytes per second for the copy in flight, or 0. Shown beside the percentage. */
   downloadSpeed: number
@@ -1088,7 +1089,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     return paths.some((path) => Boolean(rootFor(roots, path)?.remote))
   },
 
-  setDownloadProgress: (path, received, total, target, bps, verifying) => {
+  setDownloadProgress: (path, received, total, target, bps, verifying, row = true) => {
     const next = new Map(get().downloading)
     /*
      * Keyed by where it is going, not where it came from.
@@ -1104,10 +1105,12 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // A copy that failed leaves nothing on disk, so the row it was drawing has to go with
       // it. One that succeeded is replaced by the real thing when the folder re-reads, and
       // removing it here first is what stops the two versions fighting over the same path.
-      get().removeTracks([key])
+      if (row) get().removeTracks([key])
     } else {
       next.set(key, total > 0 ? Math.min(1, received / total) : -1)
-      if (target) get().addPendingTrack(target, total)
+      // Packing asks for no rows: its files appear and vanish one at a time inside a
+      // folder still being built, and the zip replaces the lot a moment later.
+      if (target && row) get().addPendingTrack(target, total)
     }
     // A fresh Map every time: the table subscribes by identity, and mutating in place would
     // move the bar without repainting anything.
@@ -1160,8 +1163,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // dialog is dismissed before the work starts and this is what is left afterwards.
     get().notify(
       result.elsewhere.length > 0
-        ? `Packed ${name} into ${where} - ${result.elsewhere.length} sample(s) were outside that library.`
-        : `Packed ${name} into ${where}.`
+        ? `Packed ${name} as ${where} - ${result.elsewhere.length} sample(s) were outside that library.`
+        : `Packed ${name} as ${where}.`
     )
   },
 
@@ -2650,8 +2653,10 @@ export function connectLibraryEvents(): () => void {
   const unsubscribes = [
     window.umakbang.onLibraryReset(({ roots }) => useLibrary.getState().resetLibrary(roots)),
     window.umakbang.onLibraryRoots(({ roots }) => useLibrary.getState().adoptRoots(roots)),
-    window.umakbang.onRemoteDownload(({ path, received, total, target, bps, verifying }) =>
-      useLibrary.getState().setDownloadProgress(path, received, total, target, bps, verifying)
+    window.umakbang.onRemoteDownload(({ path, received, total, target, bps, verifying, row }) =>
+      useLibrary
+        .getState()
+        .setDownloadProgress(path, received, total, target, bps, verifying, row)
     ),
     window.umakbang.onFolderChanged(({ dir, tracks, prune }) =>
       useLibrary.getState().applyFolder(dir, tracks, prune)

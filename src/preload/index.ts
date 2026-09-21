@@ -449,6 +449,8 @@ const api = {
       bps?: number
       /** Checking what landed against the original's hash. */
       verifying?: boolean
+      /** Whether the destination should draw a row while this arrives. */
+      row?: boolean
     }) => void
   ): (() => void) => subscribe('remote:downloadProgress', handler),
   /** What this machine is called on the tailnet, for the "copy to" label. */
