@@ -550,6 +550,7 @@ export function SettingsPage(): React.JSX.Element {
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('remote'))}>
           <RemoteSection />
+          <TailnetSection />
         </div>
 
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('plugins'))}>
@@ -749,7 +750,7 @@ function RemoteSection(): React.JSX.Element {
       <Section title="Libraries from other machines">
         {mounted.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
-            None yet. Developer → Tailnet lists what is serving.
+            None yet. Tailnet below lists what is serving.
           </p>
         ) : (
           mounted.map((root) => (
@@ -920,7 +921,7 @@ function PluginsSection(): React.JSX.Element {
       >
         {devices.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/60">
-            Nothing is serving. Developer → Tailnet lists what it can see.
+            Nothing is serving. Remote → Tailnet lists what it can see.
           </p>
         ) : (
           devices.map((device) => {
@@ -1109,16 +1110,16 @@ function ServerMonitor({ peers }: { peers: RemoteDevice[] }): React.JSX.Element 
 }
 
 /**
- * What the tailnet looks like from here, while it is being built.
+ * What the tailnet looks like from here, and where a peer's library is mounted from.
  *
- * A diagnostic rather than the Devices list that will live in the sidebar: it shows the
- * facts the sidebar will later draw as rows - who is reachable, who is serving, what they
- * are serving - so the networking can be tested against a real second machine before there
- * is any UI depending on it.
+ * It began as a diagnostic on the Developer page, which is where it stayed after it stopped
+ * being one: `Add as root` is here, so somebody looking for another machine's library had to
+ * find it behind a switch marked *for testing umakbang, not for using it*. It sits under the
+ * Remote settings it belongs to now.
  *
  * Every peer is listed, including the ones that are asleep or not running umakbang, because
- * "why is my other machine not here" is the question this whole feature will generate most,
- * and a line saying *umakbang is not running there* answers it where an empty list does not.
+ * "why is my other machine not here" is the question this feature generates most, and a line
+ * saying *umakbang is not running there* answers it where an empty list does not.
  */
 function TailnetSection(): React.JSX.Element {
   const roots = useLibrary((s) => s.roots)
@@ -1313,8 +1314,6 @@ function DeveloperSection(): React.JSX.Element {
           </Row>
         )}
       </Section>
-
-      <TailnetSection />
 
       <Section title="Pages">
         <Row
