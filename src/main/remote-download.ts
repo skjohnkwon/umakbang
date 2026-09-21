@@ -539,9 +539,19 @@ export async function packRemote(
       )
     } catch (error) {
       failures.push(`${item.name}: ${(error as Error).message}`)
+    } finally {
+      /*
+       * Every file clears its own progress, not just the project.
+       *
+       * Progress is keyed by where a file is going, so a package of seventeen leaves
+       * seventeen entries behind - which is seventeen rows still claiming to be arriving,
+       * and a toolbar reading "copying 17" for the rest of the session, after a pack that
+       * finished perfectly well. `downloadRemote` has always done this in its own `finally`;
+       * packing reached past it to `copyOne` and did not.
+       */
+      onProgress(flpPath, -1, -1, target)
     }
   }
-  onProgress(flpPath, -1, -1, flpPath)
 
   if (failures.length > 0) {
     return { dir, elsewhere: manifest.elsewhere, plugins: manifest.plugins, error: failures[0] }
