@@ -25,7 +25,7 @@ import type {
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
 import { getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
-import { defaultFlUserData } from './plugins'
+import { defaultFlUserData, type PluginInventory } from './plugins'
 
 /**
  * The port both ends agree on.
@@ -198,6 +198,46 @@ export function stopRemoteServer(): void {
   current.postMessage({ type: 'stop' } satisfies RemoteCommand)
   current.kill()
   state = { listening: false, port: REMOTE_PORT }
+}
+
+/**
+ * What FL has found on a peer.
+ *
+ * The peer answers about its own machine - its own FL data folder, its own scan - which is
+ * the only way this can work: a plugin list is a fact about an install, and nothing here
+ * could infer it from the other side of a socket.
+ */
+export function remotePlugins(host: string): Promise<PluginInventory | null> {
+  return new Promise((resolve) => {
+    const request = httpGet(
+      { host, port: REMOTE_PORT, path: '/plugins', timeout: 10_000 },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume()
+          resolve(null)
+          return
+        }
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => {
+          body += chunk
+          if (body.length > 4 * 1024 * 1024) request.destroy()
+        })
+        response.on('end', () => {
+          try {
+            resolve(JSON.parse(body) as PluginInventory)
+          } catch {
+            resolve(null)
+          }
+        })
+      }
+    )
+    request.on('timeout', () => {
+      request.destroy()
+      resolve(null)
+    })
+    request.on('error', () => resolve(null))
+  })
 }
 
 /** Knocks on one peer. Resolves to its hello, or to why it did not answer. */

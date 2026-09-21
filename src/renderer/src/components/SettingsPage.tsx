@@ -103,6 +103,7 @@ const SECTIONS = [
   // of that name, a place you file things out of rather than a thing you do.
   { id: 'downloads', label: 'YT2MP3' },
   { id: 'remote', label: 'Remote' },
+  { id: 'plugins', label: 'Plugins' },
   { id: 'backup', label: 'Backup' },
   { id: 'window', label: 'Window' },
   { id: 'updates', label: 'Updates' },
@@ -555,6 +556,10 @@ export function SettingsPage(): React.JSX.Element {
           <RemoteSection />
         </div>
 
+        <div className={cn('mx-auto max-w-[560px] space-y-4', show('plugins'))}>
+          <PluginsSection />
+        </div>
+
         <div className={cn('mx-auto max-w-[560px] space-y-4', show('updates'))}>
           <UpdateSection />
         </div>
@@ -726,6 +731,186 @@ function RemoteSection(): React.JSX.Element {
               <span className="text-[11px] text-muted-foreground/60">Read-only</span>
             </Row>
           ))
+        )}
+      </Section>
+    </>
+  )
+}
+
+type Inventory = { names: string[]; from: string; missing?: boolean }
+
+/** What one machine has that the other does not, both ways. */
+function diff(mine: string[], theirs: string[]): { missingHere: string[]; missingThere: string[] } {
+  // Compared case-insensitively, because FL writes a plugin's name as its installer spelled
+  // it and two machines can disagree about that without disagreeing about the plugin.
+  const here = new Set(mine.map((name) => name.toLowerCase()))
+  const there = new Set(theirs.map((name) => name.toLowerCase()))
+  return {
+    missingHere: theirs.filter((name) => !here.has(name.toLowerCase())),
+    missingThere: mine.filter((name) => !there.has(name.toLowerCase()))
+  }
+}
+
+function PluginList({ title, names }: { title: string; names: string[] }): React.JSX.Element {
+  return (
+    <div className="mt-1.5">
+      <p className="text-[11px] font-medium text-foreground/80">
+        {title} <span className="text-muted-foreground/60">({names.length})</span>
+      </p>
+      <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+        {names.join(', ')}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * Which plugins each machine has, and what that costs.
+ *
+ * Read from FL's own `Plugin database` rather than from what is installed on disk: what
+ * decides whether a project opens is what *FL* has found, which is the stricter question and
+ * the one a scan answers. Each machine reports its own - a plugin list is a fact about an
+ * install, and nothing here could infer one across a socket.
+ *
+ * Both directions are shown. "Missing here" is what stops a project of theirs opening on
+ * this machine, which is the question that gets asked; "missing there" is the same sentence
+ * the other way round, and is what stops something made here going back.
+ */
+function PluginsSection(): React.JSX.Element {
+  const settings = useLibrary((s) => s.settings)
+  const patchSettings = useLibrary((s) => s.patchSettings)
+  const [mine, setMine] = useState<Inventory | null>(null)
+  const [devices, setDevices] = useState<RemoteDevice[]>([])
+  const [compared, setCompared] = useState<Record<string, Inventory | 'loading' | 'failed'>>({})
+
+  const load = useCallback(async () => {
+    const [local, listed] = await Promise.all([
+      window.umakbang.localPlugins(),
+      window.umakbang.remoteDevices()
+    ])
+    setMine(local)
+    setDevices(listed.devices.filter((device) => device.serving))
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load, settings.flUserData])
+
+  const compare = useCallback(async (device: RemoteDevice) => {
+    const host = device.node.ipv4 ?? device.node.name
+    if (!host) return
+    setCompared((prev) => ({ ...prev, [device.node.id]: 'loading' }))
+    const theirs = await window.umakbang.remotePluginList(host)
+    setCompared((prev) => ({ ...prev, [device.node.id]: theirs ?? 'failed' }))
+  }, [])
+
+  return (
+    <>
+      <Section
+        title="This machine"
+        hint="Read from FL Studio's own plugin database - what FL has found, which is what decides whether a project opens."
+      >
+        <Row
+          label="FL Studio user data"
+          hint={
+            mine === null
+              ? 'Looking…'
+              : mine.missing
+                ? `No plugin database at ${mine.from}. Open FL and let it scan, or point this at the right folder.`
+                : `${mine.names.length} plugins · ${mine.from}`
+          }
+        >
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              void window.umakbang
+                .pickDirectory('Where FL Studio keeps its user data', settings.flUserData || undefined)
+                .then((dir) => dir && patchSettings({ flUserData: dir }))
+            }}
+          >
+            Choose…
+          </Button>
+        </Row>
+      </Section>
+
+      <Section
+        title="Other machines"
+        hint="Each reports its own. A machine has to be running umakbang and sharing for it to answer."
+      >
+        {devices.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground/60">
+            Nothing is serving right now. Settings → Developer → Tailnet lists what it can see.
+          </p>
+        ) : (
+          devices.map((device) => {
+            const state = compared[device.node.id]
+            const theirs = state && state !== 'loading' && state !== 'failed' ? state : null
+            const both = theirs && mine ? diff(mine.names, theirs.names) : null
+            return (
+              <div
+                key={device.node.id}
+                className="rounded-md border bg-card/40 px-2.5 py-2 text-[11.5px]"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">
+                    {device.node.hostName || device.node.name}
+                  </span>
+                  <span className="text-[10.5px] text-muted-foreground/60">{device.node.os}</span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="ml-auto"
+                    disabled={state === 'loading' || mine === null}
+                    onClick={() => void compare(device)}
+                  >
+                    {state === 'loading' ? 'Comparing…' : 'Compare'}
+                  </Button>
+                </div>
+
+                {state === 'failed' && (
+                  <p className="mt-1 text-[11px] text-muted-foreground/70">
+                    It would not answer. That machine is probably on an older umakbang.
+                  </p>
+                )}
+
+                {theirs?.missing && (
+                  <p className="mt-1 text-[11px] text-muted-foreground/70">
+                    No plugin database there either - FL has not scanned on that machine, or its
+                    user data folder is set wrong in its own settings.
+                  </p>
+                )}
+
+                {theirs && !theirs.missing && both && (
+                  <>
+                    <p className="mt-1 text-[11px] text-muted-foreground/60">
+                      {theirs.names.length} plugins there · {mine?.names.length ?? 0} here
+                    </p>
+                    {both.missingHere.length === 0 && both.missingThere.length === 0 ? (
+                      <p className="mt-1.5 text-[11px] text-primary">
+                        The same on both. Anything made on either machine opens on the other.
+                      </p>
+                    ) : (
+                      <>
+                        {both.missingHere.length > 0 && (
+                          <PluginList
+                            title="Not here - their projects will open stubbed"
+                            names={both.missingHere}
+                          />
+                        )}
+                        {both.missingThere.length > 0 && (
+                          <PluginList
+                            title="Not there - projects made here will open stubbed"
+                            names={both.missingThere}
+                          />
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })
         )}
       </Section>
     </>
