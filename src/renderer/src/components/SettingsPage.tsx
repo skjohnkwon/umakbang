@@ -10,6 +10,7 @@ import {
   Package,
   Plus,
   RefreshCw,
+  Star,
   RotateCcw,
   X
 } from 'lucide-react'
@@ -811,6 +812,168 @@ function PluginList({ title, names }: { title: string; names: string[] }): React
  * this machine, which is the question that gets asked; "missing there" is the same sentence
  * the other way round, and is what stops something made here going back.
  */
+type FlPlugin = Awaited<ReturnType<typeof window.umakbang.flCatalog>>['plugins'][number]
+
+/**
+ * FL's plugin database, as a list you can act on rather than a menu you walk through.
+ *
+ * Favouriting is what puts a plugin in the picker you get from a channel, and FL offers it
+ * one plugin at a time - fine for the one you just installed, miserable for the forty you
+ * have had for a year. Everything here is a checkbox and a button, because underneath it is
+ * a file being copied.
+ *
+ * Nothing is destroyed. A favourite removed can be added again from the scan, and a plugin
+ * taken out of the scan is moved aside rather than deleted - see `fl-plugins.ts`.
+ */
+function FlPluginManager(): React.JSX.Element {
+  const [catalog, setCatalog] = useState<FlPlugin[] | null>(null)
+  const [from, setFrom] = useState<string>('')
+  const [missing, setMissing] = useState(false)
+  const [query, setQuery] = useState('')
+  const [only, setOnly] = useState<'all' | 'favourites' | 'others'>('all')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const result = await window.umakbang.flCatalog()
+    setCatalog(result.plugins)
+    setFrom(result.from)
+    setMissing(Boolean(result.missing))
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    return (catalog ?? []).filter((plugin) => {
+      if (only === 'favourites' && !plugin.favourite) return false
+      if (only === 'others' && plugin.favourite) return false
+      return !needle || plugin.name.toLowerCase().includes(needle)
+    })
+  }, [catalog, query, only])
+
+  const favourites = (catalog ?? []).filter((plugin) => plugin.favourite).length
+
+  const apply = useCallback(
+    async (names: string[], wanted: boolean) => {
+      if (names.length === 0) return
+      setBusy(true)
+      try {
+        const result = await window.umakbang.flSetFavourites(names, wanted)
+        setNote(
+          result.failures.length > 0
+            ? result.failures[0]
+            : `${wanted ? 'Added' : 'Removed'} ${result.changed}.`
+        )
+        await load()
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load]
+  )
+
+  if (missing) {
+    return (
+      <Section title="FL plugins">
+        <p className="text-[11px] text-muted-foreground/70">
+          Nothing at {from}. Point the folder above at FL&apos;s plugin database first.
+        </p>
+      </Section>
+    )
+  }
+
+  return (
+    <Section
+      title="FL plugins"
+      hint="A favourite is what appears when you add a plugin to a channel. FL adds them one at a time; this does not."
+    >
+      <div className="flex items-center gap-1.5">
+        <Input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search ${catalog?.length ?? 0} plugins`}
+          className="h-7 text-[12px]"
+        />
+        {/* Narrowing to what is *not* yet a favourite is the common case - it is the list
+            somebody is actually working through. */}
+        {(['all', 'others', 'favourites'] as const).map((value) => (
+          <Button
+            key={value}
+            variant={only === value ? 'default' : 'secondary'}
+            size="sm"
+            onClick={() => setOnly(value)}
+          >
+            {value === 'all' ? 'All' : value === 'others' ? 'Not yet' : 'Favourites'}
+          </Button>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span>
+          {shown.length.toLocaleString()} shown · {favourites.toLocaleString()} favourites
+        </span>
+        {/* The whole point: whatever the search has narrowed to, in one press. */}
+        <Button
+          variant="secondary"
+          size="sm"
+          className="ml-auto"
+          disabled={busy || shown.every((plugin) => plugin.favourite)}
+          onClick={() => void apply(shown.filter((p) => !p.favourite).map((p) => p.name), true)}
+        >
+          Favourite these
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || shown.every((plugin) => !plugin.favourite)}
+          onClick={() => void apply(shown.filter((p) => p.favourite).map((p) => p.name), false)}
+        >
+          Remove these
+        </Button>
+      </div>
+
+      {note && <p className="text-[11px] text-muted-foreground/70">{note}</p>}
+
+      <div className="scroll-thin max-h-[320px] overflow-y-auto rounded-md border bg-card/40">
+        {shown.length === 0 ? (
+          <p className="px-2.5 py-2 text-[11px] text-muted-foreground/60">Nothing matches.</p>
+        ) : (
+          shown
+            .slice(0, 300)
+            .map((plugin) => (
+              <button
+                key={`${plugin.kind}-${plugin.name}`}
+                type="button"
+                disabled={busy}
+                onClick={() => void apply([plugin.name], !plugin.favourite)}
+                className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[11.5px] hover:bg-secondary/60"
+              >
+                <Star
+                  className={cn(
+                    'h-3.5 w-3.5 shrink-0',
+                    plugin.favourite ? 'fill-primary text-primary' : 'text-muted-foreground/40'
+                  )}
+                />
+                <span className="truncate">{plugin.name}</span>
+                <span className="ml-auto shrink-0 text-[10.5px] text-muted-foreground/50">
+                  {plugin.format}
+                </span>
+              </button>
+            ))
+        )}
+      </div>
+      {shown.length > 300 && (
+        <p className="text-[11px] text-muted-foreground/60">
+          Showing 300 of {shown.length.toLocaleString()}. The buttons above act on all of them.
+        </p>
+      )}
+    </Section>
+  )
+}
+
 function PluginsSection(): React.JSX.Element {
   const settings = useLibrary((s) => s.settings)
   const patchSettings = useLibrary((s) => s.patchSettings)
@@ -871,6 +1034,8 @@ function PluginsSection(): React.JSX.Element {
           </Button>
         </Row>
       </Section>
+
+      <FlPluginManager />
 
       <Section
         title="Other machines"

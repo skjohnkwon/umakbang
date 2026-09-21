@@ -106,6 +106,7 @@ import { initAutoBackup } from './auto-backup'
 import { downloadRemote, packRemote, previewPack } from './remote-download'
 import { extractArchive } from './archives'
 import { defaultFlUserData, readPluginInventory } from './plugins'
+import { flIsRunning, readFlCatalog, removeFromScan, setFavourites } from './fl-plugins'
 import { readTailnet } from './tailscale'
 import { hostname } from 'node:os'
 import {
@@ -1885,6 +1886,37 @@ function registerIpc(): void {
    * hard way.
    */
   ipcMain.handle('remote:syncSettings', () => syncSettingsFromPeers())
+  /* --- FL's plugin database --- */
+  ipcMain.handle('fl:catalog', async () => {
+    const inventory = await readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
+    if (inventory.missing) return { plugins: [], from: inventory.from, missing: true }
+    return readFlCatalog(inventory.from)
+  })
+  ipcMain.handle('fl:setFavourites', async (_event, names: string[], wanted: boolean) => {
+    if (await flIsRunning()) {
+      return { changed: 0, failures: ['Close FL Studio first - it rewrites this when it quits.'] }
+    }
+    const inventory = await readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
+    if (inventory.missing) return { changed: 0, failures: ['No plugin database to change.'] }
+    const catalog = await readFlCatalog(inventory.from)
+    const wantedSet = new Set(names)
+    return setFavourites(
+      inventory.from,
+      catalog.plugins.filter((plugin) => wantedSet.has(plugin.name)),
+      wanted
+    )
+  })
+  ipcMain.handle('fl:removeFromScan', async (_event, names: string[]) => {
+    if (await flIsRunning()) {
+      return { changed: 0, failures: ['Close FL Studio first - it rewrites this when it quits.'] }
+    }
+    const inventory = await readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
+    if (inventory.missing) return { changed: 0, failures: ['No plugin database to change.'] }
+    const catalog = await readFlCatalog(inventory.from)
+    const wantedSet = new Set(names)
+    return removeFromScan(inventory.from, catalog.plugins.filter((p) => wantedSet.has(p.name)))
+  })
+
   ipcMain.handle('plugins:local', () =>
     readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
   )

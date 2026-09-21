@@ -475,6 +475,27 @@ const api = {
   /** Adopts the most recently changed settings from any machine that is serving. */
   syncSettings: (): Promise<{ adopted?: string; reason?: string }> =>
     ipcRenderer.invoke('remote:syncSettings'),
+  /* --- FL's plugin database --- */
+  /** Every plugin FL has found here, and which are favourites. */
+  flCatalog: (): Promise<{
+    plugins: Array<{
+      name: string
+      kind: 'generator' | 'effect'
+      format: string
+      favourite: boolean
+    }>
+    from: string
+    missing?: boolean
+  }> => ipcRenderer.invoke('fl:catalog'),
+  /** Adds or removes favourites in bulk. Refuses while FL is running. */
+  flSetFavourites: (
+    names: string[],
+    wanted: boolean
+  ): Promise<{ changed: number; failures: string[] }> =>
+    ipcRenderer.invoke('fl:setFavourites', names, wanted),
+  /** Takes plugins out of FL's scan, moving them aside rather than deleting. */
+  flRemoveFromScan: (names: string[]): Promise<{ changed: number; failures: string[] }> =>
+    ipcRenderer.invoke('fl:removeFromScan', names),
   /** Plugins FL has found on this machine. */
   localPlugins: (): Promise<{ names: string[]; from: string; missing?: boolean }> =>
     ipcRenderer.invoke('plugins:local'),
