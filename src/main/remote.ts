@@ -25,6 +25,7 @@ import type {
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
 import { getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
+import { defaultFlUserData } from './plugins'
 
 /**
  * The port both ends agree on.
@@ -123,7 +124,8 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
       version: app.getVersion()
     },
     libraries: librariesFromSettings(settings.deviceId),
-    dataDir: getDataDir()
+    dataDir: getDataDir(),
+    flUserData: settings.flUserData || defaultFlUserData()
   }
 
   const forked = utilityProcess.fork(join(__dirname, 'remote-server.js'), [], {

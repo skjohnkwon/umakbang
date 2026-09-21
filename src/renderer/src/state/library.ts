@@ -388,6 +388,8 @@ interface LibraryState {
   anyRemote: (paths: string[]) => boolean
   /** Unpacks a .zip into a folder beside it, then shows what came out. */
   extractArchive: (path: string) => Promise<void>
+  /** Packs a remote project and its samples into a folder here. */
+  packRemoteHere: (flpPath: string) => Promise<void>
   /** Copies remote files into the download folder. Never a move - the source is read-only. */
   copyRemoteHere: (paths: string[]) => Promise<void>
   /**
@@ -1143,6 +1145,24 @@ export const useLibrary = create<LibraryState>((set, get) => ({
         playable: false
       }
     ])
+  },
+
+  packRemoteHere: async (flpPath) => {
+    const name = baseName(flpPath)
+    get().notify(`Packing ${name}…`)
+    const result = await window.umakbang.remotePack(flpPath)
+    if (result.error) {
+      get().notify(result.error, 'error')
+      return
+    }
+    const where = baseName(result.dir ?? '')
+    // The samples that could not come are said again here, not only in the dialog: the
+    // dialog is dismissed before the work starts and this is what is left afterwards.
+    get().notify(
+      result.elsewhere.length > 0
+        ? `Packed ${name} into ${where} - ${result.elsewhere.length} sample(s) were outside that library.`
+        : `Packed ${name} into ${where}.`
+    )
   },
 
   extractArchive: async (path) => {

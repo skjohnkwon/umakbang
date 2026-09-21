@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   FolderArchive,
+  Package,
   CopyPlus,
   Dices,
   ExternalLink,
@@ -66,6 +67,8 @@ export interface ExplorerActions {
   copyHere: () => void
   /** Unpacks a .zip into a folder beside it. */
   extract: () => void
+  /** Packs a remote project and its samples into a folder on this machine. */
+  packHere: () => void
   /** Files the selection into one of the configured folders. */
   moveTo: (destination: string) => void
   /** Asks for a folder and files the selection into that. */
@@ -216,6 +219,14 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
       {/* The only action a remote selection gets that puts bytes anywhere, and it puts them
           *here*: the library it came from is read-only and nothing leaves it. Which is why
           this says copy and not move, however much the gesture looks like filing. */}
+      {/* A project is not worth copying on its own - it would arrive pointing at samples on
+          a drive this machine has never seen. Packing is what copying a project means. */}
+      {context.readOnly && singleFile && file?.ext === 'flp' && (
+        <ContextMenuItem onSelect={actions.packHere}>
+          <Package className="h-3.5 w-3.5" />
+          Pack &amp; copy to {context.localName ?? 'this machine'}
+        </ContextMenuItem>
+      )}
       {context.readOnly && selected.tracks.length > 0 && (
         <ContextMenuItem onSelect={actions.copyHere}>
           <Download className="h-3.5 w-3.5" />

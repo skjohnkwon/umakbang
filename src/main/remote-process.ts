@@ -23,9 +23,14 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createGzip } from 'node:zlib'
 import type { RemoteHello, RemoteLibrary, RemoteRequestLog, RemoteStats } from '../shared/types'
 import { indexFileFor, initIndexStore, patchFileFor } from './index-store'
-import { parseRange, resolveInLibrary } from './remote-routes'
+import { parseRange, relativeToLibrary, resolveInLibrary } from './remote-routes'
+import { collectFlpContents } from './flp'
+import { readPluginInventory } from './plugins'
+import { readFileSync } from 'node:fs'
 
 export interface RemoteConfig {
+  /** Where FL Studio keeps its user data here, so the plugin list can be read from it. */
+  flUserData: string
   /** The tailnet address to bind. Never a wildcard - see the note above. */
   address: string
   port: number
@@ -341,6 +346,87 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
         return
       }
       sendHash(response, file)
+      return
+    }
+
+    case '/plugins': {
+      // Answered from FL's own database rather than from what is installed on disk: what
+      // matters is what FL has actually found, which is the stricter question and the one
+      // that decides whether a project opens.
+      void readPluginInventory(current.flUserData).then(
+        (inventory) => sendJson(response, inventory),
+        () => fail(response, 500)
+      )
+      return
+    }
+
+    case '/pack': {
+      /*
+       * What a project needs, listed rather than bundled.
+       *
+       * No archive is built and nothing is written here: the answer is a manifest, and the
+       * asking machine then fetches each file through the same ranged, hashed path it uses
+       * for any other copy. That keeps this library strictly read-only - a package is the
+       * other machine's to make - and means packing inherits parallel transfer and
+       * verification rather than growing its own.
+       */
+      const library = libraryOf(params)
+      const rel = params.get('rel')
+      if (!library || !rel) {
+        fail(response, 404)
+        return
+      }
+      const file = resolveInLibrary(library, rel)
+      if (!file) {
+        fail(response, 404)
+        return
+      }
+
+      let contents: ReturnType<typeof collectFlpContents>
+      let flpSize: number
+      try {
+        const data = readFileSync(file)
+        flpSize = data.length
+        contents = collectFlpContents(data)
+      } catch {
+        fail(response, 404)
+        return
+      }
+      if (!contents.clean) {
+        // A walk that lost the stream stops finding samples without saying so. A package
+        // built from a short list is missing sounds, which is worse than no package.
+        sendJson(response, { error: 'This project could not be read all the way through.' })
+        return
+      }
+
+      const samples: Array<{ rel: string; name: string; size: number }> = []
+      const elsewhere: string[] = []
+      for (const recorded of contents.samples) {
+        const within = relativeToLibrary(library, recorded)
+        const resolved = within === null ? null : resolveInLibrary(library, within)
+        if (!within || !resolved) {
+          // Factory content, or a sample that lives outside this library. Named so the
+          // other end can say which sounds it will not be getting.
+          elsewhere.push(recorded)
+          continue
+        }
+        try {
+          samples.push({
+            rel: within,
+            name: within.split('/').pop() ?? within,
+            size: statSync(resolved).size
+          })
+        } catch {
+          elsewhere.push(recorded)
+        }
+      }
+
+      sendJson(response, {
+        flp: { rel, name: rel.split('/').pop() ?? rel, size: flpSize },
+        samples,
+        elsewhere,
+        plugins: contents.plugins
+      })
       return
     }
 

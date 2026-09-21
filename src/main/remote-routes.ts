@@ -55,6 +55,53 @@ export function resolveInLibrary(library: RemoteLibrary, rel: string): string | 
 }
 
 /**
+ * A path the project recorded, as a path within the library - or null if it is not in it.
+ *
+ * Case-insensitively, and with separators folded, because a project records whatever FL
+ * happened to write: `z:\SECRET SAUCE\...` against a root of `Z:\SECRET SAUCE`. Windows
+ * disagrees with itself about both, and refusing a sample over the case of a drive letter
+ * would drop files out of a package for no reason.
+ *
+ * Null is the ordinary answer for factory content and for anything living outside the
+ * library - it is not an error, it just cannot be served from here.
+ */
+export function relativeToLibrary(library: RemoteLibrary, absolute: string): string | null {
+  const fold = (value: string): string =>
+    value.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
+  const root = fold(library.path)
+  const target = fold(absolute)
+  const slashed = absolute.split('\\').join('/')
+  if (target === root) return ''
+  if (target.startsWith(`${root}/`)) {
+    // The tail keeps its own spelling; only the root's prefix was matched loosely.
+    return slashed.slice(library.path.length).replace(/^\/+/, '')
+  }
+
+  /*
+   * The library has moved since the project was saved.
+   *
+   * Projects here record `A:\SECRET SAUCE\...` against a library now at `Z:\SECRET SAUCE` -
+   * a drive letter that was reassigned years ago, or a whole different machine. The files
+   * are the same files; only the road to them changed, and refusing them would mean packing
+   * worked for nothing older than the last time the drive was re-lettered.
+   *
+   * So the root's own folder name is looked for inside the recorded path, and whatever
+   * follows it is tried as a path within the library. `resolveInLibrary` still has to agree
+   * the file is there, so a wrong guess costs nothing but a `stat`.
+   *
+   * Folding neither changes a string's length nor moves its separators, so an index found
+   * in the folded copy is the same index in the original.
+   */
+  const base = root.split('/').pop()
+  if (base) {
+    const marker = `/${base}/`
+    const at = target.indexOf(marker)
+    if (at !== -1) return slashed.slice(at + marker.length)
+  }
+  return null
+}
+
+/**
  * The byte range a request asked for, clamped to the file.
  *
  * Only the single `bytes=a-b` form, which is what a media element sends. Multipart ranges

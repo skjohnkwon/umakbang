@@ -600,6 +600,9 @@ export function FileTable({
   const [prompt, setPrompt] = useState<NamePrompt | null>(null)
   // Only the deletes big enough to ask about ever fill this in. See `remove` below.
   const [confirmDelete, setConfirmDelete] = useState<DeletePrompt | null>(null)
+  const [confirmPack, setConfirmPack] = useState<{ path: string; preview: PackPreview } | null>(
+    null
+  )
   const [menuTarget, setMenuTarget] = useState<MenuTarget>({ kind: 'folder', dir: null })
   /** Files waiting on a yes before anything is uploaded. */
   const [stemPrompt, setStemPrompt] = useState<Track[] | null>(null)
@@ -1007,6 +1010,23 @@ export function FileTable({
       openExternally: () => {
         const [path] = selectedRef.current.paths
         if (path) void window.umakbang.openExternally(path)
+      },
+      packHere: () => {
+        const [path] = selectedRef.current.paths
+        if (!path) return
+        void window.umakbang.remotePackPreview(path).then((preview) => {
+          if (preview.error) {
+            useLibrary.getState().notify(preview.error, 'error')
+            return
+          }
+          // Straight through when there is nothing to warn about: a dialog that only ever
+          // says "yes this is fine" teaches people to dismiss the one that matters.
+          if (preview.missingPlugins.length === 0 && preview.elsewhere.length === 0) {
+            void useLibrary.getState().packRemoteHere(path)
+            return
+          }
+          setConfirmPack({ path, preview })
+        })
       },
       extract: () => {
         const [path] = selectedRef.current.paths
@@ -1738,6 +1758,19 @@ export function FileTable({
 
       {prompt && <NamePopover prompt={prompt} onClose={() => setPrompt(null)} />}
 
+      {confirmPack && (
+        <ConfirmDialog
+          title={`Pack ${confirmPack.preview.name}?`}
+          description={packWarning(confirmPack.preview)}
+          confirmLabel="Pack anyway"
+          onConfirm={() => {
+            void useLibrary.getState().packRemoteHere(confirmPack.path)
+            setConfirmPack(null)
+          }}
+          onClose={() => setConfirmPack(null)}
+        />
+      )}
+
       {confirmDelete && (
         <ConfirmDialog
           title={`Delete ${confirmDelete.label}?`}
@@ -1753,6 +1786,42 @@ export function FileTable({
       )}
     </div>
   )
+}
+
+/** What `remotePackPreview` answers, for the dialog that reads it. */
+type PackPreview = Awaited<ReturnType<typeof window.umakbang.remotePackPreview>>
+
+/**
+ * Why this pack is worth a second look.
+ *
+ * Plugins first and stated plainly, because it is the one that loses work rather than
+ * merely disappointing: a project opened without them comes up stubbed, and *saving* it
+ * there writes the stub back. Samples that could not come are a lesser problem - the beat
+ * plays with holes in it, which is obvious the moment you hear it.
+ */
+function packWarning(preview: PackPreview): string {
+  const parts: string[] = []
+  if (preview.missingPlugins.length > 0) {
+    parts.push(
+      `FL on this machine does not have ${listNames(preview.missingPlugins)}. ` +
+        'The project will open with them stubbed out, and saving it here writes that back - ' +
+        'their settings would be lost.'
+    )
+  }
+  if (preview.elsewhere.length > 0) {
+    parts.push(
+      `${preview.elsewhere.length} sample${preview.elsewhere.length === 1 ? '' : 's'} ` +
+        'live outside that library - factory content, most likely - and cannot be packed.'
+    )
+  }
+  parts.push(`${preview.sampleCount} samples will come over.`)
+  return parts.join(' ')
+}
+
+function listNames(names: string[]): string {
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 function HeaderCell({
