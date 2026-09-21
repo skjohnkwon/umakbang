@@ -506,6 +506,14 @@ export interface Settings {
    */
   remoteDownloadDir: string
   /**
+   * Where FL Studio keeps its user data, for reading which plugins it has found.
+   *
+   * Seeded to the usual place on first run. A setting rather than a constant because a
+   * producer who moved their FL data folder has moved the only thing that answers "will
+   * this project open here".
+   */
+  flUserData: string
+  /**
    * Whether this machine answers for its library on the tailnet.
    *
    * On by default: the tailnet is already the trust boundary, what is served is read-only,
@@ -942,6 +950,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Seeded on first run by `initStore`, which is the only place that can generate one.
   deviceId: '',
   remoteDownloadDir: '',
+  flUserData: '',
   shareLibrary: true
 }
 

@@ -122,6 +122,10 @@ export function initStore(): void {
     userData.settings.remoteDownloadDir = app.getPath('downloads')
   }
 
+  if (!userData.settings.flUserData) {
+    userData.settings.flUserData = join(app.getPath('documents'), 'Image-Line', 'FL Studio')
+  }
+
   userData.settings.quickMove ??= []
   userData.tags ??= {}
   userData.ratings ??= {}

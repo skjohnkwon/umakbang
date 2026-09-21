@@ -421,6 +421,29 @@ const api = {
   ): (() => void) => subscribe('remote:downloadProgress', handler),
   /** What this machine is called on the tailnet, for the "copy to" label. */
   remoteSelfName: (): Promise<string> => ipcRenderer.invoke('remote:selfName'),
+  /** What packing would involve, and which plugins this machine lacks. Moves no bytes. */
+  remotePackPreview: (
+    flpPath: string
+  ): Promise<{
+    name: string
+    sampleCount: number
+    totalBytes: number
+    elsewhere: string[]
+    plugins: string[]
+    missingPlugins: string[]
+    error?: string
+  }> => ipcRenderer.invoke('remote:packPreview', flpPath),
+  /** Plugins FL has found on this machine. */
+  localPlugins: (): Promise<{ names: string[]; from: string; missing?: boolean }> =>
+    ipcRenderer.invoke('plugins:local'),
+  /**
+   * Packs a remote project into a folder here: the `.flp` and every sample it uses, flat.
+   * `elsewhere` names samples that were not in that library, `plugins` what it loads.
+   */
+  remotePack: (
+    flpPath: string
+  ): Promise<{ dir?: string; elsewhere: string[]; plugins: string[]; error?: string }> =>
+    ipcRenderer.invoke('remote:pack', flpPath),
   /** Adds a peer's library to this one as a root. It behaves as any other root after that. */
   remoteMountLibrary: (
     remote: RemoteRootRef,

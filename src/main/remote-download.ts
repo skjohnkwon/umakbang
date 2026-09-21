@@ -21,6 +21,7 @@ import type { LibraryRoot } from '../shared/types'
 import { relFor, rootFor, withinRoot } from '../shared/roots'
 import { REMOTE_PORT } from './remote'
 import { getUserData } from './store'
+import { defaultFlUserData, readPluginInventory } from './plugins'
 
 /**
  * The file's own name, whichever machine's separators the path uses.
@@ -364,46 +365,246 @@ export async function downloadRemote(
     // Flat, by design: the file goes where it was asked to go, under its own name. The
     // folders it sat in on the other machine are that machine's business.
     const target = await freeName(destination, leafName(path))
-    const part = `${target}.part`
     try {
-      // Announced before a byte moves, so the row can exist in the folder it is arriving
-      // into rather than appearing only once it lands. Until the rename there is nothing on
-      // disk but a `.part`, which is not an indexable extension and so cannot be listed.
-      onProgress(path, 0, 0, target, 0)
-      await fetchTo(root, within, part, (received, total, bps) =>
-        onProgress(path, received, total, target, bps)
+      await copyOne(root, within, target, (received, total, bps, verifying) =>
+        onProgress(path, received, total, target, bps, verifying)
       )
-
-      /*
-       * Checked before the rename, never after.
-       *
-       * A `.part` that fails is deleted and reported; a file that has already taken its
-       * real name is indistinguishable from one that arrived intact, and the library would
-       * index it, draw a waveform for it and hand it to a DAW. The whole point of writing
-       * to a temporary name is that this check gets to happen while it is still temporary.
-       */
-      // Said out loud: hashing both ends of a large file is a pause at exactly the moment
-      // a progress bar reaches the end, which is when a pause looks most like a hang.
-      onProgress(path, 0, 0, target, 0, true)
-      const expected = await remoteHash(root.remote, within)
-      if (expected) {
-        const actual = await hashFile(part)
-        if (actual !== expected) {
-          throw new Error('arrived damaged - the copy did not match the original')
-        }
-      }
-
-      await rename(part, target)
       written.push(target)
     } catch (error) {
-      await unlink(part).catch(() => undefined)
       failures.push(`${leafName(path)}: ${(error as Error).message}`)
     } finally {
       // Whatever happened, the row stops claiming to be downloading. A failed copy that
       // left a bar on screen for the session would be worse than the failure.
-      onProgress(path, -1, -1, target, 0)
+      onProgress(path, -1, -1, target)
     }
   }
 
   return { written, failures }
+}
+
+/**
+ * One file, fetched and checked, ending in place or not at all.
+ *
+ * Shared by an ordinary copy and by packing, so a packaged sample arrives with the same
+ * parallel ranges and the same hash check as anything else - there is no second, weaker
+ * transfer path to keep honest.
+ */
+async function copyOne(
+  root: LibraryRoot,
+  within: string,
+  target: string,
+  onProgress: (received: number, total: number, bps: number, verifying?: boolean) => void
+): Promise<void> {
+  const remote = root.remote
+  if (!remote) throw new Error('not a remote root')
+  const part = `${target}.part`
+  try {
+    // Announced before a byte moves, so the row can exist in the folder it is arriving into
+    // rather than appearing only once it lands. Until the rename there is nothing on disk
+    // but a `.part`, which is not an indexable extension and so cannot be listed.
+    onProgress(0, 0, 0)
+    await fetchTo(root, within, part, (received, total, bps) => onProgress(received, total, bps))
+
+    /*
+     * Checked before the rename, never after.
+     *
+     * A `.part` that fails is deleted and reported; a file that has already taken its
+     * real name is indistinguishable from one that arrived intact, and the library would
+     * index it, draw a waveform for it and hand it to a DAW. The whole point of writing
+     * to a temporary name is that this check gets to happen while it is still temporary.
+     */
+    // Said out loud: hashing both ends of a large file is a pause at exactly the moment
+    // a progress bar reaches the end, which is when a pause looks most like a hang.
+    onProgress(0, 0, 0, true)
+    const expected = await remoteHash(remote, within)
+    if (expected) {
+      const actual = await hashFile(part)
+      if (actual !== expected) {
+        throw new Error('arrived damaged - the copy did not match the original')
+      }
+    }
+
+    await rename(part, target)
+  } catch (error) {
+    // Nothing half-written is left behind to be mistaken for a file.
+    await unlink(part).catch(() => undefined)
+    throw error
+  }
+}
+
+export interface PackManifest {
+  flp: { rel: string; name: string; size: number }
+  samples: Array<{ rel: string; name: string; size: number }>
+  /** Sample paths the project uses that are not in that library - factory content, mostly. */
+  elsewhere: string[]
+  plugins: string[]
+  error?: string
+}
+
+function manifestFor(
+  remote: NonNullable<LibraryRoot['remote']>,
+  within: string
+): Promise<PackManifest | null> {
+  const path = `/pack?library=${encodeURIComponent(remote.libraryId)}&rel=${encodeURIComponent(within)}`
+  return new Promise((resolve) => {
+    const request = httpGet({ host: remote.host, port: REMOTE_PORT, path, agent }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume()
+        resolve(null)
+        return
+      }
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk) => {
+        body += chunk
+        if (body.length > 4 * 1024 * 1024) request.destroy()
+      })
+      response.on('end', () => {
+        try {
+          resolve(JSON.parse(body) as PackManifest)
+        } catch {
+          resolve(null)
+        }
+      })
+    })
+    request.on('error', () => resolve(null))
+  })
+}
+
+export interface PackResult {
+  dir?: string
+  /** Samples the project uses that could not come - named, so nobody finds out in FL. */
+  elsewhere: string[]
+  plugins: string[]
+  error?: string
+}
+
+/**
+ * Builds a loop package for a project that lives on another machine.
+ *
+ * The project and its samples land flat in one folder, which is the only thing that makes
+ * the result portable: FL resolves a missing sample by looking in the folder the project is
+ * in, which is why its own zipped packages carry absolute paths into a temp folder that
+ * stopped existing years ago and still open. Nothing is rewritten inside the `.flp`.
+ *
+ * Nothing is written on the machine being asked, either. It answers with a list; every file
+ * then comes over the ordinary ranged, hash-checked path, so a package is exactly as
+ * verified as any other copy.
+ */
+export async function packRemote(
+  flpPath: string,
+  onProgress: (
+    path: string,
+    received: number,
+    total: number,
+    target?: string,
+    bps?: number,
+    verifying?: boolean
+  ) => void = () => undefined
+): Promise<PackResult> {
+  const { settings } = getUserData()
+  const root = rootFor(settings.roots, flpPath)
+  if (!root?.remote) return { elsewhere: [], plugins: [], error: 'That project is not on another machine.' }
+
+  const rel = relFor([root], flpPath)
+  const within = rel ? withinRoot(rel) : ''
+  if (!within) return { elsewhere: [], plugins: [], error: 'That project could not be located.' }
+
+  const manifest = await manifestFor(root.remote, within)
+  if (!manifest) {
+    return { elsewhere: [], plugins: [], error: `${root.remote.deviceName} could not read that project.` }
+  }
+  if (manifest.error) return { elsewhere: [], plugins: [], error: manifest.error }
+
+  const destination = settings.remoteDownloadDir
+  if (!destination) {
+    return { elsewhere: [], plugins: [], error: 'No download folder is set - see Settings, Remote.' }
+  }
+  // Named after the project, beside everything else that comes over. Never merged into an
+  // existing folder: a package is a snapshot, and mixing two is how you get a project
+  // playing a sample from a different version of itself.
+  const stem = manifest.flp.name.replace(/\.flp$/i, '')
+  const dir = await freeDir(destination, stem)
+  await mkdir(dir, { recursive: true })
+
+  const failures: string[] = []
+  const items = [manifest.flp, ...manifest.samples]
+  for (const item of items) {
+    // Flat, and deliberately: the folders these sat in on the other machine are what FL
+    // will not be able to find, and the flat copy beside the project is what it can.
+    const target = await freeName(dir, item.name)
+    try {
+      await copyOne(root, item.rel, target, (received, total, bps, verifying) =>
+        onProgress(flpPath, received, total, target, bps, verifying)
+      )
+    } catch (error) {
+      failures.push(`${item.name}: ${(error as Error).message}`)
+    }
+  }
+  onProgress(flpPath, -1, -1, flpPath)
+
+  if (failures.length > 0) {
+    return { dir, elsewhere: manifest.elsewhere, plugins: manifest.plugins, error: failures[0] }
+  }
+  return { dir, elsewhere: manifest.elsewhere, plugins: manifest.plugins }
+}
+
+/** A folder beside the others that nothing is using. */
+async function freeDir(parent: string, stem: string): Promise<string> {
+  let candidate = join(parent, stem)
+  for (let n = 2; ; n++) {
+    try {
+      await stat(candidate)
+    } catch {
+      return candidate
+    }
+    candidate = join(parent, `${stem} (${n})`)
+  }
+}
+
+export interface PackPreview {
+  name: string
+  sampleCount: number
+  totalBytes: number
+  elsewhere: string[]
+  plugins: string[]
+  /** Of those plugins, the ones FL has not found on *this* machine. */
+  missingPlugins: string[]
+  error?: string
+}
+
+/**
+ * What packing this project would involve, before a byte moves.
+ *
+ * The plugin check is the reason this exists separately. A project opened without the
+ * plugins it loads comes up with them stubbed out, and saving it there writes the stub -
+ * so the settings are gone, silently, and the only sign is that the beat sounds wrong when
+ * it gets back. Nothing about copying samples can prevent that; being told first can.
+ */
+export async function previewPack(flpPath: string): Promise<PackPreview> {
+  const empty = { name: '', sampleCount: 0, totalBytes: 0, elsewhere: [], plugins: [], missingPlugins: [] }
+  const { settings } = getUserData()
+  const root = rootFor(settings.roots, flpPath)
+  if (!root?.remote) return { ...empty, error: 'That project is not on another machine.' }
+
+  const rel = relFor([root], flpPath)
+  const within = rel ? withinRoot(rel) : ''
+  if (!within) return { ...empty, error: 'That project could not be located.' }
+
+  const manifest = await manifestFor(root.remote, within)
+  if (!manifest) return { ...empty, error: `${root.remote.deviceName} could not read that project.` }
+  if (manifest.error) return { ...empty, error: manifest.error }
+
+  const here = await readPluginInventory(settings.flUserData || defaultFlUserData())
+  const have = new Set(here.names.map((name) => name.toLowerCase()))
+  const missingPlugins = manifest.plugins.filter((name) => !have.has(name.toLowerCase()))
+
+  return {
+    name: manifest.flp.name,
+    sampleCount: manifest.samples.length,
+    totalBytes: manifest.flp.size + manifest.samples.reduce((sum, one) => sum + one.size, 0),
+    elsewhere: manifest.elsewhere,
+    plugins: manifest.plugins,
+    missingPlugins
+  }
 }

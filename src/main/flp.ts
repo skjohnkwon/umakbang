@@ -20,6 +20,13 @@ import { plausibleBpm } from '../shared/tempo'
 const OLE_EPOCH_MS = Date.UTC(1899, 11, 30)
 const MS_PER_DAY = 86_400_000
 
+/** UTF-16LE, null-terminated: the path a channel or audio clip plays from. */
+const EVENT_SAMPLE_PATH = 196
+/** The generator a channel is. `Fruity Wrapper` means the next name is a third-party plugin. */
+const EVENT_GENERATOR = 201
+/** The name of the thing above - a channel's, or the wrapped plugin's. */
+const EVENT_INSTANCE_NAME = 203
+
 const EVENT_TEMPO = 66
 const EVENT_FINE_TEMPO = 156
 const EVENT_PROJECT_TIME = 237
@@ -302,4 +309,94 @@ async function readHead(path: string, length: number): Promise<Buffer> {
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+/** Trailing nulls off, which every text event carries. */
+function text(data: Buffer, at: number, size: number): string {
+  return data.toString('utf16le', at, at + size).replace(/\0+$/, '')
+}
+
+export interface FlpContents {
+  /** Sample paths exactly as the project records them - the *other* machine's paths. */
+  samples: string[]
+  /** Third-party plugins the project loads, by the name FL shows. */
+  plugins: string[]
+  /**
+   * Whether the walk reached the end of the event stream.
+   *
+   * The one field a caller must not ignore. A walk that lost the stream silently stops
+   * finding samples, and a package built from a short list is missing sounds without
+   * anything saying so - which is worse than refusing to build one.
+   */
+  clean: boolean
+}
+
+/**
+ * Everything a project needs from elsewhere: its samples, and the plugins it loads.
+ *
+ * One pass, because both answers come off the same walk and the file is read once either
+ * way. Samples are deduplicated in order - a kit is normally the same handful of one-shots
+ * referenced many times over, and a package wants each file once.
+ */
+export function collectFlpContents(data: Buffer): FlpContents {
+  const samples: string[] = []
+  const seen = new Set<string>()
+  const plugins: string[] = []
+  const pluginsSeen = new Set<string>()
+  let wrapped = false
+
+  if (data.length < 12 || data.toString('ascii', 0, 4) !== 'FLhd') {
+    return { samples, plugins, clean: false }
+  }
+  const headerLength = data.readUInt32LE(4)
+  let pos = 8 + headerLength
+  if (pos + 8 > data.length || data.toString('ascii', pos, pos + 4) !== 'FLdt') {
+    return { samples, plugins, clean: false }
+  }
+  const end = Math.min(pos + 8 + data.readUInt32LE(pos + 4), data.length)
+  pos += 8
+
+  while (pos < end) {
+    const before = pos
+    const eventId = data[pos]
+    pos++
+    if (eventId < 64) {
+      pos += 1
+    } else if (eventId < 128) {
+      pos += 2
+    } else if (eventId < 192) {
+      pos += WIDE_EVENT_SIZES[eventId] ?? 4
+    } else {
+      const { value: size, next } = readVarint(data, pos)
+      pos = next
+      if (!Number.isFinite(size) || size < 0 || pos + size > data.length) {
+        return { samples, plugins, clean: false }
+      }
+      if (eventId === EVENT_SAMPLE_PATH && size > 0) {
+        const path = text(data, pos, size)
+        if (path && !seen.has(path)) {
+          seen.add(path)
+          samples.push(path)
+        }
+      } else if (eventId === EVENT_GENERATOR) {
+        // Set for the *next* name only: a channel that is not a wrapper is a native one,
+        // and its name is a channel's name rather than a plugin's.
+        wrapped = text(data, pos, size) === 'Fruity Wrapper'
+      } else if (eventId === EVENT_INSTANCE_NAME) {
+        if (wrapped) {
+          // `Serum_x64 #3` is the third instance of one plugin, not a third plugin.
+          const name = text(data, pos, size).replace(/\s*#\d+$/, '')
+          if (name && !pluginsSeen.has(name)) {
+            pluginsSeen.add(name)
+            plugins.push(name)
+          }
+        }
+        wrapped = false
+      }
+      pos += size
+    }
+    if (pos <= before) return { samples, plugins, clean: false }
+  }
+
+  return { samples, plugins, clean: pos === end }
 }

@@ -101,8 +101,9 @@ import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
 import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
-import { downloadRemote } from './remote-download'
+import { downloadRemote, packRemote, previewPack } from './remote-download'
 import { extractArchive } from './archives'
+import { defaultFlUserData, readPluginInventory } from './plugins'
 import { readTailnet } from './tailscale'
 import { hostname } from 'node:os'
 import {
@@ -1671,6 +1672,31 @@ function registerIpc(): void {
    * on screen. Same reasoning as a finished copy: this is a moment the app knows for certain
    * that a folder changed, because it is the thing that changed it.
    */
+  /**
+   * Packs a project that lives on another machine into a folder here.
+   *
+   * Nothing is written there - the peer answers with a list and every file comes over the
+   * ordinary hash-checked path. The destination folder is re-read at the end for the same
+   * reason a finished copy is: this is the moment the app knows a folder changed.
+   */
+  ipcMain.handle('remote:packPreview', (_event, flpPath: string) => previewPack(flpPath))
+  ipcMain.handle('plugins:local', () =>
+    readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
+  )
+  ipcMain.handle('remote:pack', async (_event, flpPath: string) => {
+    const result = await packRemote(flpPath, (path, received, total, target, bps, verifying) => {
+      mainWindow?.webContents.send('remote:downloadProgress', {
+        path,
+        received,
+        total,
+        target,
+        bps,
+        verifying
+      })
+    })
+    if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true)
+    return result
+  })
   ipcMain.handle('fs:extractArchive', async (_event, path: string) => {
     const result = await extractArchive(path)
     if (result.dir) await refreshFolder(dirname(path), true)
