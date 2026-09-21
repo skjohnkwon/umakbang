@@ -128,12 +128,16 @@ export function initStore(): void {
    * merely does not exist yet is not the same as a path that could never exist here.
    */
   const settingsByKey = userData.settings as unknown as Record<string, unknown>
+  let mended = false
   for (const key of MACHINE_PATH_SETTINGS) {
     const value = settingsByKey[key]
     if (typeof value !== 'string' || value === '') continue
     const foreign =
       process.platform === 'win32' ? value.startsWith('/') : /^[A-Za-z]:[\\/]/.test(value)
-    if (foreign) settingsByKey[key] = ''
+    if (foreign) {
+      settingsByKey[key] = ''
+      mended = true
+    }
   }
 
   // Where a download lands when there is no folder on screen to put it in. Seeded the same
@@ -168,6 +172,17 @@ export function initStore(): void {
   if (!userData.settings.flUserData) {
     userData.settings.flUserData = join(app.getPath('documents'), 'Image-Line', 'FL Studio')
   }
+
+  /*
+   * Written out when the repair above found something.
+   *
+   * Nothing else in here saves - the seeds and the older repairs all wait for some later
+   * change to carry them to disk - which is fine for a default being filled in and wrong
+   * for this: until it is written, the settings file still holds the foreign path, so
+   * anything reading the file rather than this process sees the broken value and the repair
+   * has to happen again on every launch.
+   */
+  if (mended) scheduleWrite(userDataFile, () => userData)
 
   userData.settings.quickMove ??= []
   userData.tags ??= {}
