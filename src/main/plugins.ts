@@ -30,9 +30,16 @@ export interface PluginInventory {
   missing?: boolean
 }
 
-/** Walks a directory tree collecting `.fst` names. Depth is FL's, not ours: two or three. */
+/**
+ * Walks the database collecting `.fst` names.
+ *
+ * Stock plugins sit two deep - `Generators/Drum/BeepMap.fst` - but scanned third-party ones
+ * go under `Installed`, sorted by format and then by vendor, which is deeper and not a depth
+ * worth being clever about. The limit is only here so a folder somebody has pointed at by
+ * mistake cannot cost a walk of their whole disk.
+ */
 async function collectFst(dir: string, into: Set<string>, depth = 0): Promise<void> {
-  if (depth > 4) return
+  if (depth > 8) return
   let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
@@ -48,12 +55,37 @@ async function collectFst(dir: string, into: Set<string>, depth = 0): Promise<vo
   }
 }
 
+/**
+ * The plugin database, from whichever part of the path somebody pointed at.
+ *
+ * The setting is the *user data* folder and the database sits at `Presets/Plugin database`
+ * inside it - but the row says one and shows the other, so picking the database itself is
+ * the obvious mistake to make. All three spellings are accepted rather than one being right
+ * and the others silently reporting an empty library.
+ */
+async function databaseIn(userData: string): Promise<string | null> {
+  const candidates = [
+    join(userData, 'Presets', 'Plugin database'),
+    // Pointed at `Presets`.
+    join(userData, 'Plugin database'),
+    // Pointed straight at the database.
+    userData
+  ]
+  for (const candidate of candidates) {
+    try {
+      await stat(join(candidate, 'Generators'))
+      return candidate
+    } catch {
+      // Not this one.
+    }
+  }
+  return null
+}
+
 export async function readPluginInventory(userData: string): Promise<PluginInventory> {
-  const database = join(userData, 'Presets', 'Plugin database')
-  try {
-    await stat(database)
-  } catch {
-    return { names: [], from: database, missing: true }
+  const database = await databaseIn(userData)
+  if (!database) {
+    return { names: [], from: join(userData, 'Presets', 'Plugin database'), missing: true }
   }
   const names = new Set<string>()
   await collectFst(database, names)
