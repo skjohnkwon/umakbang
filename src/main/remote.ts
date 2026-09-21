@@ -23,7 +23,7 @@ import type {
   RemoteStats
 } from '../shared/types'
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
-import { getDataDir, getUserData } from './store'
+import { exportBackup, getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
 import { defaultFlUserData, type PluginInventory } from './plugins'
 
@@ -136,7 +136,9 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
     },
     libraries: librariesFromSettings(settings.deviceId),
     dataDir: getDataDir(),
-    flUserData: settings.flUserData || defaultFlUserData()
+    flUserData: settings.flUserData || defaultFlUserData(),
+    // Already without the keys that describe this machine - see `exportBackup`.
+    settings: exportBackup().settings as Record<string, unknown>
   }
 
   const forked = utilityProcess.fork(join(__dirname, 'remote-server.js'), [], {
@@ -278,6 +280,40 @@ export function remotePlugins(host: string): Promise<PluginInventory | null> {
         response.on('end', () => {
           try {
             resolve(JSON.parse(body) as PluginInventory)
+          } catch {
+            resolve(null)
+          }
+        })
+      }
+    )
+    request.on('timeout', () => {
+      request.destroy()
+      resolve(null)
+    })
+    request.on('error', () => resolve(null))
+  })
+}
+
+/** A peer's preferences, for adopting. Null when it will not say. */
+export function remoteSettings(host: string): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    const request = httpGet(
+      { host, port: REMOTE_PORT, path: '/settings', timeout: 10_000 },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume()
+          resolve(null)
+          return
+        }
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => {
+          body += chunk
+          if (body.length > 4 * 1024 * 1024) request.destroy()
+        })
+        response.on('end', () => {
+          try {
+            resolve(JSON.parse(body) as Record<string, unknown>)
           } catch {
             resolve(null)
           }

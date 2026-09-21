@@ -414,7 +414,17 @@ export function getUserData(): UserData {
 }
 
 export function updateSettings(patch: Partial<Settings>): Settings {
-  userData.settings = { ...userData.settings, ...patch }
+  /*
+   * Stamped unless the patch brought its own stamp.
+   *
+   * A patch carrying `settingsUpdatedAt` is an adoption - another machine's settings,
+   * arriving with the time *they* were changed - and it has to keep that time. Stamped with
+   * now, the machine that just copied would look like the newer of the two and the pair
+   * would take turns copying each other for as long as both were running.
+   */
+  const stamped =
+    patch.settingsUpdatedAt === undefined ? { ...patch, settingsUpdatedAt: Date.now() } : patch
+  userData.settings = { ...userData.settings, ...stamped }
   scheduleWrite(userDataFile, () => userData)
   return userData.settings
 }
@@ -645,6 +655,15 @@ const LOCAL_ONLY = [
   // should be able to switch on.
   'shareLibrary'
 ] as const
+
+/**
+ * Everything a settings export leaves behind, for anyone who has to strip it again.
+ *
+ * The same list, exported rather than copied, because two lists that had to agree forever
+ * would eventually stop agreeing - and the place that would show is a machine quietly
+ * adopting another's device id.
+ */
+export const LOCAL_ONLY_SETTINGS: readonly string[] = LOCAL_ONLY
 
 export function exportBackup(): SettingsBackup {
   const settings: Partial<Settings> = { ...userData.settings }

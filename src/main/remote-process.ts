@@ -31,6 +31,8 @@ import { readFileSync } from 'node:fs'
 export interface RemoteConfig {
   /** Where FL Studio keeps its user data here, so the plugin list can be read from it. */
   flUserData: string
+  /** This machine's preferences, already stripped of everything that describes it. */
+  settings: Record<string, unknown>
   /** The tailnet address to bind. Never a wildcard - see the note above. */
   address: string
   port: number
@@ -363,6 +365,24 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
         return
       }
       sendHash(response, file)
+      return
+    }
+
+    case '/settings': {
+      /*
+       * Preferences only, and the list of what that excludes already exists.
+       *
+       * `LOCAL_ONLY` in `store.ts` is the same carve-out a settings export uses - the
+       * device id, the library folders, window bounds, an interface that is plugged into
+       * this machine, a licence key. Everything it names describes *this* computer rather
+       * than how somebody likes to work, and a machine that adopted them would be claiming
+       * to be this one.
+       *
+       * Read rather than written: the asking machine decides to take them. There is no way
+       * to push settings onto a peer, which keeps this server what it has been all along -
+       * something that answers questions and changes nothing.
+       */
+      sendJson(response, current.settings)
       return
     }
 

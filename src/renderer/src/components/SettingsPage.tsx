@@ -659,6 +659,8 @@ function RemoteSection(): React.JSX.Element {
   const patchSettings = useLibrary((s) => s.patchSettings)
   const roots = useLibrary((s) => s.roots)
   const [server, setServer] = useState<RemoteServerState | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncNote, setSyncNote] = useState<string | null>(null)
 
   useEffect(() => {
     void window.umakbang.remoteServerState().then(setServer)
@@ -712,6 +714,38 @@ function RemoteSection(): React.JSX.Element {
             }}
           >
             Choose…
+          </Button>
+        </Row>
+      </Section>
+
+      <Section
+        title="Settings"
+        hint="Whichever machine's settings were changed most recently win, and this happens on every launch as well."
+      >
+        <Row
+          label="Take the newest settings"
+          hint={
+            syncNote ??
+            'Asks every machine that is serving, and adopts the one changed most recently. Nothing is sent: a machine that is behind catches up on its own next launch.'
+          }
+        >
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={syncing}
+            onClick={() => {
+              setSyncing(true)
+              void window.umakbang
+                .syncSettings()
+                .then((result) =>
+                  setSyncNote(
+                    result.adopted ? `Took settings from ${result.adopted}.` : (result.reason ?? '')
+                  )
+                )
+                .finally(() => setSyncing(false))
+            }}
+          >
+            {syncing ? 'Checking…' : 'Sync now'}
           </Button>
         </Row>
       </Section>

@@ -301,6 +301,20 @@ export interface Settings {
    * answer than a page they learn to skip past.
    */
   showStats: boolean
+  /**
+   * When these settings last genuinely changed, as epoch milliseconds.
+   *
+   * It travels, unlike everything in `LOCAL_ONLY`, and that is the whole point: it is what
+   * lets two machines agree which of them is behind without either having to be the
+   * authority. Adopting a peer's settings takes its stamp along with them, so both then
+   * hold the same value - stamping the adoption with *now* would make the machine that just
+   * copied look like the newer one, and the two would take turns copying each other forever.
+   *
+   * Compared across machines, so it is only as good as their clocks. On a tailnet they are
+   * all talking to the same time servers, which is good enough for "which of these did I
+   * change last"; it would not be good enough to merge with.
+   */
+  settingsUpdatedAt: number
   /** Type filters survive restarts - "audio only" is a mode, not a momentary action. */
   typeFilter: { kinds: TrackKind[]; exts: string[] }
   /**
@@ -874,6 +888,7 @@ export const DEFAULT_SETTINGS: Settings = {
   roots: [],
   recentRoots: [],
   showStats: true,
+  settingsUpdatedAt: 0,
   queueSource: 'folder',
   // Newest first: the thing you were working on last is the thing you want next.
   sortKey: 'mtimeMs',

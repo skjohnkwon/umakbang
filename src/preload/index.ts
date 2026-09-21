@@ -472,6 +472,9 @@ const api = {
     host: string
   ): Promise<{ names: string[]; from: string; missing?: boolean } | null> =>
     ipcRenderer.invoke('remote:plugins', host),
+  /** Adopts the most recently changed settings from any machine that is serving. */
+  syncSettings: (): Promise<{ adopted?: string; reason?: string }> =>
+    ipcRenderer.invoke('remote:syncSettings'),
   /** Plugins FL has found on this machine. */
   localPlugins: (): Promise<{ names: string[]; from: string; missing?: boolean }> =>
     ipcRenderer.invoke('plugins:local'),

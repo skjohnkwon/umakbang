@@ -75,7 +75,8 @@ import {
   setNote,
   setRating,
   setTags,
-  updateSettings
+  updateSettings,
+  LOCAL_ONLY_SETTINGS
 } from './store'
 import { appendIndexPatch, clearIndex, initIndexStore } from './index-store'
 import {
@@ -110,6 +111,7 @@ import {
   listRemoteDevices,
   remotePlugins,
   remoteServerState,
+  remoteSettings,
   stopWatchingRemoteServer,
   watchRemoteServer,
   remoteStats,
@@ -812,6 +814,54 @@ function journal(result: TransferResult | TrashResult): void {
     if (mine.length === 0 && gone.length === 0) continue
     appendIndexPatch(root.path, { removed: gone, added: mine })
   }
+}
+
+/**
+ * Takes whichever machine's settings were changed most recently.
+ *
+ * Every machine keeps the time its own settings last changed, and that time travels with
+ * them - so the newest wins and there is no authority to elect. Adopting keeps the other
+ * machine's stamp rather than taking a new one, which is what stops a pair copying each
+ * other back and forth for as long as both are running.
+ *
+ * Only ever adopts. Nothing is sent, and a peer that is behind is left alone to notice on
+ * its own next launch - which it will, because it is reading the same numbers.
+ *
+ * `LOCAL_ONLY_SETTINGS` is stripped again here rather than trusted. The machine that
+ * answered stripped it already, but a peer on an older build would not have, and this end
+ * should not be the one that finds out by adopting somebody else's device id.
+ */
+async function syncSettingsFromPeers(): Promise<{
+  adopted?: string
+  reason?: string
+}> {
+  const { devices } = await listRemoteDevices()
+  const serving = devices.filter((device) => device.serving && device.node.ipv4)
+  if (serving.length === 0) return { reason: 'No other machine is serving.' }
+
+  const mine = getUserData().settings.settingsUpdatedAt ?? 0
+  let best: { name: string; at: number; settings: Record<string, unknown> } | null = null
+
+  for (const device of serving) {
+    const theirs = await remoteSettings(device.node.ipv4 as string)
+    if (!theirs) continue
+    const at = Number(theirs.settingsUpdatedAt ?? 0)
+    if (!Number.isFinite(at) || at <= mine) continue
+    if (!best || at > best.at) {
+      best = { name: device.node.hostName || device.node.name, at, settings: theirs }
+    }
+  }
+
+  if (!best) return { reason: 'Nothing newer anywhere else.' }
+
+  const safe: Record<string, unknown> = { ...best.settings }
+  for (const key of LOCAL_ONLY_SETTINGS) delete safe[key]
+  const settings = updateSettings(safe as Partial<Settings>)
+  mainWindow?.webContents.send('library:settings', { settings })
+  // The server was handed its config at startup and has to be told when what it serves
+  // changes - the same reason a settings edit restarts it.
+  void startRemoteServer()
+  return { adopted: best.name }
 }
 
 function registerIpc(): void {
@@ -1820,6 +1870,17 @@ function registerIpc(): void {
    */
   ipcMain.handle('remote:packPreview', (_event, flpPath: string) => previewPack(flpPath))
   ipcMain.handle('remote:plugins', (_event, host: string) => remotePlugins(host))
+  /**
+   * Adopts another machine's preferences.
+   *
+   * Applied through `updateSettings` like any other change, so everything that already
+   * watches for one still fires - the server restarts if sharing or the FL folder moved,
+   * the renderer redraws, the file is written. `LOCAL_ONLY` was stripped by the machine
+   * that answered, and is stripped again here rather than trusted: a peer on an older build
+   * would send more than it should, and this end should not be the one that finds out the
+   * hard way.
+   */
+  ipcMain.handle('remote:syncSettings', () => syncSettingsFromPeers())
   ipcMain.handle('plugins:local', () =>
     readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())
   )
@@ -2069,6 +2130,16 @@ if (!app.requestSingleInstanceLock()) {
       // on - so the only thing that would have noticed is another machine failing to reach
       // this one. It also covers opening umakbang before Tailscale has connected.
       watchRemoteServer()
+      /*
+       * And adopts whichever machine changed its settings last.
+       *
+       * After the server rather than before: this asks the tailnet who is serving, and a
+       * machine that has not finished binding its own socket has not finished finding out
+       * where anybody else is either.
+       */
+      void syncSettingsFromPeers().then((result) => {
+        if (result.adopted) console.log(`umakbang: took settings from ${result.adopted}`)
+      })
     })
 
     app.on('activate', () => {
