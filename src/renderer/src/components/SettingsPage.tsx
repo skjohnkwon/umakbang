@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   ChevronRight,
   Download,
@@ -833,6 +833,9 @@ function FlPluginManager(): React.JSX.Element {
   const [only, setOnly] = useState<'all' | 'favourites' | 'others'>('all')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  /** Where the last click landed, so shift can mean "everything between". */
+  const anchor = useRef<number | null>(null)
 
   const load = useCallback(async () => {
     const result = await window.umakbang.flCatalog()
@@ -855,6 +858,39 @@ function FlPluginManager(): React.JSX.Element {
   }, [catalog, query, only])
 
   const favourites = (catalog ?? []).filter((plugin) => plugin.favourite).length
+  /** What the buttons act on: the selection, or everything the search left if there is none. */
+  const acting = useMemo(
+    () => (selected.size > 0 ? shown.filter((plugin) => selected.has(plugin.name)) : shown),
+    [shown, selected]
+  )
+
+  /**
+   * Picks a row, or a run of them.
+   *
+   * Shift takes everything between this row and the last one touched, against the list as
+   * it is filtered rather than the catalogue - a range somebody drew on screen should mean
+   * what it looked like, not what it would have meant unfiltered.
+   */
+  const pick = useCallback(
+    (index: number, extend: boolean) => {
+      setSelected((current) => {
+        const next = new Set(current)
+        const from = extend && anchor.current !== null ? anchor.current : index
+        const [lo, hi] = from <= index ? [from, index] : [index, from]
+        const run = shown.slice(lo, hi + 1).map((plugin) => plugin.name)
+        // A range takes its lead from the row that started it: if that row was being turned
+        // on, the whole run goes on.
+        const turningOn = !current.has(shown[from]?.name ?? '')
+        for (const name of run) {
+          if (turningOn) next.add(name)
+          else next.delete(name)
+        }
+        return next
+      })
+      anchor.current = index
+    },
+    [shown]
+  )
 
   const apply = useCallback(
     async (names: string[], wanted: boolean) => {
@@ -868,6 +904,9 @@ function FlPluginManager(): React.JSX.Element {
             : `${wanted ? 'Added' : 'Removed'} ${result.changed}.`
         )
         await load()
+        // The rows it named have changed side, and a selection that survives that is a
+        // selection about a list that no longer exists.
+        setSelected(new Set())
       } finally {
         setBusy(false)
       }
@@ -913,25 +952,40 @@ function FlPluginManager(): React.JSX.Element {
 
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <span>
-          {shown.length.toLocaleString()} shown · {favourites.toLocaleString()} favourites
+          {selected.size > 0
+            ? `${selected.size.toLocaleString()} selected`
+            : `${shown.length.toLocaleString()} shown · ${favourites.toLocaleString()} favourites`}
         </span>
-        {/* The whole point: whatever the search has narrowed to, in one press. */}
+        {/* Selecting nothing means "everything I can see", which is what the search was
+            for. Selecting something means that, and the buttons say which. */}
         <Button
-          variant="secondary"
+          variant="ghost"
           size="sm"
-          className="ml-auto"
-          disabled={busy || shown.every((plugin) => plugin.favourite)}
-          onClick={() => void apply(shown.filter((p) => !p.favourite).map((p) => p.name), true)}
+          disabled={shown.length === 0}
+          onClick={() =>
+            setSelected((current) =>
+              current.size > 0 ? new Set() : new Set(shown.map((plugin) => plugin.name))
+            )
+          }
         >
-          Favourite these
+          {selected.size > 0 ? 'Clear' : 'Select all'}
         </Button>
         <Button
           variant="secondary"
           size="sm"
-          disabled={busy || shown.every((plugin) => !plugin.favourite)}
-          onClick={() => void apply(shown.filter((p) => p.favourite).map((p) => p.name), false)}
+          className="ml-auto"
+          disabled={busy || acting.every((plugin) => plugin.favourite)}
+          onClick={() => void apply(acting.filter((p) => !p.favourite).map((p) => p.name), true)}
         >
-          Remove these
+          Favourite{selected.size > 0 ? ` ${selected.size}` : ' these'}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || acting.every((plugin) => !plugin.favourite)}
+          onClick={() => void apply(acting.filter((p) => p.favourite).map((p) => p.name), false)}
+        >
+          Unfavourite{selected.size > 0 ? ` ${selected.size}` : ' these'}
         </Button>
       </div>
 
@@ -941,28 +995,51 @@ function FlPluginManager(): React.JSX.Element {
         {shown.length === 0 ? (
           <p className="px-2.5 py-2 text-[11px] text-muted-foreground/60">Nothing matches.</p>
         ) : (
-          shown
-            .slice(0, 300)
-            .map((plugin) => (
-              <button
+          shown.slice(0, 300).map((plugin, index) => {
+            const picked = selected.has(plugin.name)
+            return (
+              <div
                 key={`${plugin.kind}-${plugin.name}`}
-                type="button"
-                disabled={busy}
-                onClick={() => void apply([plugin.name], !plugin.favourite)}
-                className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[11.5px] hover:bg-secondary/60"
+                // The row selects. Shift extends from the last one touched.
+                onClick={(event) => pick(index, event.shiftKey)}
+                className={cn(
+                  'flex w-full cursor-default items-center gap-2 px-2.5 py-1 text-[11.5px] select-none',
+                  picked ? 'bg-primary/15' : 'hover:bg-secondary/60'
+                )}
               >
-                <Star
+                <span
+                  aria-hidden
                   className={cn(
-                    'h-3.5 w-3.5 shrink-0',
-                    plugin.favourite ? 'fill-primary text-primary' : 'text-muted-foreground/40'
+                    'h-3 w-3 shrink-0 rounded-[3px] border',
+                    picked ? 'border-primary bg-primary' : 'border-muted-foreground/40'
                   )}
                 />
+                {/* The star acts on that one plugin there and then, which is what a star
+                    looks like it does - so it must not also be selecting. */}
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label={plugin.favourite ? `Unfavourite ${plugin.name}` : `Favourite ${plugin.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void apply([plugin.name], !plugin.favourite)
+                  }}
+                  className="shrink-0"
+                >
+                  <Star
+                    className={cn(
+                      'h-3.5 w-3.5',
+                      plugin.favourite ? 'fill-primary text-primary' : 'text-muted-foreground/40'
+                    )}
+                  />
+                </button>
                 <span className="truncate">{plugin.name}</span>
                 <span className="ml-auto shrink-0 text-[10.5px] text-muted-foreground/50">
                   {plugin.format}
                 </span>
-              </button>
-            ))
+              </div>
+            )
+          })
         )}
       </div>
       {shown.length > 300 && (
