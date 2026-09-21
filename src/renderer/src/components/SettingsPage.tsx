@@ -1362,11 +1362,12 @@ function DeveloperSection(): React.JSX.Element {
  * What changed, under the version that changed it.
  *
  * In the Updates section rather than a page of its own, because "what version am I on" and
- * "what did that get me" are one question asked twice. The entry matching the running build
- * is open; older ones are a line each until asked for, so the section stays a section.
+ * "what did that get me" are one question asked twice. Every entry is a line until asked
+ * for, so the section stays a section: the newest used to open itself, which put nine
+ * paragraphs between the version number and the release under it.
  */
 function ChangelogList({ running }: { running: string }): React.JSX.Element | null {
-  const [open, setOpen] = useState<string | null>(CHANGELOG[0]?.version ?? null)
+  const [open, setOpen] = useState<string | null>(null)
   if (CHANGELOG.length === 0) return null
 
   return (
