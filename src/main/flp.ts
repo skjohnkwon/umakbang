@@ -24,6 +24,25 @@ const EVENT_TEMPO = 66
 const EVENT_FINE_TEMPO = 156
 const EVENT_PROJECT_TIME = 237
 
+/**
+ * The two events whose size the id-range rule gets wrong.
+ *
+ * Ids 128-191 are supposed to carry a dword, and almost all of them do. 169 carries eight
+ * bytes and 172 carries five, and a walk that believes the rule loses the stream at the
+ * first one it meets - permanently, because every id after it is read out of the middle of
+ * somebody else's payload.
+ *
+ * Measured over all 2,796 projects in this library: the rule alone walks 2,774 of them
+ * cleanly; 169 alone fixes 16 of the remaining 21 and 172 alone fixes 5; together they walk
+ * **2,795, with none left desynced**, and neither widens a file that already parsed. The
+ * last one is not an FLP - it has no `FLhd` and never did.
+ *
+ * The widths are what the files say rather than what any documentation says, so a third
+ * exception in some future format is found the same way: walk the library and see which
+ * files stop ending where they said they would.
+ */
+const WIDE_EVENT_SIZES: Record<number, number> = { 169: 8, 172: 5 }
+
 /** FL Studio 3 shipped in 2003; anything outside this window is a corrupt record. */
 const SANE_MIN_MS = Date.UTC(1998, 0, 1)
 
@@ -157,7 +176,7 @@ export function parseFlp(data: Buffer): FlpProject | null {
       if (eventId === EVENT_FINE_TEMPO && found.bpm === undefined && pos + 4 <= data.length) {
         found.bpm = round2(data.readUInt32LE(pos) / 1000)
       }
-      pos += 4
+      pos += WIDE_EVENT_SIZES[eventId] ?? 4
     } else {
       const { value: size, next } = readVarint(data, pos)
       pos = next
@@ -203,17 +222,21 @@ export function parseFlp(data: Buffer): FlpProject | null {
 }
 
 /**
- * Finds the tempo event by its bytes, for the projects the walk cannot reach it in.
+ * Finds the tempo event by its bytes, for a project the walk cannot reach it in.
  *
- * FL Studio 25.2.4 writes four bytes between the loop flag and the registration string that
- * the id-range sizing rule gets wrong, and the walk loses the stream there - permanently,
- * two bytes before the tempo. It is 162 of the 2,784 projects in this library and every one
- * of them is a recent save, so it is the newest work that would go without.
+ * This existed because the walk used to lose the stream: the id-range sizing rule is wrong
+ * about two events, and a walk that believed it desynced permanently at the first one it
+ * met - often two bytes before the tempo. `WIDE_EVENT_SIZES` fixes that at the source, and
+ * measured over all 2,796 projects here the walk now reaches the end of every one.
+ *
+ * Kept anyway, as a fallback rather than a workaround. It costs nothing on a file the walk
+ * handled - it only runs when the walk came back with no tempo, or with one no music is
+ * played at - and a third mis-sized event in some future format would otherwise take the
+ * tempo down with it. Measured before the fix it agreed with the walk 2,583 times and
+ * contradicted it none, so it is not a worse answer, only a narrower one.
  *
  * The event is unmistakable enough to find directly: the id byte, then a dword that has to
- * be a tempo music is actually played at and a whole tenth of a BPM. Measured over every
- * project here, that agreed with the walk 2,583 times, contradicted it none, and answered
- * all 162 the walk had lost - never further than 150 bytes into the stream.
+ * be a tempo music is actually played at and a whole tenth of a BPM.
  */
 function scanForTempo(data: Buffer, from: number): number | undefined {
   const limit = Math.min(data.length - 5, from + TEMPO_SCAN_BYTES)
