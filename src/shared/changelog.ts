@@ -20,6 +20,20 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.3.1',
+    date: '2026-09-21',
+    changes: [
+      'Refresh in another machine\u2019s folder asks that machine, rather than looking for its files on this one. A remote library lives at a path on the computer serving it, so reading it here found nothing and struck every row through as missing. Nothing was ever deleted, but the library looked gone.',
+      'A file found again stops looking missing. Rows dimmed by an earlier failed read stayed struck through until the app was restarted, even once a scan had confirmed the file was there.',
+      'Section headings are no longer in capitals. FOLDERS, DEVICES and the file table\u2019s column headers are sentence case, in the sidebar, both menus, the stats charts and the video editor.',
+      'The settings text is shorter. Sixty-odd explanations that argued their own case are a line each.',
+      'The stem model picker shows that there is a choice. It opened on perseus with three lowercase names under it and called the newest of the four old; Andromeda is first now and says it is the newest.',
+      'Tailnet moved to Settings, Remote. Adding another machine\u2019s library is done there, and it was behind the Developer page, which is headed \u201cfor testing umakbang, not for using it\u201d.',
+      'The track details preview matches the player again. It showed a key without its relative pair and a project time that belonged to no track at all.',
+      'Changelog entries all start closed, and the About box is the width of what is in it.'
+    ]
+  },
+  {
     version: '0.3.0',
     date: '2026-09-21',
     changes: [
