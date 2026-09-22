@@ -23,6 +23,7 @@ import type {
   RemoteStats
 } from '../shared/types'
 import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
+import type { SettingsBackup } from '../shared/backup'
 import { MACHINE_PATH_SETTINGS, exportBackup, getDataDir, getUserData } from './store'
 import { readTailnet } from './tailscale'
 import { defaultFlUserData, type PluginInventory } from './plugins'
@@ -323,6 +324,59 @@ export function remoteSettings(host: string): Promise<Record<string, unknown> | 
         response.on('end', () => {
           try {
             resolve(JSON.parse(body) as Record<string, unknown>)
+          } catch {
+            resolve(null)
+          }
+        })
+      }
+    )
+    request.on('timeout', () => {
+      request.destroy()
+      resolve(null)
+    })
+    request.on('error', () => resolve(null))
+  })
+}
+
+/** How much of a peer's tags, ratings and analysis to accept before giving up on it. */
+const METADATA_LIMIT = 128 * 1024 * 1024
+
+/**
+ * A peer's tags, ratings, notes and analysis, shaped as a backup.
+ *
+ * Deliberately the same shape a settings export has, so the folder-mapping wizard and
+ * `importBackup` take it without knowing where it came from. Paths are the peer's, which is
+ * exactly what that wizard exists to translate.
+ *
+ * A far bigger cap than `/settings`: a rated library is sparse, but a detected tempo and key
+ * for a few hundred thousand files is tens of megabytes, and truncating that would hand the
+ * wizard a half-file to merge.
+ */
+export function remoteMetadata(host: string): Promise<SettingsBackup | null> {
+  return new Promise((resolve) => {
+    const request = httpGet(
+      { host, port: REMOTE_PORT, path: '/metadata', timeout: 60_000 },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume()
+          resolve(null)
+          return
+        }
+        const chunks: string[] = []
+        let size = 0
+        response.setEncoding('utf8')
+        response.on('data', (chunk: string) => {
+          size += chunk.length
+          if (size > METADATA_LIMIT) {
+            request.destroy()
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.on('end', () => {
+          try {
+            const parsed = JSON.parse(chunks.join('')) as SettingsBackup
+            resolve(parsed?.kind === 'umakbang-settings' ? parsed : null)
           } catch {
             resolve(null)
           }

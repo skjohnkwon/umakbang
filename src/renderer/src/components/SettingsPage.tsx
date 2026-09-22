@@ -1124,6 +1124,8 @@ function ServerMonitor({ peers }: { peers: RemoteDevice[] }): React.JSX.Element 
  */
 function TailnetSection(): React.JSX.Element {
   const roots = useLibrary((s) => s.roots)
+  const beginRemoteImport = useLibrary((s) => s.beginRemoteImport)
+  const [importing, setImporting] = useState(false)
   const [state, setState] = useState<{
     tailnet: TailnetStatus
     devices: RemoteDevice[]
@@ -1265,6 +1267,30 @@ function TailnetSection(): React.JSX.Element {
           {device.serving && device.hello?.libraries.length === 0 && (
             <div className="mt-1 pl-3.5 text-[11px] text-muted-foreground/60">
               Serving, but no library is open there.
+            </div>
+          )}
+
+          {/* Under the libraries, because it is about the same files: the stars and notes
+              put on them over there, landing on this machine's copy of them. */}
+          {device.serving && device.node.ipv4 && (
+            <div className="mt-1 flex items-center gap-2 pl-3.5 text-[11px]">
+              <span className="text-muted-foreground/70">Tags, ratings and notes</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="ml-auto"
+                disabled={importing}
+                onClick={() => {
+                  const host = device.node.ipv4
+                  if (!host) return
+                  setImporting(true)
+                  void beginRemoteImport(host, device.node.hostName || device.node.name).finally(
+                    () => setImporting(false)
+                  )
+                }}
+              >
+                {importing ? 'Asking…' : 'Import…'}
+              </Button>
             </div>
           )}
         </div>

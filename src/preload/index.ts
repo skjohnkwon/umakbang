@@ -475,6 +475,9 @@ const api = {
   /** Adopts the most recently changed settings from any machine that is serving. */
   syncSettings: (): Promise<{ adopted?: string; reason?: string }> =>
     ipcRenderer.invoke('remote:syncSettings'),
+  /** A peer's tags, ratings, notes and analysis, for the folder-mapping wizard to translate. */
+  remoteMetadata: (host: string): Promise<SettingsBackup | null> =>
+    ipcRenderer.invoke('remote:metadata', host),
   /* --- FL's plugin database --- */
   /** Every plugin FL has found here, and which are favourites. */
   flCatalog: (): Promise<{

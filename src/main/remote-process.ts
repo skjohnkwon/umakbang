@@ -27,6 +27,14 @@ import { flRelative, parseRange, relativeToLibrary, resolveInLibrary, resolveUnd
 import { collectFlpContents } from './flp'
 import { readPluginInventory } from './plugins'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+/** As much of a peer's root as `/metadata` cares about: where it is, and whose it is. */
+interface RemoteBackupRoot {
+  path: string
+  label: string
+  remote?: unknown
+}
 
 export interface RemoteConfig {
   /** Where FL Studio keeps its user data here, so the plugin list can be read from it. */
@@ -396,6 +404,53 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
        * something that answers questions and changes nothing.
        */
       sendJson(response, current.settings)
+      return
+    }
+
+    case '/metadata': {
+      /*
+       * The tags, ratings and notes, for a machine that wants them.
+       *
+       * Read off the data file on every request rather than taken from `config`. The
+       * config is a snapshot from when this server started, which is the right shape for
+       * an address and the wrong one for something a person edits all day: a rating given
+       * this afternoon would not travel until the next restart.
+       *
+       * `settings: {}` deliberately. This is the shape `remapBackup` and `importBackup`
+       * already take, and leaving the settings out of it means the asking machine folds in
+       * the path-keyed maps and nothing else - preferences have their own route, their own
+       * carve-out and their own button.
+       */
+      try {
+        const raw = readFileSync(join(current.dataDir, 'umakbang-data.json'), 'utf8')
+        const data = JSON.parse(raw) as {
+          settings?: { roots?: RemoteBackupRoot[] }
+          tags?: Record<string, string[]>
+          ratings?: Record<string, number>
+          notes?: Record<string, string>
+          detectedBpm?: Record<string, number>
+          detectedKey?: Record<string, string>
+        }
+        // This machine's own folders only. A root it has mounted from somewhere else is a
+        // third machine's library, and offering it here would ask the puller where another
+        // computer's files live on this one.
+        const roots = (data.settings?.roots ?? []).filter((root) => !root.remote)
+        sendJson(response, {
+          kind: 'umakbang-settings',
+          version: 2,
+          exportedAt: new Date().toISOString(),
+          exportedRoot: roots[0]?.path ?? null,
+          exportedRoots: roots,
+          settings: {},
+          tags: data.tags ?? {},
+          ratings: data.ratings ?? {},
+          notes: data.notes ?? {},
+          detectedBpm: data.detectedBpm ?? {},
+          detectedKey: data.detectedKey ?? {}
+        })
+      } catch {
+        fail(response, 500)
+      }
       return
     }
 

@@ -113,6 +113,7 @@ import {
   listRemoteDevices,
   remotePlugins,
   remoteServerState,
+  remoteMetadata,
   remoteSettings,
   stopWatchingRemoteServer,
   watchRemoteServer,
@@ -1919,6 +1920,15 @@ function registerIpc(): void {
    * hard way.
    */
   ipcMain.handle('remote:syncSettings', () => syncSettingsFromPeers())
+  /**
+   * A peer's tags, ratings and notes, fetched but not applied.
+   *
+   * Handed straight to the folder-mapping wizard rather than merged here. The two machines
+   * keep the same library at different paths, and a blind merge would write a rating onto
+   * `E:\SECRET SAUCE\...` on a Mac - a key nothing will ever look up again. Asking is what
+   * the wizard is for, and this is the same conversation an imported file already has.
+   */
+  ipcMain.handle('remote:metadata', (_event, host: string) => remoteMetadata(host))
   /* --- FL's plugin database --- */
   ipcMain.handle('fl:catalog', async () => {
     const inventory = await readPluginInventory(getUserData().settings.flUserData || defaultFlUserData())

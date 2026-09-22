@@ -21,6 +21,7 @@ import { setInternalDropHandler } from '@/lib/drag'
 import { forgetPeaks, setDecodeObserver } from '@/lib/peaks'
 import { transcodeToMp3 } from '@/lib/youtube'
 import type { BackupSummary, FolderMapping, SettingsBackup } from '@shared/backup'
+import { summariseBackup } from '@shared/backup'
 import {
   analyseDecoded,
   configureAnalysis,
@@ -523,6 +524,8 @@ interface LibraryState {
     here: 'windows' | 'posix'
   } | null
   beginImport: () => Promise<void>
+  /** The same wizard, fed by a peer over the tailnet instead of a file on this disk. */
+  beginRemoteImport: (host: string, name: string) => Promise<void>
   cancelImport: () => void
   applyBackup: (backup: SettingsBackup, mapping: FolderMapping) => Promise<void>
   /**
@@ -1793,6 +1796,36 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
     if (!result.backup || !result.summary || !result.here) return
     set({ importing: { backup: result.backup, summary: result.summary, here: result.here } })
+  },
+
+  /**
+   * Tags, ratings and notes from another machine, through the same wizard a file takes.
+   *
+   * Not a straight merge, and not because merging is hard: the two machines hold the same
+   * library at different paths, so every key in what arrives names a place that does not
+   * exist here. The wizard is the part that asks where each of the peer's folders lives on
+   * this one, and it already knows how to do that for a file - this hands it the same shape
+   * off the network.
+   */
+  beginRemoteImport: async (host, name) => {
+    const backup = await window.umakbang.remoteMetadata(host)
+    if (!backup) {
+      // Worth naming the likely cause: a peer that predates this feature answers 404, which
+      // is indistinguishable from a refusal unless the message says so.
+      get().notify(
+        `${name} would not hand over its tags and ratings. It may be on an older umakbang.`,
+        'error'
+      )
+      return
+    }
+    const summary = summariseBackup(backup)
+    if (summary.folders.length === 0) {
+      get().notify(`${name} has nothing tagged or rated yet.`)
+      return
+    }
+    set({
+      importing: { backup, summary, here: get().platform?.isWindows ? 'windows' : 'posix' }
+    })
   },
 
   cancelImport: () => set({ importing: null }),
