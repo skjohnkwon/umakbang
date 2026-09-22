@@ -51,9 +51,32 @@ export interface RemoteConfig {
   dataDir: string
 }
 
-export type RemoteCommand = { type: 'init'; config: RemoteConfig } | { type: 'stop' }
+export type RemoteCommand =
+  | { type: 'init'; config: RemoteConfig }
+  | { type: 'stop' }
+  /** The parent's answer to a `write`. See `RemoteWrite`. */
+  | { type: 'wrote'; id: number; ok: boolean; reason?: string }
+
+/**
+ * A tag or a rating, on its way to the one process allowed to record it.
+ *
+ * This process does not write `umakbang-data.json`, and must not: the parent owns that document,
+ * writes it atomically and debounced, and holds the copy the window is reading. A second writer
+ * would lose whichever edit landed second and leave the open window showing neither. So a write
+ * that arrives over the wire is forwarded and awaited, and the socket is answered on what the
+ * parent says happened.
+ */
+export interface RemoteWrite {
+  type: 'write'
+  id: number
+  kind: 'rating' | 'tags'
+  path: string
+  rating?: number
+  tags?: string[]
+}
 
 export type RemoteEvent =
+  | RemoteWrite
   | { type: 'ready' }
   | { type: 'listening'; address: string; port: number }
   | { type: 'failed'; reason: string }
@@ -73,6 +96,59 @@ const STATS_THROTTLE_MS = 400
 
 let server: Server | null = null
 let config: RemoteConfig | null = null
+
+/**
+ * Writes forwarded to the parent and not yet answered.
+ *
+ * Timed out rather than left hanging: the parent is the browser process, and if it is wedged
+ * badly enough not to answer, the honest thing to tell the phone is that the write did not land
+ * - not to hold its socket open until it gives up.
+ */
+const pendingWrites = new Map<number, (ok: boolean, reason?: string) => void>()
+let nextWriteId = 1
+const WRITE_TIMEOUT_MS = 10_000
+
+function forward(write: Omit<RemoteWrite, 'type' | 'id'>): Promise<{ ok: boolean; reason?: string }> {
+  return new Promise((resolve) => {
+    const id = nextWriteId++
+    const timer = setTimeout(() => {
+      pendingWrites.delete(id)
+      resolve({ ok: false, reason: 'the app did not answer' })
+    }, WRITE_TIMEOUT_MS)
+    pendingWrites.set(id, (ok, reason) => {
+      clearTimeout(timer)
+      pendingWrites.delete(id)
+      resolve({ ok, reason })
+    })
+    post({ type: 'write', id, ...write } as RemoteWrite)
+  })
+}
+
+/**
+ * A body, with a ceiling on it.
+ *
+ * The only bodies this server accepts are a rating and a handful of tags. Reading an unbounded
+ * one into memory because somebody said they were sending a tag is how a process that is meant
+ * to be cheap to leave running is made to fall over.
+ */
+const MAX_BODY = 64 * 1024
+
+function readBody(request: IncomingMessage): Promise<string | null> {
+  return new Promise((resolve) => {
+    let body = ''
+    let over = false
+    request.on('data', (chunk: Buffer) => {
+      if (over) return
+      body += chunk.toString('utf8')
+      if (body.length > MAX_BODY) {
+        over = true
+        resolve(null)
+      }
+    })
+    request.on('end', () => !over && resolve(body))
+    request.on('error', () => !over && resolve(null))
+  })
+}
 
 let stats: RemoteStats = {
   startedAt: 0,
@@ -177,9 +253,9 @@ function fail(response: ServerResponse, status: number): void {
   response.writeHead(status).end()
 }
 
-function sendJson(response: ServerResponse, value: unknown): void {
+function sendJson(response: ServerResponse, value: unknown, status = 200): void {
   const body = JSON.stringify(value)
-  response.writeHead(200, {
+  response.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(body)
   })
@@ -306,6 +382,78 @@ function sendHash(response: ServerResponse, file: string): void {
   })
   source.on('data', (chunk) => hash.update(chunk))
   source.on('end', () => sendJson(response, { algo: 'sha256', hex: hash.digest('hex'), size }))
+}
+
+/**
+ * The only pathnames a POST may name. See the gate in `start` for why it is shaped this way.
+ *
+ * They sit under `/metadata`, which already serves these same maps for reading, so the two
+ * halves of one idea are named alike.
+ *
+ * Both write into path-keyed maps of the user's own annotations. Neither touches the filesystem,
+ * and there is deliberately no third entry: rename, move, copy, delete and new-folder stay off
+ * the wire for the reasons the v0.2 notes give - undo is built on local filesystem operations,
+ * a drag between a local and a remote root is a transfer rather than a move, and Quick move
+ * would quietly mean two different things depending on which root you were in.
+ */
+const WRITABLE: ReadonlySet<string> = new Set(['/metadata/rating', '/metadata/tags'])
+
+/**
+ * A tag or a rating arriving from a peer.
+ *
+ * The path is checked against the library before it is forwarded, by the same `resolveInLibrary`
+ * every read goes through. That is not about the filesystem here - nothing is opened - but about
+ * not letting a peer write an annotation keyed to a path outside the library, which would put a
+ * row in this machine's tag map that nothing on it can ever show or clear.
+ */
+async function handleWrite(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const current = config
+  if (!current) {
+    fail(response, 503)
+    return
+  }
+  const url = new URL(request.url ?? '/', 'http://localhost')
+  const library = libraryOf(url.searchParams)
+  if (!library) {
+    fail(response, 404)
+    return
+  }
+
+  const raw = await readBody(request)
+  if (raw === null) {
+    fail(response, 413)
+    return
+  }
+
+  let body: { rel?: string; rating?: number; tags?: string[] }
+  try {
+    body = JSON.parse(raw) as typeof body
+  } catch {
+    fail(response, 400)
+    return
+  }
+
+  const rel = typeof body.rel === 'string' ? body.rel : ''
+  const file = resolveInLibrary(library, rel)
+  if (!file) {
+    fail(response, 404)
+    return
+  }
+
+  const result =
+    url.pathname === '/metadata/rating'
+      ? await forward({ kind: 'rating', path: file, rating: Number(body.rating ?? 0) })
+      : await forward({
+          kind: 'tags',
+          path: file,
+          tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 64) : []
+        })
+
+  if (!result.ok) {
+    sendJson(response, { ok: false, reason: result.reason ?? 'refused' }, 500)
+    return
+  }
+  sendJson(response, { ok: true })
 }
 
 /**
@@ -636,14 +784,32 @@ function start(next: RemoteConfig): void {
     response.on('finish', finish)
     response.on('close', finish)
 
-    // Read-only, and that is enforced here rather than route by route. Nothing this process
-    // serves can be written to over the wire, so a method that implies otherwise never
-    // reaches the table.
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
+    /*
+     * Still enforced here rather than route by route, and still an allowlist.
+     *
+     * The library itself remains strictly read-only: no route reachable by any method renames,
+     * moves, copies or deletes a file, and that is the property the original gate existed to
+     * make unloseable. What has been carved out is the thing the v0.2 notes said was worth
+     * revisiting once the rest worked - "starring or tagging something while browsing the PC
+     * from the couch does nothing, which is a fair share of what browsing is for... it is two
+     * endpoints and a write-back, not a redesign". These are those two endpoints.
+     *
+     * The carve-out is written as a frozen set of exact pathnames rather than as a relaxed
+     * method check, which keeps the guarantee intact in the form that matters: adding a route
+     * to the table below does *not* make it writable. A new writable route has to be named
+     * here, on purpose, in a file whose whole subject is what this server refuses.
+     */
+    const method = request.method ?? ''
+    const writable = WRITABLE.has(pathOf(request.url))
+    if (method !== 'GET' && method !== 'HEAD' && !(method === 'POST' && writable)) {
       fail(response, 405)
       return
     }
     try {
+      if (method === 'POST') {
+        void handleWrite(request, response)
+        return
+      }
       handle(request, response)
     } catch {
       // A thrown handler must answer rather than leave a socket open - and must not be the
@@ -682,7 +848,13 @@ process.parentPort?.on('message', (message) => {
     start(command.config)
     return
   }
-  if (command.type === 'stop') stop()
+  if (command.type === 'stop') {
+    stop()
+    return
+  }
+  if (command.type === 'wrote') {
+    pendingWrites.get(command.id)?.(command.ok, command.reason)
+  }
 })
 
 post({ type: 'ready' })

@@ -22,9 +22,16 @@ import type {
   RemoteServerState,
   RemoteStats
 } from '../shared/types'
-import type { RemoteCommand, RemoteConfig, RemoteEvent } from './remote-process'
+import type { RemoteCommand, RemoteConfig, RemoteEvent, RemoteWrite } from './remote-process'
 import type { SettingsBackup } from '../shared/backup'
-import { MACHINE_PATH_SETTINGS, exportBackup, getDataDir, getUserData } from './store'
+import {
+  MACHINE_PATH_SETTINGS,
+  exportBackup,
+  getDataDir,
+  getUserData,
+  setRating,
+  setTags
+} from './store'
 import { readTailnet } from './tailscale'
 import { defaultFlUserData, type PluginInventory } from './plugins'
 
@@ -38,7 +45,14 @@ import { defaultFlUserData, type PluginInventory } from './plugins'
 export const REMOTE_PORT = 47828
 
 /** Bumped when the wire format changes in a way an older build would mis-read. */
-export const REMOTE_PROTOCOL = 1
+/**
+ * 2 since tags, ratings and the two writes that go with them.
+ *
+ * Read by peers to decide what to offer rather than whether to connect: a phone talking to a
+ * machine still on 1 browses and plays exactly as before and simply has no stars to draw. That
+ * is the whole reason this is a number in `/hello` and not an assumption.
+ */
+export const REMOTE_PROTOCOL = 2
 
 /** Long enough for a busy machine to answer, short enough to sweep a tailnet briskly. */
 const PROBE_TIMEOUT_MS = 1_500
@@ -95,6 +109,35 @@ function librariesFromSettings(deviceId: string): RemoteLibrary[] {
  * Safe to call repeatedly - a second call replaces the first, which is what a change to
  * `shareLibrary`, a new library root, or a tailnet that has just come up all want.
  */
+/**
+ * Records one annotation a peer asked for, and says what went wrong if anything did.
+ *
+ * Returns `undefined` on success and a reason otherwise, rather than throwing, because the
+ * answer travels back down a message port to become an HTTP status - and a stack trace is not
+ * something to put on the wire.
+ *
+ * The path arrives already resolved and containment-checked by the child. It is re-derived
+ * through `store.ts`'s own key composition on the way in, which is the only place the composed
+ * and decomposed spellings are ever reconciled.
+ */
+async function applyRemoteWrite(write: RemoteWrite): Promise<string | undefined> {
+  try {
+    if (write.kind === 'rating') {
+      const rating = Number(write.rating)
+      if (!Number.isFinite(rating)) return 'not a rating'
+      setRating(write.path, rating)
+      return undefined
+    }
+    const tags = (write.tags ?? [])
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.length > 0 && tag.length <= 64)
+    setTags(write.path, tags)
+    return undefined
+  } catch (error) {
+    return (error as Error).message
+  }
+}
+
 export async function startRemoteServer(): Promise<RemoteServerState> {
   stopRemoteServer()
 
@@ -169,6 +212,34 @@ export async function startRemoteServer(): Promise<RemoteServerState> {
       }
       if (event.type === 'stats') {
         stats = event.stats
+        return
+      }
+      if (event.type === 'write') {
+        /*
+         * A tag or a rating from a peer, applied here because this is the process that owns
+         * the document.
+         *
+         * The child deliberately cannot write `umakbang-data.json`: the writes are atomic and
+         * debounced through `store.ts`, and the open window is reading the same object. A
+         * second writer would lose whichever edit landed second and leave the window showing
+         * neither - so the child forwards, and waits to be told what happened.
+         */
+        void applyRemoteWrite(event).then(
+          (reason) =>
+            forked.postMessage({
+              type: 'wrote',
+              id: event.id,
+              ok: reason === undefined,
+              reason
+            } satisfies RemoteCommand),
+          (error: Error) =>
+            forked.postMessage({
+              type: 'wrote',
+              id: event.id,
+              ok: false,
+              reason: error.message
+            } satisfies RemoteCommand)
+        )
         return
       }
       clearTimeout(timer)
