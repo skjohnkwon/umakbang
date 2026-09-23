@@ -26,6 +26,7 @@ import { indexFileFor, initIndexStore, patchFileFor } from './index-store'
 import { flRelative, parseRange, relativeToLibrary, resolveInLibrary, resolveUnder } from './remote-routes'
 import { collectFlpContents } from './flp'
 import { readPluginInventory } from './plugins'
+import { pathKey } from '../shared/path-key'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -457,6 +458,35 @@ async function handleWrite(request: IncomingMessage, response: ServerResponse): 
 }
 
 /**
+ * One file's cached waveform, base64 as the cache stores it.
+ *
+ * Read off disk with an mtime check rather than held from startup, for the reason the metadata
+ * is: the cache grows as rows are looked at, and a peak computed a minute ago should travel
+ * without waiting for a restart. The document is large, so it is parsed only when it changes.
+ */
+let peaksCache: { at: number; data: Record<string, { data?: string }> } | null = null
+
+function readPeaks(dataDir: string, file: string): string | null {
+  const path = join(dataDir, 'umakbang-peaks-cache.json')
+  let stamp = 0
+  try {
+    stamp = statSync(path).mtimeMs
+  } catch {
+    return null
+  }
+  if (!peaksCache || peaksCache.at !== stamp) {
+    try {
+      peaksCache = { at: stamp, data: JSON.parse(readFileSync(path, 'utf8')) }
+    } catch {
+      // A half-written document is not a reason to drop what was last read successfully.
+      if (!peaksCache) return null
+    }
+  }
+  // Keyed the way every path-keyed map here is - the composed spelling. See `path-key.ts`.
+  return peaksCache.data[pathKey(file)]?.data ?? null
+}
+
+/**
  * The route table.
  *
  * Everything that names a path goes through `resolveInLibrary`, without exception - a route
@@ -599,6 +629,39 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
       } catch {
         fail(response, 500)
       }
+      return
+    }
+
+    case '/peaks': {
+      /*
+       * The waveform this machine has already drawn for a file.
+       *
+       * Served rather than recomputed at the other end, because the other end would have to
+       * fetch the whole file to compute it - which is the transfer the index exists to avoid.
+       * This machine decoded it once, the first time anybody looked at that row, and has kept
+       * it ever since.
+       *
+       * A 404 is the ordinary answer, not a failure: peaks are computed lazily, per row, as
+       * rows scroll into view, so a file nobody has looked at yet simply has none. The asking
+       * machine draws a flat line and carries on.
+       */
+      const library = libraryOf(params)
+      const rel = params.get('rel')
+      if (!library || !rel) {
+        fail(response, 404)
+        return
+      }
+      const file = resolveInLibrary(library, rel)
+      if (!file) {
+        fail(response, 404)
+        return
+      }
+      const cached = readPeaks(current.dataDir, file)
+      if (!cached) {
+        fail(response, 404)
+        return
+      }
+      sendJson(response, { data: cached })
       return
     }
 
