@@ -20,11 +20,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.3.2',
+    date: '2026-09-24',
+    changes: [
+      'A star or a tag set on a linked machine now arrives here. A peer could only ever read this library, so rating something while browsing it from another computer, or from a phone, did nothing, which is a fair share of what browsing is for. The files themselves stay read-only over the network: nothing on the far end can rename, move, copy or delete anything, and a rating and a tag are the only two things this machine will take from one.',
+      'The tags, ratings and notes on another machine can be brought over. They only ever existed on the computer they were typed into, so two machines holding one library meant rating it twice. Settings, Remote fetches them from a linked machine and runs them through the same folder-mapping step an imported backup uses, because every key in them names a path on the computer it came from.',
+      'A machine no longer lists another machine\u2019s library as one of its own. Once both computers had opened each other\u2019s library, each was offering the other\u2019s back again, at a path that does not exist on it - so both ends showed a library reading \u201cnever scanned\u201d that nothing could ever scan.'
+    ]
+  },
+  {
     version: '0.3.1',
     date: '2026-09-21',
     changes: [
-      'A star or a tag set on a linked machine now arrives here. A peer could only ever read this library, so rating something while browsing it from another computer — or from a phone — did nothing, which is a fair share of what browsing is for. The files themselves stay read-only over the network: nothing on the far end can rename, move, copy or delete anything, and a rating and a tag are the only two things this machine will take from one.',
-      'The tags, ratings and notes on another machine can be brought over. They only ever existed on the computer they were typed into, so two machines holding one library meant rating it twice. Settings, Remote fetches them from a linked machine and runs them through the same folder-mapping step an imported backup uses, because every key in them names a path on the computer it came from.',
       'Refresh in another machine\u2019s folder asks that machine, rather than looking for its files on this one. A remote library lives at a path on the computer serving it, so reading it here found nothing and struck every row through as missing. Nothing was ever deleted, but the library looked gone.',
       'A file found again stops looking missing. Rows dimmed by an earlier failed read stayed struck through until the app was restarted, even once a scan had confirmed the file was there.',
       'Section headings are no longer in capitals. FOLDERS, DEVICES and the file table\u2019s column headers are sentence case, in the sidebar, both menus, the stats charts and the video editor.',
