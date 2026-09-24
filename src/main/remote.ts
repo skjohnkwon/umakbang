@@ -95,12 +95,26 @@ function libraryId(deviceId: string, path: string): string {
   return createHash('sha1').update(`${deviceId}:${path}`).digest('hex').slice(0, 16)
 }
 
+/**
+ * The libraries this machine can actually serve, which is its own.
+ *
+ * A root mounted from a peer is another computer's folder at another computer's path, and
+ * advertising it offered something nothing here can answer: `generationOf` looks for a local
+ * index at that path and finds none, so it came back as *never scanned* - and `/index` and
+ * `/file` would have had no better luck, because the files are not on this disk either.
+ *
+ * Once both machines had mounted each other, each was advertising the other's library back
+ * at it, so both ends showed a library that could never be scanned. Same rule as `/metadata`:
+ * a machine speaks for its own folders and for nobody else's.
+ */
 function librariesFromSettings(deviceId: string): RemoteLibrary[] {
-  return getUserData().settings.roots.map((root) => ({
-    id: libraryId(deviceId, root.path),
-    label: root.label,
-    path: root.path
-  }))
+  return getUserData()
+    .settings.roots.filter((root) => !root.remote)
+    .map((root) => ({
+      id: libraryId(deviceId, root.path),
+      label: root.label,
+      path: root.path
+    }))
 }
 
 /**
