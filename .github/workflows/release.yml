@@ -1,0 +1,169 @@
+# Build both platforms from one tag, into one release.
+#
+# Every release so far was built twice, on two machines, racing on one version number, and
+# every way that can go wrong it did: 0.3.2 went out with no Windows build at all, 0.3.1
+# shipped three different binaries under one number, and 0.2.0 was signed with the wrong
+# certificate and refused by every Mac it reached. The fix is not care. It is one tag, two
+# runners, one release, and no human uploading anything.
+#
+# Push a tag and both halves build from the same commit:
+#
+#   npm version 0.3.3 --no-git-tag-version   # or edit package.json
+#   git commit -am "0.3.3" && git push
+#   git tag v0.3.3 && git push origin v0.3.3
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # So a failed run can be retried against a tag that already exists.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build (for example v0.3.3)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # The release exists before either build starts, as a draft.
+  #
+  # Both of the alternatives are worse. Letting each build create it races two API calls at
+  # the same tag, and `releaseType: release` in electron-builder.yml means whichever wins
+  # publishes it immediately - at which point the second build hits the publisher's own
+  # "existing release published more than 2 hours ago" guard, skips every upload, and still
+  # exits 0. That is exactly how 0.3.1 ended up with no Windows assets and a green build log.
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the draft release if it is not there
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists, uploading into it"
+          else
+            gh release create "$TAG" --draft --title "${TAG#v}" --notes "Built by CI from $TAG."
+          fi
+
+  build:
+    needs: prepare
+    strategy:
+      # One platform failing must not cancel the other, or a mac signing problem takes the
+      # Windows build down with it and the release is half-finished again.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win --x64
+          - os: macos-latest
+            args: --mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Typechecks both projects on the way through; there is no other automated check.
+      - run: npm run build
+
+      # The Developer ID Application certificate, which is what an installed copy's
+      # designated requirement actually names. Without it electron-builder signs with
+      # whatever identity it can find - an `Apple Development` one has the same team and the
+      # wrong lineage, and 0.2.0 was built, signed, uploaded and then refused by every Mac
+      # running 0.1.2. Skipped when the secret is absent so a fork still builds an unsigned
+      # mac app rather than failing at a step it cannot satisfy.
+      - name: Import the mac signing certificate
+        if: matrix.os == 'macos-latest'
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          # Checked here rather than in `if:`, because a step's own `env:` is not readable
+          # from its `if:` and a fork without the secret must skip rather than fail.
+          if [ -z "$MAC_CERT_P12" ]; then
+            echo "No MAC_CERT_P12 secret; building an unsigned mac app."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MAC_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MAC_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # `--publish never`, deliberately, and the upload is the step below.
+      #
+      # It still writes `latest.yml` and `latest-mac.yml` - verified, not assumed - so
+      # nothing is lost by keeping electron-builder's publisher out of it, and what is
+      # gained is that no build can silently skip an upload or decide a release is too old
+      # to touch. `app-update.yml` lands beside the packaged app either way; a `--dir` build
+      # is the one that omits it, which is why this is a real target build.
+      - name: Package
+        run: npx electron-builder ${{ matrix.args }} --publish never
+
+      # Names matter more than they look. `latest.yml` points at `umakbang-Setup-x.y.z.exe`
+      # with hyphens, and the file on disk has spaces in it - uploaded as-is, GitHub turns
+      # those spaces into dots and the updater asks for a file that does not exist. So the
+      # installer is copied to the name the manifest already names.
+      - name: Upload the Windows assets
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          for f in *" "*; do [ -e "$f" ] || continue; cp "$f" "${f// /-}"; done
+          gh release upload "$TAG" \
+            latest.yml \
+            umakbang-Setup-*.exe \
+            umakbang-Setup-*.exe.blockmap \
+            umakbang-*-win.zip \
+            --clobber
+
+      - name: Upload the mac assets
+        if: matrix.os == 'macos-latest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          gh release upload "$TAG" \
+            latest-mac.yml \
+            umakbang-*-mac.zip umakbang-*-mac.zip.blockmap \
+            umakbang-*.dmg umakbang-*.dmg.blockmap \
+            --clobber
+
+  # Only once both halves are in. A release that goes live with one platform missing is the
+  # thing this whole file exists to prevent: the other platform's installs see a version
+  # they cannot download and report an error instead of an update.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check both platforms arrived, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "$names"
+          for required in latest.yml latest-mac.yml; do
+            echo "$names" | grep -qx "$required" || { echo "missing $required"; exit 1; }
+          done
+          gh release edit "$TAG" --draft=false
