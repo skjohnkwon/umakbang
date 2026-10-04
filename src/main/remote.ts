@@ -134,8 +134,27 @@ function librariesFromSettings(deviceId: string): RemoteLibrary[] {
  * through `store.ts`'s own key composition on the way in, which is the only place the composed
  * and decomposed spellings are ever reconciled.
  */
+/**
+ * What to do when a peer asks this machine to re-read a library folder.
+ *
+ * Set by the owner of the scanner rather than reached for from here, because the scanner
+ * belongs to the window's process and this file has no business knowing how it is started.
+ */
+let rescanHandler: ((path: string) => boolean) | null = null
+
+export function onRemoteRescan(handler: (path: string) => boolean): void {
+  rescanHandler = handler
+}
+
 async function applyRemoteWrite(write: RemoteWrite): Promise<string | undefined> {
   try {
+    if (write.kind === 'rescan') {
+      if (!rescanHandler) return 'this machine cannot rescan right now'
+      // False when a scan is already running, which is not a failure worth reporting as one:
+      // the asking machine wanted the library re-read and it is being re-read.
+      rescanHandler(write.path)
+      return undefined
+    }
     if (write.kind === 'rating') {
       const rating = Number(write.rating)
       if (!Number.isFinite(rating)) return 'not a rating'

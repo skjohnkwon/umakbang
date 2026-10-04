@@ -70,7 +70,7 @@ export type RemoteCommand =
 export interface RemoteWrite {
   type: 'write'
   id: number
-  kind: 'rating' | 'tags'
+  kind: 'rating' | 'tags' | 'rescan'
   path: string
   rating?: number
   tags?: string[]
@@ -397,7 +397,21 @@ function sendHash(response: ServerResponse, file: string): void {
  * a drag between a local and a remote root is a transfer rather than a move, and Quick move
  * would quietly mean two different things depending on which root you were in.
  */
-const WRITABLE: ReadonlySet<string> = new Set(['/metadata/rating', '/metadata/tags'])
+const WRITABLE: ReadonlySet<string> = new Set([
+  '/metadata/rating',
+  '/metadata/tags',
+  /*
+   * Asking this machine to look at its own disk.
+   *
+   * It writes nothing and reads nothing out: the index is only ever rebuilt from what is
+   * already there. It is here because a peer has no other way to say "I think you have not
+   * noticed something" - the index is rebuilt by a scan, a scan happens at launch and when
+   * somebody presses Refresh, and neither is available to a phone three rooms away. Without
+   * it, a beat exported five minutes ago is invisible until the machine is touched by hand,
+   * and no amount of refreshing at the other end can change that.
+   */
+  '/rescan'
+])
 
 /**
  * A tag or a rating arriving from a peer.
@@ -417,6 +431,17 @@ async function handleWrite(request: IncomingMessage, response: ServerResponse): 
   const library = libraryOf(url.searchParams)
   if (!library) {
     fail(response, 404)
+    return
+  }
+
+  if (url.pathname === '/rescan') {
+    // The whole library, so no body and nothing to resolve - the parameter already named it.
+    const result = await forward({ kind: 'rescan', path: library.path })
+    if (!result.ok) {
+      sendJson(response, { ok: false, reason: result.reason ?? 'refused' }, 500)
+      return
+    }
+    sendJson(response, { ok: true })
     return
   }
 
