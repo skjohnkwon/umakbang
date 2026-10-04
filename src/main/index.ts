@@ -118,6 +118,7 @@ import {
   stopWatchingRemoteServer,
   watchRemoteServer,
   remoteStats,
+  onRemoteRescan,
   startRemoteServer,
   stopRemoteServer
 } from './remote'
@@ -2203,6 +2204,26 @@ if (!app.requestSingleInstanceLock()) {
     // Answers on the tailnet, or says in the log why it is not. After `initStore`, because
     // it reads `shareLibrary` and the device id from settings, and it refuses to listen at
     // all rather than falling back to a LAN bind - see `remote.ts`.
+    /*
+     * A peer may ask this machine to re-read a library folder.
+     *
+     * The same thing Refresh does, for the same reason it exists: the index is rebuilt by a
+     * scan, and a scan happens at launch or when somebody presses the button. A phone browsing
+     * this library from another room can do neither, so a beat exported five minutes ago stays
+     * invisible to it however many times it refreshes at its own end.
+     *
+     * `rescanRoot` rather than the full rebuild behind `library:rescan`: this is Refresh, not
+     * "the library is wrong", and dropping somebody's undo history because a phone pulled down
+     * on a list would be its own bug.
+     */
+    onRemoteRescan((path) => {
+      const root = getUserData().settings.roots.find(
+        (candidate) => !candidate.remote && candidate.path === path
+      )
+      if (!root) return false
+      rescanRoot(root)
+      return true
+    })
     void startRemoteServer().then((state) => {
       console.log(
         state.listening
