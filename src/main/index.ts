@@ -15,7 +15,7 @@ import {
   utilityProcess
 } from 'electron'
 import { dirname, join } from 'node:path'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -79,7 +79,7 @@ import {
   LOCAL_ONLY_SETTINGS,
   MACHINE_PATH_SETTINGS
 } from './store'
-import { appendIndexPatch, clearIndex, initIndexStore } from './index-store'
+import { appendIndexPatch, clearIndex, indexFileFor, initIndexStore } from './index-store'
 import {
   cancelUndo,
   clampUndoDepth,
@@ -702,7 +702,7 @@ function watchFolder(dir: string | null): void {
       if (watchTimer) clearTimeout(watchTimer)
       watchTimer = setTimeout(() => {
         watchTimer = null
-        void refreshFolder(dir)
+        void refreshFolder(dir, false, 'new')
       }, 600)
     })
     // The try/catch only covers creation. A watcher whose folder is deleted under it, or
@@ -728,7 +728,60 @@ function watchFolder(dir: string | null): void {
  * changed". Only the second is allowed to delete rows, and only when the folder was actually
  * read - see `describeDir`.
  */
-async function refreshFolder(dir: string, prune = false, journalAdded = false): Promise<void> {
+/**
+ * The rows in a folder that the saved index cannot already account for.
+ *
+ * The index file is rewritten only by a scan, so anything with a newer mtime than that file
+ * appeared or changed after the scan that wrote it - which is exactly what the journal is
+ * for. A file older than the index was already in it, and journalling it again would say
+ * nothing while costing a line.
+ *
+ * `journalled` is the second half, and it is the one that matters in practice. The watcher
+ * fires several times for one export - FL writes, renames and touches on the way - and the
+ * mtime test alone passes every time, because the index does not move until the next scan.
+ * Keyed by path *and* mtime, so a file written again is journalled again. Session-only and
+ * capped: it is an optimisation, and being wrong about it costs a duplicate line that the
+ * next scan collapses anyway.
+ */
+const JOURNALLED_CAP = 20_000
+const journalled = new Set<string>()
+
+function unseenByIndex(rootPath: string, tracks: Track[]): Track[] {
+  let indexMtime = 0
+  try {
+    indexMtime = statSync(indexFileFor(rootPath)).mtimeMs
+  } catch {
+    // No index yet, so nothing it could already know. Everything is news.
+  }
+
+  const fresh: Track[] = []
+  for (const track of tracks) {
+    if (indexMtime > 0 && track.mtimeMs <= indexMtime) continue
+    const key = `${track.path}:${track.mtimeMs}`
+    if (journalled.has(key)) continue
+    fresh.push(track)
+  }
+
+  if (journalled.size + fresh.length > JOURNALLED_CAP) journalled.clear()
+  for (const track of fresh) journalled.add(`${track.path}:${track.mtimeMs}`)
+  return fresh
+}
+
+/**
+ * `'all'` journals everything the folder holds, which is what umakbang's own file-creating
+ * operations want - they have just made the files and an unzip can write mtimes older than
+ * the index, so there is nothing to compare against. `'new'` journals only what the saved
+ * index cannot already know about, which is what the folder *watcher* wants: it fires on
+ * every write a DAW makes on the way to a finished export, and appending the whole folder
+ * listing each time would grow the journal by hundreds of rows per bounce.
+ */
+type JournalMode = 'none' | 'new' | 'all'
+
+async function refreshFolder(
+  dir: string,
+  prune = false,
+  journal: JournalMode = 'none'
+): Promise<void> {
   const target = mainWindow
   if (!target || target.isDestroyed()) return
   const roots = getUserData().settings.roots
@@ -763,9 +816,12 @@ async function refreshFolder(dir: string, prune = false, journalAdded = false): 
    *
    * Journalled the same way a move is, through the patch file the scanner already folds in.
    */
-  if (journalAdded && read && tracks.length > 0) {
+  if (journal !== 'none' && read && tracks.length > 0) {
     const root = rootFor(roots, dir)
-    if (root) appendIndexPatch(root.path, { added: tracks })
+    if (root) {
+      const added = journal === 'all' ? tracks : unseenByIndex(root.path, tracks)
+      if (added.length > 0) appendIndexPatch(root.path, { added })
+    }
   }
 
   if (target.isDestroyed()) return
@@ -1320,7 +1376,7 @@ function registerIpc(): void {
      * is the thing that changed it.
      */
     if (result.written.length > 0) {
-      await refreshFolder(getUserData().settings.remoteDownloadDir, true, true)
+      await refreshFolder(getUserData().settings.remoteDownloadDir, true, 'all')
     }
     return result
   })
@@ -1982,12 +2038,12 @@ function registerIpc(): void {
         })
       }
     )
-    if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true, true)
+    if (result.dir) await refreshFolder(getUserData().settings.remoteDownloadDir, true, 'all')
     return result
   })
   ipcMain.handle('fs:extractArchive', async (_event, path: string) => {
     const result = await extractArchive(path)
-    if (result.dir) await refreshFolder(dirname(path), true, true)
+    if (result.dir) await refreshFolder(dirname(path), true, 'all')
     return result
   })
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {

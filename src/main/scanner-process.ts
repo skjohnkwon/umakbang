@@ -9,7 +9,7 @@
  * Launched by src/main/index.ts via utilityProcess.fork().
  */
 
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
   LibraryRoot,
@@ -23,7 +23,7 @@ import { plausibleBpm } from '../shared/tempo'
 import { startScan, type ScanHandle } from './scanner'
 import { readFlpTempo } from './flp'
 import { flushMetadataCache, initMetadataCache } from './metadata-cache'
-import { initIndexStore, loadIndex, saveIndex } from './index-store'
+import { initIndexStore, loadIndex, patchFileFor, saveIndex } from './index-store'
 import { fetchRemoteIndex } from './remote-index'
 
 export type ScannerCommand =
@@ -308,6 +308,9 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
 
   const collected: Track[] = []
   const metaByPath = new Map<string, TrackMetadata>()
+  /** Rows the walk found that the saved index did not already hold. See the skip below. */
+  let freshCount = 0
+  let removedCount = 0
 
   const handle = startScan(root.path, root.label, {
     // Everything the walk found, kept here and never sent: `collected` is what the index is
@@ -320,6 +323,7 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
     // before the walk started, so this is a few rows where `onTracks` is a few hundred
     // thousand; with no index to replay it is everything, which is the same thing said twice.
     onFresh: (tracks) => {
+      freshCount += tracks.length
       if (current()) post({ type: 'tracks', tracks })
     },
     onProgress: (progress) => {
@@ -365,6 +369,7 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
   if (cached && current()) {
     const live = new Set(collected.map((track) => track.path))
     const removed = cached.filter((track) => !live.has(track.path)).map((t) => t.path)
+    removedCount = removed.length
     if (removed.length > 0) {
       log(`${removed.length} files no longer on disk`)
       post({ type: 'removed', paths: removed })
@@ -373,9 +378,27 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
 
   // Fold the probed metadata in, so the next launch restores a fully populated
   // library rather than one that has to be re-read.
+  //
+  // `metaApplied` counts the folds that actually move a value, which is not the same as the
+  // number of patches that arrived. A probe that fails is never cached, so those files are
+  // re-probed every scan and report a patch every scan - measured, 3,661 of them here - and
+  // counting patches would mean the index is rewritten forever on a library where nothing
+  // has changed. What decides whether the file on disk is stale is whether a field moved.
+  let metaApplied = 0
   for (const track of collected) {
     const meta = metaByPath.get(track.path)
-    if (meta) Object.assign(track, meta, { probed: true })
+    if (!meta) continue
+    let moved = track.probed !== true
+    if (!moved) {
+      for (const key of Object.keys(meta) as (keyof TrackMetadata)[]) {
+        if (track[key] !== meta[key]) {
+          moved = true
+          break
+        }
+      }
+    }
+    if (moved) metaApplied++
+    Object.assign(track, meta, { probed: true })
   }
 
   // Then let the projects answer for the bounces beside them. It runs on the folded-in
@@ -384,10 +407,42 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
   const fromProjects = await fillTemposFromProjects(collected, current)
   if (fromProjects > 0) log(`${root.label} took ${fromProjects} tempos from FL Studio projects`)
 
+  /*
+   * Rewriting the index is 233MB and about a second, and on a library where nothing moved
+   * it writes back exactly what is already there.
+   *
+   * Every way the in-memory set can differ from the file is checked rather than assumed,
+   * because a wrongly skipped save is a stale index and that is the kind of bug this whole
+   * file is careful about. `freshCount` is the walk's own answer to "what is new or has
+   * changed", `metaByPath` is anything probed this pass, `fromProjects` is a tempo lifted
+   * out of an `.flp`, and a journal on disk means the file is already behind what was
+   * loaded from it and has to be collapsed. A rescan always writes: it is the action that
+   * means "I think the index is wrong", so honouring that is the whole point of it.
+   *
+   * Not skipped lightly, and the one thing it gives up is the folder-mtime sidecar: a
+   * folder whose mtime moved without its contents changing keeps its old recorded time and
+   * is read once more next launch. That costs a `readdir`, not a wrong answer.
+   */
+  const unchanged =
+    cached !== null &&
+    !fullWalk &&
+    freshCount === 0 &&
+    removedCount === 0 &&
+    metaApplied === 0 &&
+    fromProjects === 0 &&
+    !existsSync(patchFileFor(root.path))
+
+  const why = `fresh=${freshCount} removed=${removedCount} meta=${metaApplied}/${metaByPath.size} tempos=${fromProjects} journal=${existsSync(patchFileFor(root.path)) ? 'yes' : 'no'} cached=${cached ? 'yes' : 'no'} full=${fullWalk ? 'yes' : 'no'}`
+
+  if (unchanged) {
+    log(`${root.label} finished in ${Math.round((Date.now() - startedAt) / 1000)}s, nothing changed (${why})`)
+    return
+  }
+
   // Saved even when the batch has been superseded: the files were found and probed, and
   // throwing that away would mean walking them again on the next launch.
   saveIndex(root.path, collected)
-  log(`${root.label} finished in ${Math.round((Date.now() - startedAt) / 1000)}s, index saved`)
+  log(`${root.label} finished in ${Math.round((Date.now() - startedAt) / 1000)}s, index saved (${why})`)
 }
 
 /* ------------------------------------------------ tempo from the project beside the file */
