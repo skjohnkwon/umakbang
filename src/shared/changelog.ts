@@ -20,6 +20,20 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.3.3',
+    date: '2026-11-14',
+    changes: [
+      'The explorer splits in two. The split button beside the counts opens a second pane, each half keeps its own folder, history and selection, and dragging files from one half to the other moves them. "Open in second pane" on a folder’s right-click opens it there directly, and the divider between the halves can be dragged.',
+      'Varispeed. The gauge button beside the volume speeds playback up or slows it down like tape, set either as a tempo or in semitones; the panel shows what that does to the BPM and the key. Whichever you set is what the next file gets, so a folder of loops can be auditioned at your project tempo or a folder of beats in the key you want. It resets when the app restarts.',
+      'YT2MP3 can save the video as well. Choose Video (MP4) and you get picture and sound up to 1080p, joined here without re-encoding. Audio downloads also stopped sometimes picking YouTube’s volume-squashed copy of the soundtrack.',
+      'A pack unzipped into a folder appears straight away, whether by Extract here or in Explorer. Only the folder the zip sat in was being re-read, so the unpacked folder and everything in it stayed invisible to the list and to search until a full rescan.',
+      'Sorting by Modified sorts folders too, by the newest file inside each. Folders stayed alphabetical whatever the sort, so the sort looked like it had not worked.',
+      'Clicking empty space in the explorer clears the selection.',
+      'An empty folder’s "Nothing here." is centred in the pane rather than drifting off to one side.',
+      'A file exported into the folder on screen now reaches your other machines without waiting for a scan, and a linked machine can ask this one to look at its library again.'
+    ]
+  },
+  {
     version: '0.3.2',
     date: '2026-09-24',
     changes: [
