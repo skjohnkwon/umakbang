@@ -6,7 +6,8 @@ import { WindowActions } from '@/components/WindowActions'
 import { MiniPlayerExit } from '@/components/MiniPlayer'
 import { Logo } from '@/components/Logo'
 import { AboutDialog } from '@/components/AboutDialog'
-import { useLibrary } from '@/state/library'
+import { ExplorerControls } from '@/components/Toolbar'
+import { isPageView, useLibrary } from '@/state/library'
 import { useUpdateStatus } from '@/lib/updates'
 
 export const SEARCH_INPUT_ID = 'umakbang-search'
@@ -18,6 +19,11 @@ export function TitleBar(): React.JSX.Element {
   const query = useLibrary((s) => s.query)
   const miniPlayer = useLibrary((s) => s.miniPlayer)
   const setQuery = useLibrary((s) => s.setQuery)
+  // The library-wide controls only mean anything over the explorer - and only once there is
+  // a library. While a page is up they would be filters on a list nobody can see. A page
+  // always belongs to the main pane, and the main pane is the active one whenever a page is
+  // showing, so the store's own view answers this.
+  const browsing = useLibrary((s) => s.roots.length > 0 && !isPageView(s.view))
   const { version } = useUpdateStatus()
 
   const isMac = platform?.isMac ?? false
@@ -123,6 +129,8 @@ export function TitleBar(): React.JSX.Element {
           </button>
         )}
       </div>
+
+      {browsing && <ExplorerControls />}
 
       <WindowActions />
     </header>

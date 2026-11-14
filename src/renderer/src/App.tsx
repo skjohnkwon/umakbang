@@ -1,16 +1,15 @@
 import type React from 'react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MotionConfig } from 'motion/react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SEARCH_INPUT_ID, TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
-import { Toolbar } from '@/components/Toolbar'
-import { FileTable } from '@/components/FileTable'
+import { Explorer } from '@/components/ExplorerPane'
 import { NowPlayingPanel } from '@/components/NowPlayingPanel'
 import { NowPlayingBar } from '@/components/NowPlayingBar'
 import { ThemeBridge } from '@/components/ThemeBridge'
 import { VisualizerOnlyView } from '@/components/VisualizerOnlyView'
-import { Loading, NoLibrary, NoResults } from '@/components/EmptyState'
+import { Loading, NoLibrary } from '@/components/EmptyState'
 import { absolutePath } from '@/lib/paths'
 import { runExplorerShortcut } from '@/lib/explorer-shortcuts'
 import { matchesShortcut } from '@shared/shortcuts'
@@ -27,9 +26,9 @@ import { ImportWizard } from '@/components/ImportWizard'
 import { Tutorial } from '@/components/Tutorial'
 import { useContracts } from '@/state/contracts'
 import { useVideos } from '@/state/videos'
-import { connectLibraryEvents, useLibrary } from '@/state/library'
+import { connectLibraryEvents, isPageView, mainViewOf, useLibrary } from '@/state/library'
 import { usePlayer } from '@/state/player'
-import { useFolderTree, useVisibleRows } from '@/hooks/useLibraryView'
+import { useFolderTree } from '@/hooks/useLibraryView'
 import { SETTLE } from '@/lib/motion'
 import { endRowDrag } from '@/lib/drag'
 
@@ -52,7 +51,11 @@ function isLetter(event: KeyboardEvent, code: string, letter: string): boolean {
 export default function App(): React.JSX.Element {
   const roots = useLibrary((s) => s.roots)
   const scanning = useLibrary((s) => s.scanning)
+  // The active pane's view - what the sidebar, the keyboard and the vanished-folder check
+  // below act on. Which *page* is showing is the main pane's business, which is `mainView`.
   const view = useLibrary((s) => s.view)
+  const mainView = useLibrary(mainViewOf)
+  const secondView = useLibrary((s) => s.parked?.view ?? null)
   const panelOpen = useLibrary((s) => s.settings.panelOpen)
   const visualizerOnly = useLibrary((s) => s.settings.visualizerOnly)
   const alwaysOnTop = useLibrary((s) => s.settings.alwaysOnTop)
@@ -63,13 +66,6 @@ export default function App(): React.JSX.Element {
   // other reason - which is exactly what the coalesced revision bump is, and what
   // `Sidebar`'s total count already rides on.
   const trackCount = useLibrary((s) => s.tracks.length)
-  const rows = useVisibleRows()
-  // Memoised on the rows themselves: App re-renders on every scan progress tick, and a
-  // 300k-row reduce per tick is real work for a number that only changes with the rows.
-  const folderCount = useMemo(
-    () => rows.reduce((total, row) => total + (row.type === 'folder' ? 1 : 0), 0),
-    [rows]
-  )
 
   /**
    * Whether the visualizers actually have the window.
@@ -120,13 +116,13 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     if (tutorialSeen || !ready || loading || roots.length === 0) return
     // Not over the stage, the mini player or a page with none of the anchors on it.
-    if (visualizerOnly || miniPlayer || view.mode !== 'folder') return
+    if (visualizerOnly || miniPlayer || mainView.mode !== 'folder') return
     // A beat after the page swap, so the first spotlight measures a laid-out window rather
     // than one mid-animation - the frame would land in the right place and then visibly
     // jump.
     const timer = setTimeout(() => setTourOpen(true), 700)
     return () => clearTimeout(timer)
-  }, [tutorialSeen, ready, loading, roots.length, visualizerOnly, miniPlayer, view.mode])
+  }, [tutorialSeen, ready, loading, roots.length, visualizerOnly, miniPlayer, mainView.mode])
 
   // The updater installs on quit rather than interrupting, so the only thing it needs
   // from the UI is to say that it will. One notice per downloaded version.
@@ -138,17 +134,19 @@ export default function App(): React.JSX.Element {
     []
   )
 
-  // Watch whichever folder is on screen, so a bounce re-exported into it appears without
-  // being asked for. One folder at a time: a recursive watch over a library this size is
-  // a different proposition, and the scan still owns everything you aren't looking at.
+  // Watch whichever folders are on screen, so a bounce re-exported into either appears
+  // without being asked for. One per pane, never a subtree: a recursive watch over a library
+  // this size is a different proposition, and the scan still owns everything you aren't
+  // looking at. A pane whose folder is not watched is a pane where a bounce never appears.
   useEffect(() => {
-    const dir =
-      view.mode === 'folder' && roots.length > 0 && view.dir ? absolutePath(roots, view.dir) : null
-    void window.umakbang.watchFolder(dir)
+    const dirs = [mainView, secondView].flatMap((pane) =>
+      pane?.mode === 'folder' && roots.length > 0 && pane.dir ? [absolutePath(roots, pane.dir)] : []
+    )
+    void window.umakbang.watchFolders(dirs)
     return () => {
-      void window.umakbang.watchFolder(null)
+      void window.umakbang.watchFolders([])
     }
-  }, [view, roots])
+  }, [mainView, secondView, roots])
 
   // The window's own always-on-top state doesn't survive a restart, so restore it once
   // settings have hydrated.
@@ -406,16 +404,11 @@ export default function App(): React.JSX.Element {
    */
   const editingVideo = useVideos((s) => s.project !== null)
   const videoChromeOpen = useVideos((s) => s.chromeOpen)
-  const hideChrome = view.mode === 'videos' && editingVideo && !videoChromeOpen
+  const hideChrome = mainView.mode === 'videos' && editingVideo && !videoChromeOpen
 
-  const pageKey =
-    view.mode === 'stats' ||
-    view.mode === 'settings' ||
-    view.mode === 'contracts' ||
-    view.mode === 'videos' ||
-    view.mode === 'downloading'
-      ? view.mode
-      : 'browse'
+  // The main pane's view decides the page. A page always belongs to the main pane - see
+  // `setView` - so with the explorer split this is 'browse' whichever half is active.
+  const pageKey = isPageView(mainView) ? mainView.mode : 'browse'
 
   return (
     <MotionConfig reducedMotion="user" transition={SETTLE}>
@@ -443,37 +436,30 @@ export default function App(): React.JSX.Element {
                library the user no longer has, arming it once would mean every later launch
                wiping the machine again with nothing on screen able to stop it. The page is
                self-contained - its own nav, its own way back - so it stands alone here. */
-            view.mode === 'settings' ? <SettingsPage /> : <NoLibrary />
+            mainView.mode === 'settings' ? <SettingsPage /> : <NoLibrary />
           ) : (
             <div className="flex min-h-0 flex-1">
               <Sidebar />
               {/* Which page is on screen, so a test can read it without guessing from
                   the contents. */}
-              <main data-view={view.mode} className="flex min-w-0 flex-1 flex-col">
+              <main data-view={mainView.mode} className="flex min-w-0 flex-1 flex-col">
                 {/* Keyed so switching pages replays the enter animation. Deliberately not
                     AnimatePresence - see `.page-in` in index.css for what that cost. */}
                 <div key={pageKey} className="page-in flex min-h-0 flex-1 flex-col">
-                    {view.mode === 'stats' ? (
+                    {pageKey === 'stats' ? (
                       <StatsPage />
-                    ) : view.mode === 'settings' ? (
+                    ) : pageKey === 'settings' ? (
                       <SettingsPage />
-                    ) : view.mode === 'contracts' ? (
+                    ) : pageKey === 'contracts' ? (
                       <ContractsPage />
-                    ) : view.mode === 'videos' ? (
+                    ) : pageKey === 'videos' ? (
                       <VideosPage />
-                    ) : view.mode === 'downloading' ? (
+                    ) : pageKey === 'downloading' ? (
                       <DownloadPage />
                     ) : (
-                      <>
-                        <Toolbar
-                          rows={rows}
-                          folderCount={folderCount}
-                          fileCount={rows.length - folderCount}
-                        />
-                        {/* The table renders even with nothing in it: an empty folder is
-                            still somewhere you paste into and make folders in. */}
-                        <FileTable rows={rows} empty={<NoResults scanning={scanning} />} />
-                      </>
+                      /* One pane or two. The split belongs to the explorer and is held, not
+                         closed, while a page is up, so leaving Stats lands back in both. */
+                      <Explorer />
                     )}
                 </div>
                 {/* Outside the animated swap: the transport belongs to whatever is

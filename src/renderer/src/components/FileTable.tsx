@@ -44,6 +44,7 @@ import { collectFiles, useSort, type Row } from '@/hooks/useLibraryView'
 import { useFolderDrop } from '@/hooks/useFolderDrop'
 import { beginRowDrag, consumeDragClick } from '@/lib/drag'
 import { setExplorerShortcuts, type ShortcutEvent } from '@/lib/explorer-shortcuts'
+import { useIsActivePane, usePaneValue, useSplit } from '@/state/pane'
 import { matchesShortcut } from '@shared/shortcuts'
 import { absolutePath, baseName, relativePath } from '@/lib/paths'
 import {
@@ -539,16 +540,20 @@ export function FileTable({
   // Subscriptions live here rather than in every row: with ~40 rows on screen, each
   // resubscribing as you scroll, per-row store subscriptions were the bulk of the scroll
   // cost. Rows are now pure props and memoised.
-  const selectedPath = useLibrary((s) => s.selectedPath)
-  const selection = useLibrary((s) => s.selection)
+  // Where this pane is standing and what is selected in it. Through `usePaneValue` rather
+  // than the store's fields, which belong to whichever pane is active - see `parked`.
+  const selectedPath = usePaneValue('selectedPath')
+  const selection = usePaneValue('selection')
+  const activePane = useIsActivePane()
   const clipboard = useLibrary((s) => s.clipboard)
   const tags = useLibrary((s) => s.tags)
   const roots = useLibrary((s) => s.roots)
   const revealLabel = useLibrary((s) => s.platform?.revealLabel ?? 'Show in folder')
   const trashLabel = useLibrary((s) => (s.platform?.isMac ? 'Trash' : 'Recycle Bin'))
-  const view = useLibrary((s) => s.view)
+  const view = usePaneValue('view')
   const query = useLibrary((s) => s.query)
   const recursive = useLibrary((s) => s.recursive)
+  const split = useSplit()
   const savedColumns = useLibrary((s) => s.settings.columns)
   const quickMove = useLibrary((s) => s.settings.quickMove)
   const anyRemote = useLibrary((s) => s.anyRemote)
@@ -563,7 +568,7 @@ export function FileTable({
   // need - a `useLibrary` per row is the subscription this table exists to avoid.
   const shortcuts = useLibrary((s) => s.settings.shortcuts)
   const { key: sortKey, dir: sortDir } = useSort()
-  const revealNonce = useLibrary((s) => s.revealNonce)
+  const revealNonce = usePaneValue('revealNonce')
   const setView = useLibrary((s) => s.setView)
   const patchSettings = useLibrary((s) => s.patchSettings)
   const ratings = useLibrary((s) => s.ratings)
@@ -1011,6 +1016,10 @@ export function FileTable({
         const [path] = selectedRef.current.paths
         if (path) void window.umakbang.openExternally(path)
       },
+      openInOtherPane: () => {
+        const [dir] = selectedRef.current.dirs
+        if (dir !== undefined) useLibrary.getState().openInOtherPane(dir)
+      },
       packHere: () => {
         const [path] = selectedRef.current.paths
         if (!path) return
@@ -1421,12 +1430,15 @@ export function FileTable({
     [actions, rateFromKey, shortcuts, setView]
   )
 
-  // Only ever one explorer table on screen, and it deregisters on the way out so the
-  // settings and stats pages - which have no selection to act on - answer nothing.
+  // Only the active pane's table answers the window's keys - with the explorer split, the
+  // other table registering as well would leave Delete acting on whichever mounted last,
+  // which is the half you are not looking at. It deregisters on the way out so the settings
+  // and stats pages, which have no selection to act on, answer nothing.
   useEffect(() => {
+    if (!activePane) return
     setExplorerShortcuts(clipboardKeys)
     return () => setExplorerShortcuts(null)
-  }, [clipboardKeys])
+  }, [clipboardKeys, activePane])
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -1483,6 +1495,25 @@ export function FileTable({
     [actions, clipboardKeys, moveSelection]
   )
 
+  /**
+   * A press on the table that lands on no row clears the selection, the way it does in every
+   * file manager. Left button only and without a modifier: a right-click on empty space opens
+   * the folder menu, and ctrl or shift held is somebody adding to a selection, not leaving it.
+   * The header and the scrollbars are not empty space - both sit inside this element, and
+   * dragging the scrollbar to go and look for something must not throw away what is selected.
+   */
+  const deselectOnEmpty = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey) return
+    const target = event.target as HTMLElement
+    if (target.closest('[role="row"], [data-table-header]')) return
+    const box = event.currentTarget.getBoundingClientRect()
+    const inScrollbar =
+      event.clientX >= box.left + event.currentTarget.clientWidth ||
+      event.clientY >= box.top + event.currentTarget.clientHeight
+    if (inScrollbar) return
+    if (useLibrary.getState().selection.size > 0) useLibrary.getState().clearSelection()
+  }, [])
+
   /* ---------------------------------------------------------------- menu */
 
   // Set by a row on its way past, and read by the trigger below. Row handlers run first,
@@ -1515,6 +1546,7 @@ export function FileTable({
      * - half a move is worse than none.
      */
     localName,
+    split,
     readOnly:
       anyRemote(selected.paths) ||
       ((menuTarget.dir ?? currentDir) !== null &&
@@ -1588,7 +1620,7 @@ export function FileTable({
   }, [revealNonce, rows, selectedPath, virtualizer])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Header and body share one scroll container so they stay aligned horizontally
           when the columns are wider than the window. */}
       <ContextMenu>
@@ -1599,6 +1631,7 @@ export function FileTable({
             tabIndex={0}
             onKeyDown={onKeyDown}
             onContextMenu={onContextMenu}
+            onPointerDown={deselectOnEmpty}
             // Rows are selected, not their text: a drag across them should extend the
             // selection rather than highlight file names.
             className="scroll-thin flex min-h-0 flex-1 select-none flex-col overflow-auto outline-none"
@@ -1613,6 +1646,7 @@ export function FileTable({
                 header and the rows agree on how wide a row is. */}
             <div className="flex flex-col" style={{ minWidth: minRowWidth }}>
               <div
+                data-table-header
                 className="sticky top-0 z-10 grid h-[24px] shrink-0 items-center border-b bg-card pl-2 pr-3 text-[10.5px] font-medium text-muted-foreground"
                 style={{ gridTemplateColumns: template }}
               >
@@ -1630,8 +1664,6 @@ export function FileTable({
                   />
                 ))}
               </div>
-
-              {rows.length === 0 && <div className="flex min-h-0 flex-1 flex-col">{empty}</div>}
 
               {/* shrink-0 is load-bearing: this is a flex item in a column, so without it
                   flexbox squashes the list down to whatever is left in the viewport
@@ -1714,6 +1746,18 @@ export function FileTable({
             </div>
           </div>
         </ContextMenuTrigger>
+
+        {/* Over the visible part of the table rather than inside it. Inside, it sat in the
+            wrapper that carries every column's width and sizes to its own content - so it
+            centred across columns scrolled out of view, landing off to one side of a narrow
+            pane, and had no height to centre in at all. Here it is the box you can see,
+            under the header. `pointer-events-none` so the press goes on to the table beneath:
+            an empty folder is still somewhere you right-click to paste or make a folder. */}
+        {rows.length === 0 && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 top-[24px] flex flex-col">
+            {empty}
+          </div>
+        )}
 
         <ContextMenuContent
           className="min-w-[13rem]"

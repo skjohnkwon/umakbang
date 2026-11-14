@@ -32,6 +32,14 @@ interface PlayerState {
    * there, and the playhead would appear to be stuck for no reason anybody could see.
    */
   region: { start: number; end: number } | null
+  /**
+   * Tape-style speed change, or null for the file as it is. See `Varispeed`.
+   *
+   * Session-only, deliberately not a setting: it is somewhere you step into to try a beat
+   * at another tempo, and a library that came back from a restart sounding two semitones
+   * sharp would read as every file being broken rather than as a fader left up.
+   */
+  varispeed: Varispeed | null
 
   play: (track: Track, context: Track[]) => void
   /**
@@ -59,7 +67,56 @@ interface PlayerState {
   setOutputDevice: (device: Settings['outputDevice']) => void
   /** Sets the loop region, or clears it with null. */
   setRegion: (region: { start: number; end: number } | null) => void
+  /** Sets the varispeed, or puts the file back to its own speed with null. */
+  setVarispeed: (varispeed: Varispeed | null) => void
   stop: () => void
+}
+
+/**
+ * How playback is being sped up or slowed down, and which of the two numbers is held.
+ *
+ * Varispeed means tempo and pitch move together, exactly as a turntable or a tape does:
+ * there is one rate, and "BPM" and "semitones" are two ways of naming it. They come apart
+ * only when the track changes, and that is what `by` records. Set it by BPM and every file
+ * plays *at* that tempo, so a folder of loops auditions at your project's speed; set it by
+ * semitones and every file is moved by that interval, so a folder of beats auditions in the
+ * key you want. Holding the rate instead would satisfy neither: a 140 loop nudged to 150
+ * would play a 120 loop at 128.6.
+ */
+export type Varispeed = { by: 'bpm'; bpm: number } | { by: 'semitones'; semitones: number }
+
+/**
+ * An octave either way. Past that Chromium's resampler is still working but nothing you hear
+ * is a tempo or a key anybody would choose, and a BPM target set on a 140 beat would ask a
+ * 70 one for four times speed.
+ */
+export const MIN_RATE = 0.5
+export const MAX_RATE = 2
+
+/** The rate a varispeed asks of a track; 1 when it asks for a tempo the track doesn't have. */
+export function rateFor(track: Track | null, varispeed: Varispeed | null): number {
+  if (!varispeed) return 1
+  const raw =
+    varispeed.by === 'semitones'
+      ? 2 ** (varispeed.semitones / 12)
+      : track?.bpm
+        ? varispeed.bpm / track.bpm
+        : 1
+  return Number.isFinite(raw) ? Math.max(MIN_RATE, Math.min(MAX_RATE, raw)) : 1
+}
+
+/**
+ * Puts the current varispeed on the element. Exported because a BPM target depends on the
+ * track's tempo, and that can arrive while the track is already playing - detection rides
+ * along with the waveform decode - so the transport calls this when it does.
+ */
+export function applyVarispeed(): void {
+  const { current, varispeed } = usePlayer.getState()
+  const element = getAudioElement()
+  const rate = rateFor(current, varispeed)
+  // Both, because assigning `src` resets `playbackRate` to the default one.
+  element.defaultPlaybackRate = rate
+  element.playbackRate = rate
 }
 
 /**
@@ -136,6 +193,12 @@ export function getAudioElement(): HTMLAudioElement {
    * media stays untainted.
    */
   element.crossOrigin = 'anonymous'
+  /**
+   * Off, because varispeed is the point: with it on, Chromium time-stretches to hold the
+   * pitch, so raising the speed would change the tempo and leave the key where it was, and
+   * the semitone control would do nothing at all. At a rate of 1 it makes no difference.
+   */
+  element.preservesPitch = false
 
   element.addEventListener('timeupdate', () => {
     usePlayer.setState({ time: element.currentTime })
@@ -275,6 +338,8 @@ function load(track: Track, autoplay: boolean): void {
     duration: track.duration ?? 0,
     error: track.playable ? null : `.${track.ext} files can't be previewed in Umakbang.`
   })
+  // After `current` is the new track, since a BPM target is worked out from its tempo.
+  applyVarispeed()
   if (autoplay && track.playable) {
     void element.play().catch(() => {
       /* The 'error' listener reports this to the user. */
@@ -293,6 +358,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   volume: 1,
   error: null,
   region: null,
+  varispeed: null,
 
   play: (track, context) => {
     const queue = buildQueue(track, context)
@@ -484,6 +550,16 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     // A press that never became a drag is a click, and a click clears the region rather
     // than leaving a loop of no length behind, which would pin the playhead on one sample.
     set({ region: region && region.end > region.start ? region : null })
+  },
+
+  setVarispeed: (varispeed) => {
+    // Back to exactly 1 is back to off, so the transport stops calling attention to it.
+    const neutral =
+      varispeed === null ||
+      (varispeed.by === 'semitones' && varispeed.semitones === 0) ||
+      (varispeed.by === 'bpm' && !(varispeed.bpm > 0))
+    set({ varispeed: neutral ? null : varispeed })
+    applyVarispeed()
   },
 
   stop: () => {

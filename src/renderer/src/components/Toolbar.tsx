@@ -6,6 +6,7 @@ import {
   AudioLines,
   ChevronRight,
   ClipboardPaste,
+  Columns2,
   Copy,
   CornerLeftUp,
   Dices,
@@ -26,7 +27,8 @@ import {
   Star,
   Undo2,
   Wand2,
-  Library
+  Library,
+  X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/ui/tooltip'
@@ -50,6 +52,8 @@ import {
 import { ColumnMenu } from '@/components/ColumnMenu'
 import { NamePopover, type NamePrompt } from '@/components/NamePopover'
 import { useLibrary } from '@/state/library'
+import { useIsActivePane, usePaneId, usePaneValue, useSplit } from '@/state/pane'
+import { usePaneRows } from '@/lib/pane-rows'
 import { usePlayer } from '@/state/player'
 import { useAvailableTypes, type Row } from '@/hooks/useLibraryView'
 import { useFolderDrop } from '@/hooks/useFolderDrop'
@@ -65,41 +69,35 @@ import { cn } from '@/lib/utils'
 import { KIND_LABELS, baseName } from '@/lib/format'
 import { shortcutKey, shortcutLabel } from '@shared/shortcuts'
 
-export function Toolbar({
-  rows,
+/**
+ * The strip above one explorer pane: where it is standing and how to move.
+ *
+ * This used to be the whole toolbar, one flat row in which position did not predict
+ * ownership - New folder and Refresh sat among the library-wide toggles and were about the
+ * folder on screen. Splitting the explorer forced the question, and the answer is the cut
+ * here: everything that acts on where *this pane* is standing stays (back, forward, up,
+ * refresh, new folder, the path, the counts), and everything about the whole library went up
+ * into the title bar as `ExplorerControls`, once, rather than twice side by side.
+ */
+export function PaneBar({
   folderCount,
   fileCount
 }: {
-  /** What the table is showing, for the actions that work on the whole view. */
-  rows: Row[]
   folderCount: number
   fileCount: number
 }): React.JSX.Element {
-  const view = useLibrary((s) => s.view)
+  const pane = usePaneId() ?? 'main'
+  const view = usePaneValue('view')
+  const history = usePaneValue('history')
+  const historyIndex = usePaneValue('historyIndex')
+  const selectionCount = usePaneValue('selection').size
+  const split = useSplit()
+  const active = useIsActivePane()
   const setView = useLibrary((s) => s.setView)
   const goBack = useLibrary((s) => s.goBack)
   const goForward = useLibrary((s) => s.goForward)
-  // Booleans rather than the stack itself, so navigating doesn't re-render the toolbar
-  // for a history array whose contents it never reads.
-  const canGoBack = useLibrary((s) => s.historyIndex > 0)
-  const canGoForward = useLibrary((s) => s.historyIndex < s.history.length - 1)
-  const progress = useLibrary((s) => s.progress)
-  const scanning = useLibrary((s) => s.scanning)
-  const selectionCount = useLibrary((s) => s.selection.size)
-  const stemJob = useLibrary((s) => s.stemJob)
-  const youtubeJob = useLibrary((s) => s.youtubeJob)
-  const downloading = useLibrary((s) => s.downloading)
-  const downloadSpeed = useLibrary((s) => s.downloadSpeed)
-  const verifying = useLibrary((s) => s.verifying)
-  // The durable way back. The menu carries it too, but a menu bar is not where a Windows
-  // user looks for the thing they just did, so the button sits with Back and Forward - which
-  // is the other control on this strip that means "take me to before".
-  const undo = useLibrary((s) => s.undo)
-  const redo = useLibrary((s) => s.redo)
-  const undoRunning = useLibrary((s) => s.undoRunning)
-  const undoProgress = useLibrary((s) => s.undoProgress)
-  const runUndo = useLibrary((s) => s.runUndo)
-  const runRedo = useLibrary((s) => s.runRedo)
+  const canGoBack = historyIndex > 0
+  const canGoForward = historyIndex < history.length - 1
 
   const canGoUp = view.mode === 'folder' && view.dir !== ''
   const parentDir = canGoUp && view.mode === 'folder' ? parentOf(view.dir) : ''
@@ -115,10 +113,21 @@ export function Toolbar({
        `shrink`, everything after them is `shrink-0`), and only if the buttons alone still
        don't fit does the strip scroll. What it must never do is overflow silently, which
        painted "checking for changes" across the visualizer panel beside it. The scrollbar
-       is hidden because there is no room for one in 30px - shift+wheel reaches the rest. */
-    <div className="scroll-none flex h-[30px] shrink-0 items-center gap-2 overflow-x-auto overflow-y-hidden border-b px-2.5">
+       is hidden because there is no room for one in 30px - shift+wheel reaches the rest.
+
+       With the explorer split, the half the keyboard belongs to carries a line across its
+       top. Delete acting on the half you are not looking at is the worst thing a split can
+       do, so which half is listening has to be visible rather than remembered. */
+    <div
+      className={cn(
+        'scroll-none flex h-[30px] shrink-0 items-center gap-2 overflow-x-auto overflow-y-hidden border-b px-2.5',
+        split && active && 'shadow-[inset_0_2px_0_var(--primary)]',
+        split && !active && 'text-muted-foreground'
+      )}
+    >
       {/* Back and Forward retrace where you have been, which is not the same question as
-          Up: Up is the tree, these are the route you took through it. */}
+          Up: Up is the tree, these are the route you took through it. Each pane keeps its
+          own route. */}
       <div className="flex shrink-0 items-center">
         <Hint label="Back (Alt+Left)" side="bottom">
           <Button
@@ -142,78 +151,6 @@ export function Toolbar({
             <ArrowRight className="h-3.5 w-3.5" />
           </Button>
         </Hint>
-
-        {/* Absent rather than disabled when there is nothing to reverse, which is most of
-            the time: a permanently greyed button is chrome nobody reads, and its arriving is
-            what says an operation was recorded. The label is main's single wording of the
-            record - `title` rather than a `Hint`, because it already is the whole sentence
-            and a tooltip repeating it says nothing twice. */}
-        {undo !== null && (
-          <>
-            <Button
-              variant="ghost"
-              /* Grows a number when there is more than one press in it, the way Clear does.
-                 Without it a stack of operations looks exactly like a single one, and the
-                 whole point of the stack is that the second press does something. */
-              size={undo.depth > 1 ? 'sm' : 'icon-sm'}
-              className={cn(undo.depth > 1 && 'gap-1 px-1.5')}
-              aria-label={undo.label}
-              title={
-                undo.depth > 1
-                  ? `${undo.label}, ${undo.depth} operations to step back through`
-                  : undo.label
-              }
-              disabled={undoRunning}
-              onClick={() => void runUndo()}
-            >
-              {undoRunning ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Undo2 className="h-3.5 w-3.5" />
-              )}
-              {undo.depth > 1 && !undoRunning && (
-                <span className="tnum text-[11px]">{undo.depth}</span>
-              )}
-            </Button>
-            {/* Stopping is between files, never inside one, so this is offered for as long as
-                there are files left to decide about. The count is on it rather than beside
-                it: 30px of strip has no room for a second status text. */}
-            {undoRunning && (
-              <Button
-                variant="subtle"
-                size="sm"
-                className="tnum"
-                onClick={() => void window.umakbang.cancelUndo()}
-              >
-                {undoProgress
-                  ? `Cancel ${undoProgress.done}/${undoProgress.total}`
-                  : 'Cancel'}
-              </Button>
-            )}
-          </>
-        )}
-
-        {/* Absent until something has been undone, on the same rule as Undo beside it - and
-            for redo that is nearly always, so a permanent greyed arrow would be chrome that
-            never does anything. Not shown mid-run either: the reversal in flight is about to
-            change what there is to redo. */}
-        {redo !== null && !undoRunning && (
-          <Button
-            variant="ghost"
-            size={redo.depth > 1 ? 'sm' : 'icon-sm'}
-            className={cn(redo.depth > 1 && 'gap-1 px-1.5')}
-            aria-label={redo.label}
-            title={
-              redo.depth > 1
-                ? `${redo.label}, ${redo.depth} operations to step forward through`
-                : redo.label
-            }
-            onClick={() => void runRedo()}
-          >
-            <Redo2 className="h-3.5 w-3.5" />
-            {redo.depth > 1 && <span className="tnum text-[11px]">{redo.depth}</span>}
-          </Button>
-        )}
       </div>
 
       <Hint
@@ -239,7 +176,7 @@ export function Toolbar({
 
       {/* Left of the path, with the other controls that act on where you are standing rather
           than on the whole library: Up leaves this folder, Refresh re-reads it, New folder
-          makes one inside it. The toggles after the path are about the whole library. */}
+          makes one inside it. */}
       <RefreshFolderButton />
       <NewFolderButton />
 
@@ -249,10 +186,10 @@ export function Toolbar({
             icon={<Star className="h-3.5 w-3.5 fill-current" />}
             label={
               view.min === view.max
-                ? `${'\u2605'.repeat(view.min)} only`
+                ? `${'★'.repeat(view.min)} only`
                 : view.min === 1 && view.max === 5
                   ? 'Rated'
-                  : `${view.min}\u2013${view.max} stars`
+                  : `${view.min}–${view.max} stars`
             }
           />
         )}
@@ -291,6 +228,72 @@ export function Toolbar({
         </span>
       )}
 
+      {/* The split's own controls. Opening starts the second half where this one is
+          standing, which is the commonest reason to want one: the folder you are filing out
+          of, beside wherever it is going. */}
+      {split ? (
+        <Hint label="Close this pane" side="bottom">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close this pane"
+            className="shrink-0"
+            onClick={() => useLibrary.getState().closePane(pane)}
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </Hint>
+      ) : (
+        <Hint label="Split: a second folder beside this one" side="bottom">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Split the explorer"
+            className="shrink-0"
+            onClick={() => {
+              const store = useLibrary.getState()
+              store.openInOtherPane(view.mode === 'folder' ? view.dir : store.lastFolderDir)
+            }}
+          >
+            <Columns2 className="h-3.5 w-3.5" />
+          </Button>
+        </Hint>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The library-wide half of what used to be the toolbar, which now lives in the title bar.
+ *
+ * None of this is about where a pane is standing: undo is one stack, the filters and the
+ * search are one question asked of the whole library, the dice and the playback switches are
+ * about what you hear, and a stem split or a download is one job however many panes are
+ * open. Duplicated into both halves of a split, one download would draw two spinners.
+ */
+export function ExplorerControls(): React.JSX.Element {
+  const progress = useLibrary((s) => s.progress)
+  const scanning = useLibrary((s) => s.scanning)
+  const stemJob = useLibrary((s) => s.stemJob)
+  const youtubeJob = useLibrary((s) => s.youtubeJob)
+  const downloading = useLibrary((s) => s.downloading)
+  const downloadSpeed = useLibrary((s) => s.downloadSpeed)
+  const verifying = useLibrary((s) => s.verifying)
+  // The durable way back. The menu carries it too, but a menu bar is not where a Windows
+  // user looks for the thing they just did. One stack for the whole app, so one button.
+  const undo = useLibrary((s) => s.undo)
+  const redo = useLibrary((s) => s.redo)
+  const undoRunning = useLibrary((s) => s.undoRunning)
+  const undoProgress = useLibrary((s) => s.undoProgress)
+  const runUndo = useLibrary((s) => s.runUndo)
+  const runRedo = useLibrary((s) => s.runRedo)
+  // The recalculate button sweeps what is on screen, which with a split is the half you
+  // are working in.
+  const activePane = useLibrary((s) => s.activePane)
+  const rows = usePaneRows(activePane)
+
+  return (
+    <div className="app-no-drag flex min-w-0 shrink items-center gap-1.5">
       {/* Splitting runs in the background, so this is the only thing that says so. */}
       {stemJob && (
         <span
@@ -307,8 +310,8 @@ export function Toolbar({
         </span>
       )}
 
-      {/* Downloading runs in the background too, and the dialog it was started from is
-          usually shut by now. */}
+      {/* Downloading runs in the background too, and the page it was started from is
+          usually somewhere else by now. */}
       {youtubeJob && (
         <span
           className="tnum flex min-w-0 shrink items-center gap-1.5 text-[11.5px] text-muted-foreground"
@@ -363,15 +366,88 @@ export function Toolbar({
         </span>
       )}
 
-      <PlaybackToggles />
-      <ClearFiltersButton />
-      <RecalculateButton rows={rows} />
-      <RandomBeatButton />
-      <AudioOnlyToggle />
-      <FoldersToggle />
-      <TypeFilterMenu />
-      <ColumnsButton />
+      <div className="flex shrink-0 items-center">
+        {/* Absent rather than disabled when there is nothing to reverse, which is most of
+            the time: a permanently greyed button is chrome nobody reads, and its arriving is
+            what says an operation was recorded. The label is main's single wording of the
+            record - `title` rather than a `Hint`, because it already is the whole sentence
+            and a tooltip repeating it says nothing twice. */}
+        {undo !== null && (
+          <>
+            <Button
+              variant="ghost"
+              /* Grows a number when there is more than one press in it, the way Clear does.
+                 Without it a stack of operations looks exactly like a single one, and the
+                 whole point of the stack is that the second press does something. */
+              size={undo.depth > 1 ? 'sm' : 'icon-sm'}
+              className={cn(undo.depth > 1 && 'gap-1 px-1.5')}
+              aria-label={undo.label}
+              title={
+                undo.depth > 1
+                  ? `${undo.label}, ${undo.depth} operations to step back through`
+                  : undo.label
+              }
+              disabled={undoRunning}
+              onClick={() => void runUndo()}
+            >
+              {undoRunning ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Undo2 className="h-3.5 w-3.5" />
+              )}
+              {undo.depth > 1 && !undoRunning && (
+                <span className="tnum text-[11px]">{undo.depth}</span>
+              )}
+            </Button>
+            {/* Stopping is between files, never inside one, so this is offered for as long as
+                there are files left to decide about. The count is on it rather than beside
+                it: there is no room for a second status text. */}
+            {undoRunning && (
+              <Button
+                variant="subtle"
+                size="sm"
+                className="tnum"
+                onClick={() => void window.umakbang.cancelUndo()}
+              >
+                {undoProgress
+                  ? `Cancel ${undoProgress.done}/${undoProgress.total}`
+                  : 'Cancel'}
+              </Button>
+            )}
+          </>
+        )}
 
+        {/* Absent until something has been undone, on the same rule as Undo beside it - and
+            for redo that is nearly always, so a permanent greyed arrow would be chrome that
+            never does anything. Not shown mid-run either: the reversal in flight is about to
+            change what there is to redo. */}
+        {redo !== null && !undoRunning && (
+          <Button
+            variant="ghost"
+            size={redo.depth > 1 ? 'sm' : 'icon-sm'}
+            className={cn(redo.depth > 1 && 'gap-1 px-1.5')}
+            aria-label={redo.label}
+            title={
+              redo.depth > 1
+                ? `${redo.label}, ${redo.depth} operations to step forward through`
+                : redo.label
+            }
+            onClick={() => void runRedo()}
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+            {redo.depth > 1 && <span className="tnum text-[11px]">{redo.depth}</span>}
+          </Button>
+        )}
+
+        <PlaybackToggles />
+        <ClearFiltersButton />
+        <RecalculateButton rows={rows} />
+        <RandomBeatButton />
+        <AudioOnlyToggle />
+        <FoldersToggle />
+        <TypeFilterMenu />
+        <ColumnsButton />
+      </div>
     </div>
   )
 }
@@ -389,7 +465,7 @@ export function Toolbar({
  * questions about the library rather than places in it, so there is nowhere to put it.
  */
 function NewFolderButton(): React.JSX.Element {
-  const view = useLibrary((s) => s.view)
+  const view = usePaneValue('view')
   const [prompt, setPrompt] = useState<NamePrompt | null>(null)
   const anchor = useRef<HTMLButtonElement>(null)
 
@@ -489,7 +565,7 @@ function formatRate(bytesPerSecond: number): string {
 }
 
 function RefreshFolderButton(): React.JSX.Element {
-  const view = useLibrary((s) => s.view)
+  const view = usePaneValue('view')
   const roots = useLibrary((s) => s.roots)
   const [spinning, setSpinning] = useState(false)
   const dir = view.mode === 'folder' && roots.length > 0 ? absolutePath(roots, view.dir) : null

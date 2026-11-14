@@ -1994,16 +1994,17 @@ function DownloadSection(): React.JSX.Element {
 
       <Row
         label="Save as"
-        hint="MP3 re-encodes what came down. The original stream is better audio."
+        hint="MP3 re-encodes what came down. The original stream is better audio. Video keeps the picture too, up to 1080p."
       >
         <SegmentedControl
           value={settings.youtubeFormat}
           options={[
             { value: 'mp3', label: 'MP3' },
-            { value: 'source', label: 'Original' }
+            { value: 'source', label: 'Original' },
+            { value: 'video', label: 'Video' }
           ]}
           onChange={(youtubeFormat) =>
-            patchSettings({ youtubeFormat: youtubeFormat as 'mp3' | 'source' })
+            patchSettings({ youtubeFormat: youtubeFormat as 'mp3' | 'source' | 'video' })
           }
         />
       </Row>

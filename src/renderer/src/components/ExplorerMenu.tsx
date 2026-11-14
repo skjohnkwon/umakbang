@@ -2,6 +2,7 @@ import type React from 'react'
 import {
   AudioLines,
   ChevronRight,
+  Columns2,
   Clapperboard,
   ClipboardPaste,
   Copy,
@@ -51,6 +52,8 @@ import { shortcutKey, shortcutLabel } from '@shared/shortcuts'
 export interface ExplorerActions {
   /** Enter a folder, or play a file. */
   open: () => void
+  /** Opens the selected folder in the other half of the explorer, splitting it if need be. */
+  openInOtherPane: () => void
   openExternally: () => void
   goToFolder: () => void
   cut: () => void
@@ -122,6 +125,8 @@ export interface MenuContext {
   readOnly?: boolean
   /** This machine's name, for the one action a remote selection does offer. */
   localName?: string
+  /** Whether the explorer is already split, which decides what opening a folder aside says. */
+  split?: boolean
   actions: ExplorerActions
 }
 
@@ -200,10 +205,18 @@ export function SelectionMenuItems({ context }: { context: MenuContext }): React
       <ContextMenuSeparator />
 
       {single && only.directory ? (
-        <ContextMenuItem onSelect={actions.open}>
-          <FolderInput className="h-3.5 w-3.5" />
-          Open folder
-        </ContextMenuItem>
+        <>
+          <ContextMenuItem onSelect={actions.open}>
+            <FolderInput className="h-3.5 w-3.5" />
+            Open folder
+          </ContextMenuItem>
+          {/* Two folders on screen at once, which is what filing from one into another
+              wants. With the split already open it is the other half that moves. */}
+          <ContextMenuItem onSelect={actions.openInOtherPane}>
+            <Columns2 className="h-3.5 w-3.5" />
+            {context.split ? 'Open in other pane' : 'Open in second pane'}
+          </ContextMenuItem>
+        </>
       ) : (
         <ContextMenuItem disabled={!playable} onSelect={actions.open}>
           <AudioLines className="h-3.5 w-3.5" />

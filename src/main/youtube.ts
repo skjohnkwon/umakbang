@@ -23,6 +23,11 @@
  * binary this app is not going to acquire; the renderer already carries LAME for trims and
  * already decodes audio through Chromium, so what comes down is handed over as it arrived and
  * re-encoded there. See `lib/youtube.ts`.
+ *
+ * Video is joined here for the same reason. Anything sharper than 360p arrives as a picture
+ * stream and a sound stream, and joining them is the other thing yt-dlp hands to ffmpeg - so
+ * the two are downloaded separately and joined by `mergeAudioVideo`, which copies samples
+ * between MP4 containers without decoding a frame.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -33,6 +38,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { app } from 'electron'
+import { mergeAudioVideo } from './mp4-remux'
 import type { YoutubeFetched, YoutubeInfo, YoutubeProgress, YoutubeToolStatus } from '../shared/types'
 
 export type { YoutubeFetched, YoutubeInfo, YoutubeProgress, YoutubeToolStatus }
@@ -208,6 +214,76 @@ interface DumpedJson {
   thumbnail?: string
   entries?: unknown[]
   playlist_count?: number
+  formats?: DumpedFormat[]
+}
+
+/** One of the streams a video is offered in, as yt-dlp lists them. */
+interface DumpedFormat {
+  format_id: string
+  ext?: string
+  vcodec?: string
+  acodec?: string
+  height?: number
+  tbr?: number
+  abr?: number
+  protocol?: string
+  filesize?: number
+  filesize_approx?: number
+}
+
+/**
+ * The tallest picture a video download asks for.
+ *
+ * 1080 because it is where the site stops offering H.264: above it the streams are VP9 and
+ * AV1, which play in a browser and in very little a producer would drop a video into - a DAW,
+ * an editor, a phone's upload sheet. A 4K file that will not import anywhere is worse than a
+ * 1080p one that will.
+ */
+const MAX_VIDEO_HEIGHT = 1080
+
+/** Plain downloadable files only - a playlist manifest is a different kind of fetch. */
+function direct(format: DumpedFormat): boolean {
+  return format.protocol === undefined || format.protocol === 'https' || format.protocol === 'http'
+}
+
+function sizeOf(format: DumpedFormat): number {
+  return format.filesize ?? format.filesize_approx ?? 0
+}
+
+/**
+ * The picture and sound streams worth joining, or null when there is no such pair.
+ *
+ * H.264 in MP4 for the picture and AAC in M4A for the sound, because those are the codecs the
+ * joined file has to carry to be openable everywhere, and because `mergeAudioVideo` only
+ * reads MP4 containers - a WebM stream is a different container altogether.
+ */
+function pickStreams(
+  formats: DumpedFormat[]
+): { video: DumpedFormat; audio: DumpedFormat } | null {
+  const video = formats
+    .filter(
+      (f) =>
+        direct(f) &&
+        f.ext === 'mp4' &&
+        f.vcodec?.startsWith('avc1') === true &&
+        (f.acodec === 'none' || f.acodec === undefined) &&
+        (f.height ?? 0) <= MAX_VIDEO_HEIGHT
+    )
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0))[0]
+  const audio = formats
+    .filter(
+      (f) =>
+        direct(f) &&
+        // `-drc` is the same sound with its dynamics squashed for phone speakers. It is
+        // listed beside the real one at nearly the same bitrate, so a sort alone picks
+        // between them by a rounding error.
+        !f.format_id.includes('drc') &&
+        f.ext === 'm4a' &&
+        f.acodec?.startsWith('mp4a') === true &&
+        (f.vcodec === 'none' || f.vcodec === undefined)
+    )
+    .sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0]
+  return video && audio ? { video, audio } : null
 }
 
 /**
@@ -260,6 +336,13 @@ export async function probe(
   url: string,
   withThumbnail = false
 ): Promise<{ info?: YoutubeInfo; error?: string }> {
+  const dumped = await dump(url)
+  if (dumped.error || !dumped.json) return { error: dumped.error ?? 'That link could not be read.' }
+  return { info: await describe(dumped.json, withThumbnail) }
+}
+
+/** What the extractor says about a link, raw - the formats list included. */
+async function dump(url: string): Promise<{ json?: DumpedJson; error?: string }> {
   if (!existsSync(toolPath())) return { error: 'The downloader is not installed yet.' }
 
   let handle: ChildProcess | undefined
@@ -282,29 +365,7 @@ export async function probe(
     const { code, out, err } = await started.done
     if (code !== 0) return { error: complaint(err, 'That link could not be read.') }
 
-    const json = JSON.parse(out) as DumpedJson
-    if (json._type === 'playlist') {
-      return {
-        info: {
-          id: json.id ?? '',
-          title: json.title ?? 'Playlist',
-          uploader: json.uploader ?? json.channel ?? '',
-          playlist: true,
-          count: json.playlist_count ?? json.entries?.length
-        }
-      }
-    }
-
-    return {
-      info: {
-        id: json.id ?? '',
-        title: json.title ?? 'Untitled',
-        uploader: json.uploader ?? json.channel ?? '',
-        seconds: typeof json.duration === 'number' ? json.duration : undefined,
-        thumbnail:
-          withThumbnail && json.thumbnail ? await inlineThumbnail(json.thumbnail) : undefined
-      }
-    }
+    return { json: JSON.parse(out) as DumpedJson }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
   } finally {
@@ -312,10 +373,38 @@ export async function probe(
   }
 }
 
+async function describe(json: DumpedJson, withThumbnail: boolean): Promise<YoutubeInfo> {
+  if (json._type === 'playlist') {
+    return {
+      id: json.id ?? '',
+      title: json.title ?? 'Playlist',
+      uploader: json.uploader ?? json.channel ?? '',
+      playlist: true,
+      count: json.playlist_count ?? json.entries?.length
+    }
+  }
+  return {
+    id: json.id ?? '',
+    title: json.title ?? 'Untitled',
+    uploader: json.uploader ?? json.channel ?? '',
+    seconds: typeof json.duration === 'number' ? json.duration : undefined,
+    thumbnail: withThumbnail && json.thumbnail ? await inlineThumbnail(json.thumbnail) : undefined
+  }
+}
+
 /** The child currently downloading, so the dialog's Stop button has something to stop. */
 let active: ChildProcess | null = null
+/**
+ * Set by Stop, and checked between the steps of a video download. That job is two downloads
+ * and a join, and killing the child only stops the step that is running - without this the
+ * next step would start as if nothing had been asked.
+ */
+let cancelled = false
+/** True while a fetch is anywhere in its run, not only while a child is alive. */
+let busy = false
 
 export function cancel(): void {
+  cancelled = true
   active?.kill()
   active = null
 }
@@ -323,84 +412,162 @@ export function cancel(): void {
 const PERCENT = /\[download\]\s+([\d.]+)%/
 
 /**
- * Downloads the audio stream to somewhere temporary and says what it got.
+ * Downloads one format to `<stem>.<ext>` in the scratch folder and says which file it wrote.
+ *
+ * `--no-mtime` because the library sorts and colours by Modified, and that column means "when
+ * this arrived here". Left alone, yt-dlp stamps the file with the upload date and a beat
+ * pulled down this afternoon sorts in among files from 2014.
+ */
+async function downloadFormat(
+  url: string,
+  format: string,
+  stem: string,
+  onPercent: (percent: number) => void
+): Promise<{ path?: string; error?: string }> {
+  const dir = scratchDir()
+  const started = run(
+    [
+      '-f',
+      format,
+      '--no-playlist',
+      '--newline',
+      '--no-warnings',
+      '--no-mtime',
+      '-o',
+      join(dir, `${stem}.%(ext)s`),
+      url
+    ],
+    (line) => {
+      const match = PERCENT.exec(line)
+      if (match) onPercent(Number(match[1]))
+    }
+  )
+  active = started.child
+  const { code, err } = await started.done
+  active = null
+  if (code !== 0) {
+    // A kill lands here too, and "cancelled" is not an error worth a red banner.
+    if (started.child.killed || cancelled) return { error: 'Cancelled.' }
+    return { error: complaint(err, 'The download failed.') }
+  }
+  const produced = (await readdir(dir)).find((name) => name.startsWith(`${stem}.`))
+  if (!produced) return { error: 'The download finished but left no file.' }
+  return { path: join(dir, produced) }
+}
+
+/**
+ * Downloads what the link is to somewhere temporary and says what it got: the audio stream,
+ * or for `video` one MP4 with both picture and sound.
  *
  * Temporary rather than straight into the destination folder because the folder on screen is
  * watched: a stream that lands there under one name and is replaced by an MP3 a few seconds
  * later would appear in the table, dim itself out and vanish, which is three visible events
  * for one download. Nothing enters the library until it is the file the user asked for.
  */
-export async function fetchAudio(
+export async function fetchMedia(
   url: string,
+  kind: 'audio' | 'video',
   report: (progress: YoutubeProgress) => void
 ): Promise<YoutubeFetched> {
   if (!existsSync(toolPath())) return { error: 'The downloader is not installed yet.' }
-  if (active) return { error: 'A download is already running.' }
+  if (busy) return { error: 'A download is already running.' }
+  busy = true
+  cancelled = false
+
+  // A stem nothing else can collide with, so the file this run produced is the one found
+  // even if a previous run left its scratch behind.
+  const stem = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+  const leftovers: string[] = []
 
   try {
     report({ phase: 'tool' })
     await updateIfStale()
 
     report({ phase: 'reading' })
-    const looked = await probe(url)
-    if (looked.error || !looked.info) return { error: looked.error ?? 'That link could not be read.' }
-    if (looked.info.playlist) {
+    const dumped = await dump(url)
+    if (dumped.error || !dumped.json) return { error: dumped.error ?? 'That link could not be read.' }
+    const info = await describe(dumped.json, false)
+    if (info.playlist) {
       return {
-        error: `That link is a playlist${looked.info.count ? ` of ${looked.info.count} videos` : ''}. Paste a link to a single video.`
+        error: `That link is a playlist${info.count ? ` of ${info.count} videos` : ''}. Paste a link to a single video.`
       }
     }
-    const info = looked.info
+    if (cancelled) return { error: 'Cancelled.' }
 
-    const dir = scratchDir()
-    await mkdir(dir, { recursive: true })
-    // A stem nothing else can collide with, so the file this run produced is the one found
-    // below even if a previous run left its scratch behind.
-    const stem = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
-
+    await mkdir(scratchDir(), { recursive: true })
     report({ phase: 'downloading', percent: 0, title: info.title })
 
-    const started = run(
-      [
-        // m4a first because Chromium decodes AAC everywhere and because it is the format
-        // YouTube serves for almost everything; the bare `bestaudio` behind it catches the
-        // Opus-only uploads, which decode just as well and only matter to the extension.
-        '-f',
-        'bestaudio[ext=m4a]/bestaudio/best',
-        '--no-playlist',
-        '--newline',
-        '--no-warnings',
-        // The library sorts and colours by Modified, and that column means "when this
-        // arrived here". Left alone, yt-dlp stamps the file with the upload date and a beat
-        // pulled down this afternoon sorts in among files from 2014.
-        '--no-mtime',
-        '-o',
-        join(dir, `${stem}.%(ext)s`),
-        url
-      ],
-      (line) => {
-        const match = PERCENT.exec(line)
-        if (match) report({ phase: 'downloading', percent: Number(match[1]), title: info.title })
-      }
-    )
-    active = started.child
-
-    const { code, err } = await started.done
-    active = null
-    if (code !== 0) {
-      // A kill lands here too, and "cancelled" is not an error worth a red banner.
-      if (started.child.killed) return { error: 'Cancelled.' }
-      return { error: complaint(err, 'The download failed.') }
+    if (kind === 'audio') {
+      // m4a first because Chromium decodes AAC everywhere and because it is the format
+      // YouTube serves for almost everything; the bare `bestaudio` behind it catches the
+      // Opus-only uploads, which decode just as well and only matter to the extension.
+      const got = await downloadFormat(url, 'bestaudio[ext=m4a]/bestaudio/best', stem, (percent) =>
+        report({ phase: 'downloading', percent, title: info.title })
+      )
+      if (got.error || !got.path) return { error: got.error }
+      return { tempPath: got.path, ext: extOf(got.path, stem), info }
     }
 
-    const produced = (await readdir(dir)).find((name) => name.startsWith(`${stem}.`))
-    if (!produced) return { error: 'The download finished but left no file.' }
+    const pair = pickStreams(dumped.json.formats ?? [])
+    if (!pair) {
+      /**
+       * No separate H.264 picture and AAC sound to join, so the one stream that already has
+       * both. On YouTube that is a 360p MP4, which is a real step down - but a video that
+       * downloads is better than one refused, and it is still an MP4 that opens anywhere.
+       */
+      const got = await downloadFormat(
+        url,
+        'best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]',
+        stem,
+        (percent) => report({ phase: 'downloading', percent, title: info.title })
+      )
+      if (got.error || !got.path) return { error: got.error }
+      return { tempPath: got.path, ext: extOf(got.path, stem), info }
+    }
 
-    const ext = produced.slice(stem.length + 1).toLowerCase()
-    return { tempPath: join(dir, produced), ext, info }
+    // One bar across both downloads, weighted by how big each one is said to be. The picture
+    // is nearly all of it, so without sizes it is given nine tenths.
+    const videoBytes = sizeOf(pair.video)
+    const audioBytes = sizeOf(pair.audio)
+    const share = videoBytes > 0 && audioBytes > 0 ? videoBytes / (videoBytes + audioBytes) : 0.9
+
+    const picture = await downloadFormat(url, pair.video.format_id, `${stem}.v`, (percent) =>
+      report({ phase: 'downloading', percent: percent * share, title: info.title })
+    )
+    if (picture.path) leftovers.push(picture.path)
+    if (picture.error || !picture.path) return { error: picture.error }
+    if (cancelled) return { error: 'Cancelled.' }
+
+    const sound = await downloadFormat(url, pair.audio.format_id, `${stem}.a`, (percent) =>
+      report({
+        phase: 'downloading',
+        percent: share * 100 + percent * (1 - share),
+        title: info.title
+      })
+    )
+    if (sound.path) leftovers.push(sound.path)
+    if (sound.error || !sound.path) return { error: sound.error }
+    if (cancelled) return { error: 'Cancelled.' }
+
+    report({ phase: 'merging', title: info.title })
+    const joined = join(scratchDir(), `${stem}.mp4`)
+    const merged = await mergeAudioVideo(picture.path, sound.path, joined)
+    if (!merged.ok) return { error: `The picture and sound could not be joined: ${merged.reason}.` }
+    return { tempPath: joined, ext: 'mp4', info }
   } catch (error) {
-    active = null
     return { error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    active = null
+    busy = false
+    // The two halves of a joined video are scratch whether the join worked or not.
+    for (const path of leftovers) await rm(path, { force: true }).catch(() => {})
   }
+}
+
+/** The extension a downloaded file actually has, from the name yt-dlp gave it. */
+function extOf(path: string, stem: string): string {
+  const name = path.slice(path.lastIndexOf(stem))
+  return name.slice(stem.length + 1).toLowerCase()
 }
 
 /** Clears anything a cancelled or failed run left behind. */

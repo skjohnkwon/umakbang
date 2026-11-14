@@ -121,6 +121,56 @@ interface HistoryEntry {
   selected?: string
 }
 
+/** Which half of a split explorer. With no split there is only `main`. */
+export type PaneId = 'main' | 'second'
+
+/**
+ * Where one explorer pane is standing: the part of the store that differs between the two
+ * halves of a split. Everything else - the index, tags, search, filters - is shared.
+ */
+export interface PaneState {
+  view: ViewMode
+  history: HistoryEntry[]
+  historyIndex: number
+  selection: Set<string>
+  selectedPath: string | null
+  revealNonce: number
+}
+
+/** The store's own pane fields, lifted out so they can be parked. */
+function paneOf(state: PaneState): PaneState {
+  return {
+    view: state.view,
+    history: state.history,
+    historyIndex: state.historyIndex,
+    selection: state.selection,
+    selectedPath: state.selectedPath,
+    revealNonce: state.revealNonce
+  }
+}
+
+/** The pages that replace the whole explorer rather than being a list of files. */
+export function isPageView(
+  view: ViewMode
+): view is Extract<ViewMode, { mode: 'stats' | 'settings' | 'contracts' | 'videos' | 'downloading' }> {
+  return (
+    view.mode === 'stats' ||
+    view.mode === 'settings' ||
+    view.mode === 'contracts' ||
+    view.mode === 'videos' ||
+    view.mode === 'downloading'
+  )
+}
+
+/** Where the main pane is standing, whichever pane has the store's fields right now. */
+export function mainViewOf(state: {
+  view: ViewMode
+  activePane: PaneId
+  parked: PaneState | null
+}): ViewMode {
+  return state.activePane === 'main' || !state.parked ? state.view : state.parked.view
+}
+
 /**
  * An entry added to the stack, with anything ahead of it discarded. Null when it is the
  * place we are already standing.
@@ -359,6 +409,31 @@ interface LibraryState {
   revealTrack: (track: Track) => void
   /** The folder browsing was last in, so returning to the explorer is seamless. */
   lastFolderDir: string
+
+  /**
+   * The split explorer.
+   *
+   * The store's own `view`, `history`, `historyIndex`, `selection`, `selectedPath` and
+   * `revealNonce` always belong to the **active** pane, and the other pane waits in `parked`.
+   * Activating a pane swaps the two. That is the whole trick, and it is why nothing else in
+   * the store had to learn about panes: every action that reads `get().view` or writes the
+   * selection - a paste, a rename, a reveal, Delete from the window - acts on the half the
+   * user is working in because that half *is* the store's fields. The rendering side reads
+   * through `usePaneValue` (state/pane.ts), which knows which pane it is drawing.
+   *
+   * Null with no split, and then `activePane` is always `main`.
+   */
+  parked: PaneState | null
+  activePane: PaneId
+  /** Makes a pane the one the store's fields, the keyboard and the next action belong to. */
+  activatePane: (pane: PaneId) => void
+  /**
+   * Opens a folder in the half you are not working in, splitting the explorer if it isn't
+   * already. The pane it opens in becomes the active one.
+   */
+  openInOtherPane: (dir: string) => void
+  /** Closes one half; the other carries on as the main pane. */
+  closePane: (pane: PaneId) => void
   toggleKindFilter: (kind: TrackKind) => void
   toggleExtFilter: (ext: string) => void
   clearTypeFilter: () => void
@@ -614,6 +689,57 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   importing: null,
   revealNonce: 0,
   lastFolderDir: '',
+  parked: null,
+  activePane: 'main',
+
+  activatePane: (pane) => {
+    const state = get()
+    if (!state.parked || pane === state.activePane) return
+    set({ ...state.parked, parked: paneOf(state), activePane: pane })
+  },
+
+  openInOtherPane: (dir) => {
+    const view: ViewMode = { mode: 'folder', dir }
+    const state = get()
+    if (!state.parked) {
+      // A new second pane, standing in the folder asked for, with a history of its own that
+      // starts there. The pane you were in is parked exactly as it was.
+      set({
+        parked: paneOf(state),
+        activePane: 'second',
+        view,
+        history: [{ view }],
+        historyIndex: 0,
+        selection: new Set(),
+        selectedPath: null,
+        revealNonce: 0
+      })
+      return
+    }
+    get().activatePane(state.activePane === 'main' ? 'second' : 'main')
+    get().setView(view)
+  },
+
+  closePane: (pane) => {
+    const state = get()
+    if (!state.parked) return
+    // Closing the half you are in brings the other one into the store's fields; closing the
+    // other half just lets go of it. Either way what is left is the main pane.
+    set(
+      pane === state.activePane
+        ? { ...state.parked, parked: null, activePane: 'main' }
+        : { parked: null, activePane: 'main' }
+    )
+    // The survivor may have been the second pane, which never wrote where it was standing -
+    // so it does now, or a restart would reopen in the closed half's folder.
+    const { view } = get()
+    if (view.mode === 'folder') {
+      set({ lastFolderDir: view.dir })
+      get().patchSettings({ lastDir: view.dir, lastViewMode: 'folder' })
+    } else if (view.mode === 'rated') {
+      get().patchSettings({ lastViewMode: 'rated' })
+    }
+  },
 
   hydrate: async () => {
     const [platform, userData] = await Promise.all([
@@ -669,6 +795,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // change to which folders are open starts over at the top.
     const before = get().roots.map((root) => root.label).join('|')
     const sameRoot = before === roots.map((root) => root.label).join('|')
+    const { parked } = get()
     set({
       roots,
       tracks: [],
@@ -681,6 +808,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       lastFolderDir: sameRoot ? get().lastFolderDir : '',
       selectedPath: null,
       selection: new Set(),
+      // The split survives a rescan the way the main pane's place does, with its selection
+      // cleared for the same reason. A different set of folders closes it: where it was
+      // standing may not exist in the library that replaced it.
+      parked: sameRoot && parked ? { ...parked, selection: new Set<string>(), selectedPath: null } : null,
+      activePane: sameRoot ? get().activePane : 'main',
       // A fresh walk of the disk supersedes anything we were remembering about it - which
       // includes every row we had dimmed for being unreachable. The walk is the authority on
       // what is there; nothing dimmed by a single folder's re-read should outlive it.
@@ -922,6 +1054,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   },
 
   setView: (view) => {
+    // Stats, Settings and the other pages replace the whole explorer, so they belong to the
+    // main pane. Without this the second pane's history would collect a page, and Back in a
+    // half-width pane would try to draw Stats inside it.
+    if (isPageView(view)) get().activatePane('main')
     // Somewhere new: anything that was ahead is discarded, the way a browser does.
     const { history, historyIndex } = get()
     const next = pushed(history, historyIndex, { view })
@@ -958,8 +1094,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
    */
   showView: (view, selected) => {
     // Remember where browsing left off so returning from Stats or a saved view drops
-    // you back exactly where you were.
-    const lastFolderDir = view.mode === 'folder' ? view.dir : get().lastFolderDir
+    // you back exactly where you were. The main pane's place only: the second pane writing
+    // it would make a restart in a split reopen where the *other* half was standing.
+    const main = get().activePane === 'main'
+    const lastFolderDir = main && view.mode === 'folder' ? view.dir : get().lastFolderDir
     set({
       view,
       selectedPath: selected ?? null,
@@ -978,10 +1116,11 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     // Persisted too, so closing and reopening lands in the same place. Writes are
     // debounced in the main process, so navigating quickly costs nothing.
     if (
-      view.mode === 'folder' ||
-      view.mode === 'rated' ||
-      view.mode === 'stats' ||
-      view.mode === 'settings'
+      main &&
+      (view.mode === 'folder' ||
+        view.mode === 'rated' ||
+        view.mode === 'stats' ||
+        view.mode === 'settings')
     ) {
       get().patchSettings({ lastDir: lastFolderDir, lastViewMode: view.mode })
     }
@@ -1010,7 +1149,8 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   setRecursive: (recursive) => set({ recursive }),
 
   revealTrack: (track) => {
-    const { typeFilter, tagFilter, tags, history, historyIndex } = get()
+    const { typeFilter, tagFilter, tags, history, historyIndex, activePane } = get()
+    const main = activePane === 'main'
     // Clear a filter that would hide the very row we're trying to show.
     const passesType =
       (typeFilter.kinds.length === 0 || typeFilter.kinds.includes(track.kind)) &&
@@ -1033,8 +1173,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // on the folder it happened to live in.
       ...(pushed(history, historyIndex, { view, selected: track.path }) ?? {}),
       // And this is where browsing is now, so leaving Settings or Stats returns here rather
-      // than to the folder the random button took you out of.
-      lastFolderDir: track.relDir,
+      // than to the folder the random button took you out of. The main pane's place only,
+      // as in `showView`.
+      ...(main ? { lastFolderDir: track.relDir } : {}),
       query: '',
       recursive: false,
       selectedPath: track.path,
@@ -1046,7 +1187,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
 
     // Persisted for the same reason `showView` does it: a restart should open where you
     // were left, and a revealed folder is where you were left.
-    get().patchSettings({ lastDir: track.relDir, lastViewMode: 'folder' })
+    if (main) get().patchSettings({ lastDir: track.relDir, lastViewMode: 'folder' })
   },
 
   toggleKindFilter: (kind) => {
@@ -2040,7 +2181,10 @@ export const useLibrary = create<LibraryState>((set, get) => ({
     })
 
     try {
-      const fetched = await window.umakbang.fetchYoutube(url)
+      const fetched = await window.umakbang.fetchYoutube(
+        url,
+        settings.youtubeFormat === 'video' ? 'video' : 'audio'
+      )
       if (fetched.error || !fetched.tempPath || !fetched.ext) {
         // A cancel comes back through the same channel as a failure, and it is not one.
         if (fetched.error !== 'Cancelled.') {
@@ -2675,7 +2819,10 @@ export function connectLibraryEvents(): () => void {
 
   // Row drags are pointer-driven and deliver their drop through here rather than through
   // a DOM event - see lib/drag.ts.
-  setInternalDropHandler((paths, relDir) => {
+  setInternalDropHandler((paths, relDir, pane) => {
+    // A drop into a pane makes it the active one first, so what landed is selected where it
+    // landed rather than in the half the drag came from.
+    if (pane) useLibrary.getState().activatePane(pane)
     void useLibrary.getState().moveIntoFolder(paths, relDir)
   })
 

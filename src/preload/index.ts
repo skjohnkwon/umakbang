@@ -231,9 +231,11 @@ const api = {
   removeLibraryFolder: (label: string): Promise<LibraryRoot[]> =>
     ipcRenderer.invoke('library:removeFolder', label),
   rescan: (): Promise<LibraryRoot[]> => ipcRenderer.invoke('library:rescan'),
-  /** Watch the folder being browsed, so a file re-exported into it shows up by itself. */
-  watchFolder: (dir: string | null): Promise<string | null> =>
-    ipcRenderer.invoke('library:watchFolder', dir),
+  /**
+   * Watch the folders being browsed - one per pane - so a file re-exported into either shows
+   * up by itself. Anything not in the list stops being watched.
+   */
+  watchFolders: (dirs: string[]): Promise<void> => ipcRenderer.invoke('library:watchFolders', dirs),
   /** Reads headers for files a refresh found new or changed. */
   probeFiles: (paths: string[]): Promise<MetadataPatch[]> =>
     ipcRenderer.invoke('library:probeFiles', paths),
@@ -394,8 +396,12 @@ const api = {
   /** What a link turns out to be, before anything is downloaded. */
   probeYoutube: (url: string): Promise<{ info?: YoutubeInfo; error?: string }> =>
     ipcRenderer.invoke('youtube:probe', url),
-  /** Downloads the audio to somewhere temporary; `place` decides where it ends up. */
-  fetchYoutube: (url: string): Promise<YoutubeFetched> => ipcRenderer.invoke('youtube:fetch', url),
+  /**
+   * Downloads the audio - or, for `video`, one MP4 with picture and sound - to somewhere
+   * temporary; `place` decides where it ends up.
+   */
+  fetchYoutube: (url: string, kind: 'audio' | 'video' = 'audio'): Promise<YoutubeFetched> =>
+    ipcRenderer.invoke('youtube:fetch', url, kind),
   cancelYoutube: (): Promise<void> => ipcRenderer.invoke('youtube:cancel'),
   /** Writes the finished audio into `dir` and clears the scratch file. */
   placeYoutube: (

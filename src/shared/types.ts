@@ -471,14 +471,16 @@ export interface Settings {
    */
   youtubeDir: string
   /**
-   * `mp3` re-encodes what came down; `source` keeps the stream as YouTube served it.
+   * `mp3` re-encodes what came down; `source` keeps the stream as YouTube served it; `video`
+   * keeps the picture as well, as one MP4 joined from the separate picture and sound streams
+   * without re-encoding either (see `mergeAudioVideo`).
    *
    * MP3 is the default because it is what people mean when they ask for this, and because
    * an m4a beside a WAV in a DAW's browser is one more format to think about. `source` is
    * strictly better audio - it is the bytes themselves rather than a second lossy
    * generation over them - so it is one radio button away.
    */
-  youtubeFormat: 'mp3' | 'source'
+  youtubeFormat: 'mp3' | 'source' | 'video'
   /** Bitrate for the MP3 re-encode, in kbps. */
   youtubeBitrate: number
 
@@ -1076,6 +1078,8 @@ export type YoutubePhase =
   | 'reading'
   | 'downloading'
   | 'converting'
+  /** Joining a video's separate picture and sound streams into one file. */
+  | 'merging'
   | 'writing'
   | 'done'
   | 'failed'

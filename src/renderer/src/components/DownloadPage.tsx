@@ -269,7 +269,11 @@ export function DownloadPage(): React.JSX.Element {
                       </Button>
                     </div>
                     <div className="text-[10.5px] text-muted-foreground/70">
-                      {job.phase === 'converting' ? 'encoding' : job.phase}
+                      {job.phase === 'converting'
+                        ? 'encoding'
+                        : job.phase === 'merging'
+                          ? 'joining picture and sound'
+                          : job.phase}
                       {job.percent !== undefined ? ` · ${Math.round(job.percent)}%` : ''}
                     </div>
                   </div>
@@ -304,7 +308,8 @@ export function DownloadPage(): React.JSX.Element {
                   <p className="text-[11px] text-muted-foreground">
                     MP3 is what most people mean by this. The original stream is strictly
                     better audio - it is what came down, with no second lossy generation over
-                    it - and it arrives as m4a or webm.
+                    it - and it arrives as m4a or webm. Video keeps the picture as well, as an
+                    MP4 up to 1080p that opens in any editor; nothing in it is re-encoded.
                   </p>
                 </header>
                 <div className="flex flex-wrap items-center gap-2 px-3 py-2.5">
@@ -320,6 +325,7 @@ export function DownloadPage(): React.JSX.Element {
                   >
                     <option value="mp3">MP3</option>
                     <option value="source">The original stream</option>
+                    <option value="video">Video (MP4)</option>
                   </select>
                   {settings.youtubeFormat === 'mp3' && (
                     <select

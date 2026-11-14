@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { SortKey, Track, TrackKind } from '@shared/types'
-import { useLibrary } from '@/state/library'
+import { isPageView, useLibrary } from '@/state/library'
+import { usePaneValue } from '@/state/pane'
 import { compareTracks, isEmptyQuery, matchesQuery, parseQuery, scoreMatch } from '@/lib/search'
 import { isUnderAnyDir, relativePath, samePath } from '@/lib/paths'
 
@@ -213,7 +214,8 @@ export type Row = { type: 'folder'; node: FolderNode } | { type: 'file'; track: 
 
 /** The sort in force for what's on screen - per folder, with a library-wide fallback. */
 export function useSort(): { key: SortKey; dir: 'asc' | 'desc' } {
-  const view = useLibrary((s) => s.view)
+  // The pane's own view, so two panes in two folders each sort the way that folder does.
+  const view = usePaneValue('view')
   const key = useLibrary((s) => s.settings.sortKey)
   const dir = useLibrary((s) => s.settings.sortDir)
   const folderSort = useLibrary((s) => s.settings.folderSort)
@@ -225,7 +227,7 @@ export function useSort(): { key: SortKey; dir: 'asc' | 'desc' } {
 export function useVisibleRows(): Row[] {
   const tracks = useLibrary((s) => s.tracks)
   const revision = useLibrary((s) => s.revision)
-  const view = useLibrary((s) => s.view)
+  const view = usePaneValue('view')
   const query = useLibrary((s) => s.query)
   const recursive = useLibrary((s) => s.recursive)
   const tags = useLibrary((s) => s.tags)
@@ -336,15 +338,7 @@ export function useVisibleRows(): Row[] {
 
     // Stats and settings replace the table entirely.
     // The pages that are not a list of files have no rows of their own.
-    if (
-      view.mode === 'stats' ||
-      view.mode === 'settings' ||
-      view.mode === 'contracts' ||
-      view.mode === 'videos' ||
-      view.mode === 'downloading'
-    ) {
-      return []
-    }
+    if (isPageView(view)) return []
     if (view.mode === 'downloads') return flat(downloads)
     if (view.mode === 'rated') {
       return flat(
@@ -384,12 +378,20 @@ export function useVisibleRows(): Row[] {
       ]
     }
 
-    const folders: Row[] = (node?.children ?? [])
-      .filter((child) => keepFolder(child.path))
-      .map((child) => ({ type: 'folder', node: child }))
-    // Folders stay alphabetical and always sort above files, as in every file manager.
-    // Only the name column flips them, since the other columns don't apply to a folder.
-    if (sortKey === 'name' && sortDir === 'desc') folders.reverse()
+    const subfolders = (node?.children ?? []).filter((child) => keepFolder(child.path))
+    // Folders always sort above files, as in every file manager, and follow the column sort
+    // wherever a folder row has something in that column. Modified is the one that matters:
+    // the row shows the newest file anywhere beneath it, and sorting by Modified while the
+    // folders stayed alphabetical read as the sort not working at all - the folder you were
+    // in yesterday is exactly what that sort is for. The tree holds them alphabetically, so
+    // a tie, and every column a folder shows nothing in, falls back to that order.
+    if (sortKey === 'mtimeMs') {
+      const sign = sortDir === 'asc' ? 1 : -1
+      subfolders.sort(
+        (a, b) => sign * (a.latestMtime - b.latestMtime) || COLLATOR.compare(a.name, b.name)
+      )
+    } else if (sortKey === 'name' && sortDir === 'desc') subfolders.reverse()
+    const folders = subfolders.map((child): Row => ({ type: 'folder', node: child }))
 
     // Straight from the tree - no scan of the whole index, which is what makes browsing
     // a 250k-file library stay responsive while it's still being scanned.

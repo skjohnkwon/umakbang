@@ -1,4 +1,5 @@
 import type React from 'react'
+import type { PaneId } from '@/state/library'
 
 /**
  * Dragging rows out of a table, without Blink's drag-and-drop.
@@ -35,6 +36,17 @@ export const UMAKBANG_PATHS = 'text/umakbang-paths'
 /** Marks an element as somewhere rows can be dropped. Its value is a root-relative dir. */
 export const DROP_DIR_ATTRIBUTE = 'data-drop-dir'
 
+/**
+ * Names the explorer pane an element belongs to. On the pane's own container, beside a
+ * `data-drop-dir`, it also makes the whole pane a drop target for its current folder.
+ *
+ * That target is the reason the split exists: dropping into the folder the other half is
+ * standing in without having to aim at a row. A row inside the pane carries its own
+ * `data-drop-dir`, and `closest` finds the row first, so the row and the pane are never lit
+ * together - the row wins while the pointer is over it.
+ */
+export const PANE_ATTRIBUTE = 'data-pane'
+
 /** Put on the element under the pointer, so highlighting costs no React renders. */
 const OVER_CLASS = 'drop-over'
 
@@ -52,6 +64,8 @@ interface DragSession {
   /** The OS has taken it; there is nothing further to do here. */
   handedOff: boolean
   hovered: HTMLElement | null
+  /** The pane the drag started in, whose own pane-wide target it must not offer. */
+  originPane: string | null
 }
 
 let session: DragSession | null = null
@@ -64,10 +78,14 @@ export function consumeDragClick(): boolean {
   return was
 }
 
-/** Where an in-app drop is delivered. Wired once, by the store. */
-let onInternalDrop: ((paths: string[], relDir: string) => void) | null = null
+/**
+ * Where an in-app drop is delivered. Wired once, by the store. `pane` is the pane the drop
+ * landed in, when it landed in one.
+ */
+type InternalDrop = (paths: string[], relDir: string, pane: PaneId | null) => void
+let onInternalDrop: InternalDrop | null = null
 
-export function setInternalDropHandler(handler: (paths: string[], relDir: string) => void): void {
+export function setInternalDropHandler(handler: InternalDrop): void {
   onInternalDrop = handler
 }
 
@@ -88,7 +106,8 @@ export function beginRowDrag(event: React.PointerEvent, paths: string[]): void {
     startY: event.clientY,
     active: false,
     handedOff: false,
-    hovered: null
+    hovered: null,
+    originPane: origin.closest(`[${PANE_ATTRIBUTE}]`)?.getAttribute(PANE_ATTRIBUTE) ?? null
   }
 
   // No pointer capture yet - see `capture()` below. The window listeners are enough to
@@ -129,15 +148,18 @@ function onPointerMove(event: PointerEvent): void {
     return
   }
 
-  highlight(active, dropTargetAt(event.clientX, event.clientY))
+  highlight(active, dropTargetAt(event.clientX, event.clientY, active.originPane))
 }
 
 function onPointerUp(event: PointerEvent): void {
   const active = session
   if (!active || event.pointerId !== active.pointerId) return
 
-  const target = active.active ? dropTargetAt(event.clientX, event.clientY) : null
+  const target = active.active
+    ? dropTargetAt(event.clientX, event.clientY, active.originPane)
+    : null
   const dir = target?.getAttribute(DROP_DIR_ATTRIBUTE) ?? null
+  const pane = target?.closest(`[${PANE_ATTRIBUTE}]`)?.getAttribute(PANE_ATTRIBUTE) ?? null
   const paths = active.paths
   suppressNextClick = active.active
 
@@ -145,13 +167,27 @@ function onPointerUp(event: PointerEvent): void {
   releaseCapture(active)
   finish()
 
-  if (dir !== null) onInternalDrop?.(paths, dir)
+  if (dir !== null) onInternalDrop?.(paths, dir, pane === 'main' || pane === 'second' ? pane : null)
 }
 
-/** The nearest drop target under a point, or null. */
-function dropTargetAt(x: number, y: number): HTMLElement | null {
+/**
+ * The nearest drop target under a point, or null.
+ *
+ * A pane-wide target in the pane the drag came from is refused rather than offered: it is
+ * the folder the files are already in, and performing that drop would quietly rewrite every
+ * selected file's mtime for nothing. Folder rows inside that pane are still targets.
+ */
+function dropTargetAt(x: number, y: number, originPane: string | null): HTMLElement | null {
   const element = document.elementFromPoint(x, y)
-  return element ? (element.closest(`[${DROP_DIR_ATTRIBUTE}]`) as HTMLElement | null) : null
+  const target = element ? (element.closest(`[${DROP_DIR_ATTRIBUTE}]`) as HTMLElement | null) : null
+  if (target && isPaneTarget(target) && target.getAttribute(PANE_ATTRIBUTE) === originPane) {
+    return null
+  }
+  return target
+}
+
+function isPaneTarget(element: HTMLElement): boolean {
+  return element.hasAttribute(PANE_ATTRIBUTE)
 }
 
 function highlight(active: DragSession, next: HTMLElement | null): void {
@@ -159,6 +195,9 @@ function highlight(active: DragSession, next: HTMLElement | null): void {
   active.hovered?.classList.remove(OVER_CLASS)
   next?.classList.add(OVER_CLASS)
   active.hovered = next
+  // A whole pane is a big, vague target, so it says what it will do with the cursor as well
+  // as the sheet over it. Only while a drag is live: the cursor is cleared in `finish`.
+  if (active.active) document.body.style.cursor = next && isPaneTarget(next) ? 'move' : 'grabbing'
 }
 
 /**

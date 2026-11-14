@@ -190,6 +190,33 @@
   box-shadow: inset 0 0 0 1px var(--primary);
 }
 
+/* A whole explorer pane as the drop target: the pane dims under a sheet that says where the
+   drop will land, rather than tinting every row in it the way a folder row lights. The sheet
+   is drawn over the pane, so the pane itself is reset - it is a drop target, not a row. */
+[data-pane].drop-over {
+  background-color: transparent;
+  box-shadow: none;
+}
+[data-pane].drop-over::after {
+  content: attr(data-drop-label);
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+  background-color: color-mix(in oklab, var(--background) 55%, transparent);
+  background-image: linear-gradient(
+    color-mix(in oklab, var(--primary) 14%, transparent),
+    color-mix(in oklab, var(--primary) 14%, transparent)
+  );
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
 /**
  * The page swap between the explorer, Stats, Settings and Contracts.
  *

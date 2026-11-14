@@ -53,6 +53,7 @@ import {
 import {
   createFolder,
   describeDir,
+  describeTree,
   nameError,
   renameEntry,
   transfer,
@@ -126,7 +127,7 @@ import { minutesLeft, splitOne, type StemOptions, type StemOutcome, type StemPro
 import {
   cancel as cancelYoutube,
   discard as discardYoutube,
-  fetchAudio,
+  fetchMedia,
   installTool as installYoutubeTool,
   place as placeYoutube,
   probe as probeYoutube,
@@ -203,16 +204,20 @@ let scanning = false
 let dragInFlight = false
 
 /**
- * The folder the explorer is standing in, watched for changes.
+ * The folders the explorer is standing in, watched for changes.
  *
- * Only one, and only the folder itself rather than its subtree: the whole point is that a
- * DAW re-exporting into the folder you are looking at shows up without asking, and a
- * recursive watch on a 300,000-file library is a different proposition entirely. The scan
- * still owns everything else.
+ * One per pane - two at most, with the split open - and only each folder itself rather than
+ * its subtree: the whole point is that a DAW re-exporting into the folder you are looking at
+ * shows up without asking, and a recursive watch on a 300,000-file library is a different
+ * proposition entirely. The scan still owns everything else.
+ *
+ * Keyed by path, so two panes standing in the same folder share one watcher, and a pane
+ * moving leaves the other pane's watch (and its pending debounce) alone.
  */
-let folderWatcher: FSWatcher | null = null
-let watchedDir: string | null = null
-let watchTimer: ReturnType<typeof setTimeout> | null = null
+const folderWatches = new Map<
+  string,
+  { watcher: FSWatcher | null; timer: ReturnType<typeof setTimeout> | null }
+>()
 
 /** Distinguishes overlapping clipboard list files; see `clipboard:writeFiles`. */
 let clipboardSerial = 0
@@ -683,39 +688,50 @@ function adoptExportedRoots(backup: SettingsBackup, mapping: FolderMapping): Lib
 }
 
 /**
- * Watches one folder, and re-reads it a moment after anything in it changes.
+ * Watches these folders, and re-reads each a moment after anything in it changes.
  *
- * Debounced because a save is never one event: a DAW writes, renames and touches the file
- * several times on the way to a finished export, and re-reading on each of those would
- * describe a half-written file.
+ * Debounced per folder because a save is never one event: a DAW writes, renames and touches
+ * the file several times on the way to a finished export, and re-reading on each of those
+ * would describe a half-written file. Folders already watched are left running, so the other
+ * pane navigating does not cost this one its watch.
  */
-function watchFolder(dir: string | null): void {
-  if (dir === watchedDir) return
-  watchedDir = dir
-  folderWatcher?.close()
-  folderWatcher = null
-  if (watchTimer) clearTimeout(watchTimer)
-  watchTimer = null
-  if (!dir) return
+function watchFolders(dirs: string[]): void {
+  const wanted = new Set(dirs.filter((dir) => dir.length > 0))
+  for (const [dir, entry] of folderWatches) {
+    if (wanted.has(dir)) continue
+    entry.watcher?.close()
+    if (entry.timer) clearTimeout(entry.timer)
+    folderWatches.delete(dir)
+  }
 
-  try {
-    folderWatcher = watch(dir, { persistent: false }, () => {
-      if (watchTimer) clearTimeout(watchTimer)
-      watchTimer = setTimeout(() => {
-        watchTimer = null
-        void refreshFolder(dir, false, 'new')
-      }, 600)
-    })
-    // The try/catch only covers creation. A watcher whose folder is deleted under it, or
-    // whose network share drops, emits 'error' - and an unhandled 'error' event is an
-    // uncaught exception in the main process.
-    folderWatcher.on('error', () => {
-      folderWatcher?.close()
-      folderWatcher = null
-    })
-  } catch {
-    // A folder that can't be watched - a disconnected network share, a permission - is
-    // simply not watched. The manual refresh still works.
+  for (const dir of wanted) {
+    if (folderWatches.has(dir)) continue
+    const entry: { watcher: FSWatcher | null; timer: ReturnType<typeof setTimeout> | null } = {
+      watcher: null,
+      timer: null
+    }
+    // Recorded even when the watch cannot be made, so an unwatchable folder is not retried on
+    // every navigation of the other pane.
+    folderWatches.set(dir, entry)
+    try {
+      entry.watcher = watch(dir, { persistent: false }, () => {
+        if (entry.timer) clearTimeout(entry.timer)
+        entry.timer = setTimeout(() => {
+          entry.timer = null
+          void refreshFolder(dir, false, 'new')
+        }, 600)
+      })
+      // The try/catch only covers creation. A watcher whose folder is deleted under it, or
+      // whose network share drops, emits 'error' - and an unhandled 'error' event is an
+      // uncaught exception in the main process.
+      entry.watcher.on('error', () => {
+        entry.watcher?.close()
+        entry.watcher = null
+      })
+    } catch {
+      // A folder that can't be watched - a disconnected network share, a permission - is
+      // simply not watched. The manual refresh still works.
+    }
   }
 }
 
@@ -747,10 +763,13 @@ function watchFolder(dir: string | null): void {
 const JOURNALLED_CAP = 20_000
 const journalled = new Set<string>()
 
-function unseenByIndex(rootPath: string, tracks: Track[]): Track[] {
+function unseenByIndex(rootPath: string, tracks: Track[], trustMtime = true): Track[] {
   let indexMtime = 0
   try {
-    indexMtime = statSync(indexFileFor(rootPath)).mtimeMs
+    // `trustMtime` off is for files in a folder created after the index was written: an
+    // unzip keeps each entry's date from the archive, years older than the index, so the
+    // mtime test would wave through exactly the files the index has never seen.
+    if (trustMtime) indexMtime = statSync(indexFileFor(rootPath)).mtimeMs
   } catch {
     // No index yet, so nothing it could already know. Everything is news.
   }
@@ -804,7 +823,7 @@ async function refreshFolder(
     return
   }
 
-  const { tracks, read } = await describeDir(dir, roots)
+  const { tracks, read, subdirs } = await describeDir(dir, roots)
 
   /*
    * Files umakbang made itself have to reach the saved index, not just the window.
@@ -817,16 +836,66 @@ async function refreshFolder(
    *
    * Journalled the same way a move is, through the patch file the scanner already folds in.
    */
-  if (journal !== 'none' && read && tracks.length > 0) {
-    const root = rootFor(roots, dir)
-    if (root) {
-      const added = journal === 'all' ? tracks : unseenByIndex(root.path, tracks)
-      if (added.length > 0) appendIndexPatch(root.path, { added })
-    }
+  const journalRows = (rows: Track[], mode: JournalMode, trustMtime = true): void => {
+    if (mode === 'none' || !root || rows.length === 0) return
+    const added = mode === 'all' ? rows : unseenByIndex(root.path, rows, trustMtime)
+    if (added.length > 0) appendIndexPatch(root.path, { added })
   }
+  if (read) journalRows(tracks, journal)
 
   if (target.isDestroyed()) return
   target.webContents.send('library:folder', { dir, tracks, prune: prune && read })
+
+  /*
+   * Folders that appeared here since the last scan are walked, not just listed.
+   *
+   * The re-read above is one level deep on purpose - the watch is on the folder you are
+   * standing in, not its subtree - so a sample pack unzipped into it, by Extract here or by
+   * Explorer, landed as a folder this read stepped over and nothing else was going to visit
+   * before the next full scan. Its files were on disk and absent from the folder list and from
+   * search alike.
+   *
+   * "Appeared since the last scan" is the folder's *creation* time against the index file's
+   * mtime: a folder born after the index was written cannot be in it, and that test is what
+   * keeps an ordinary save from walking a 100k-file subfolder that merely gained a file -
+   * creation time does not move when something is added inside. A folder moved in from the
+   * same drive keeps its old creation time and still waits for a scan; a copy or an unzip
+   * does not. With no index yet, the scan that is about to write one will walk everything.
+   */
+  if (!read || !root || subdirs.length === 0) return
+  let indexMtime = 0
+  try {
+    indexMtime = statSync(indexFileFor(root.path)).mtimeMs
+  } catch {
+    return
+  }
+  const born: string[] = []
+  for (const sub of subdirs) {
+    try {
+      if ((await stat(sub)).birthtimeMs > indexMtime) born.push(sub)
+    } catch {
+      // Gone again between the listing and the stat - nothing to walk.
+    }
+  }
+  for (const sub of born) {
+    const found = await describeTree(sub, roots)
+    // One message per folder, because `applyFolder` reconciles exactly one folder's rows and
+    // would read files from a sibling as having vanished from the one it was told about.
+    const byDir = new Map<string, Track[]>()
+    for (const track of found) {
+      const group = byDir.get(track.dir)
+      if (group) group.push(track)
+      else byDir.set(track.dir, [track])
+    }
+    for (const [folder, rows] of byDir) {
+      // Never 'none': these are unknown to the index by construction, and without the journal
+      // they would vanish again on the next launch.
+      // and the mtime test is off, since an unzip writes the archive's own dates.
+      journalRows(rows, journal === 'all' ? 'all' : 'new', false)
+      if (target.isDestroyed()) return
+      target.webContents.send('library:folder', { dir: folder, tracks: rows, prune: false })
+    }
+  }
 }
 
 async function pickAndOpenFolder(): Promise<string | null> {
@@ -1429,10 +1498,9 @@ function registerIpc(): void {
     beginScan(settings.roots)
     return settings.roots
   })
-  /** The explorer moved: watch where it is now, and stop watching where it was. */
-  ipcMain.handle('library:watchFolder', (_event, dir: string | null) => {
-    watchFolder(dir)
-    return dir
+  /** A pane moved: watch where the panes are now, and stop watching where they were. */
+  ipcMain.handle('library:watchFolders', (_event, dirs: string[]) => {
+    watchFolders(Array.isArray(dirs) ? dirs.filter((dir) => typeof dir === 'string') : [])
   })
 
   /**
@@ -1600,11 +1668,14 @@ function registerIpc(): void {
       probeYoutube(url, true)
   )
 
-  ipcMain.handle('youtube:fetch', async (event, url: string): Promise<YoutubeFetched> => {
-    return fetchAudio(url, (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send('youtube:progress', progress)
-    })
-  })
+  ipcMain.handle(
+    'youtube:fetch',
+    async (event, url: string, kind: 'audio' | 'video' = 'audio'): Promise<YoutubeFetched> => {
+      return fetchMedia(url, kind === 'video' ? 'video' : 'audio', (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send('youtube:progress', progress)
+      })
+    }
+  )
 
   ipcMain.handle('youtube:cancel', () => cancelYoutube())
 

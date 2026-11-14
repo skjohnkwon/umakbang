@@ -233,20 +233,25 @@ export async function describeTree(full: string, roots: LibraryRoot[]): Promise<
 export async function describeDir(
   dir: string,
   roots: LibraryRoot[]
-): Promise<{ tracks: Track[]; read: boolean }> {
+): Promise<{ tracks: Track[]; read: boolean; subdirs: string[] }> {
   let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
   } catch {
-    return { tracks: [], read: false }
+    return { tracks: [], read: false, subdirs: [] }
   }
   const out: Track[] = []
+  const subdirs: string[] = []
   for (const entry of entries) {
-    if (entry.isDirectory()) continue
+    if (entry.isDirectory()) {
+      // Listed, not read: whether one is worth walking is the caller's question.
+      if (!IGNORED_DIRS.has(entry.name.toLowerCase())) subdirs.push(join(dir, entry.name))
+      continue
+    }
     const track = await describeFile(join(dir, entry.name), roots)
     if (track) out.push(track)
   }
-  return { tracks: out, read: true }
+  return { tracks: out, read: true, subdirs }
 }
 
 async function walk(dir: string, roots: LibraryRoot[], out: Track[]): Promise<void> {

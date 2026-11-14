@@ -2,7 +2,10 @@ import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Clock,
+  Gauge,
   ListMusic,
+  Minus,
+  Plus,
   LocateFixed,
   Pause,
   Play,
@@ -20,7 +23,8 @@ import { Hint } from '@/components/ui/tooltip'
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Waveform } from '@/components/Waveform'
 import { NamePopover, type NamePrompt } from '@/components/NamePopover'
-import { usePlayer } from '@/state/player'
+import { applyVarispeed, MAX_RATE, MIN_RATE, rateFor, usePlayer } from '@/state/player'
+import { relativeKeyPair, transposeKey } from '@shared/keys'
 import { useLibrary } from '@/state/library'
 import { useProjectFor } from '@/hooks/useLibraryView'
 import { decodeTrack } from '@/lib/peaks'
@@ -362,6 +366,7 @@ export function NowPlayingBar(): React.JSX.Element {
             </PopoverContent>
           </Popover>
           <VolumeControl />
+          <VarispeedControl />
 
           {/* Right after mute rather than pinned to the far end: the time belongs with the
               controls that act on what is playing, not stranded across the strip. */}
@@ -607,6 +612,239 @@ function VolumeControl(): React.JSX.Element {
         </span>
       </PopoverContent>
     </Popover>
+  )
+}
+
+/** Whole steps snap to the grid first: +1 from 1.2 semitones is 2, not 2.2. */
+function stepFrom(value: number, step: number, direction: 1 | -1): number {
+  const units = value / step
+  const next = direction > 0 ? Math.floor(units + 1e-6) + 1 : Math.ceil(units - 1e-6) - 1
+  return Math.round(next * step * 1000) / 1000
+}
+
+/** One decimal, and none at all when it would be a zero. */
+function trimmed(value: number): string {
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
+function signed(value: number): string {
+  const text = trimmed(value)
+  return value > 0.05 ? `+${text}` : text === '-0' ? '0' : text
+}
+
+/**
+ * Varispeed: one rate, set either as a tempo or as an interval.
+ *
+ * Two fields rather than one because a producer thinks in both - "what does this sound like
+ * at 150" and "what does this sound like a tone up" - and with tempo and pitch locked
+ * together each one is the other's answer. Whichever field was typed into is the one held
+ * when the next file loads (`Varispeed` in the player says why).
+ *
+ * The button reads out what is held while it is on, since a transport that is quietly two
+ * semitones sharp is the one state of this control you must not be able to miss.
+ */
+function VarispeedControl(): React.JSX.Element {
+  const current = usePlayer((s) => s.current)
+  const varispeed = usePlayer((s) => s.varispeed)
+  const setVarispeed = usePlayer((s) => s.setVarispeed)
+  const key = current ? (current.pathKey ?? current.path) : ''
+  // Tracks are mutated in place, so these are what tell this component a tempo or key has
+  // been detected for the playing file since it loaded.
+  const detectedBpm = useLibrary((s) => (key ? s.detectedBpm[key] : undefined))
+  const keyDetected = useLibrary((s) => (key ? s.detectedKey[key] !== undefined : false))
+
+  const bpm = current?.bpm
+  useEffect(() => {
+    // A BPM target means nothing until the tempo is known, and detection can land mid-play.
+    if (varispeed?.by === 'bpm') applyVarispeed()
+  }, [bpm, detectedBpm, varispeed])
+
+  const rate = rateFor(current, varispeed)
+  const semitones = 12 * Math.log2(rate)
+  const playingBpm = bpm ? bpm * rate : undefined
+
+  const setSemitones = (value: number): void => {
+    if (!Number.isFinite(value)) return
+    const limit = 12 * Math.log2(MAX_RATE)
+    setVarispeed({ by: 'semitones', semitones: Math.max(-limit, Math.min(limit, value)) })
+  }
+  const setBpm = (value: number): void => {
+    if (!bpm || !Number.isFinite(value)) return
+    const target = Math.max(bpm * MIN_RATE, Math.min(bpm * MAX_RATE, value))
+    // Landing back on the file's own tempo is off, the same as zero semitones.
+    setVarispeed(Math.abs(target - bpm) < 0.05 ? null : { by: 'bpm', bpm: target })
+  }
+
+  const musicalKey = current?.musicalKey
+  const nearest = Math.round(semitones)
+  const cents = Math.round((semitones - nearest) * 100)
+  const movedKey = musicalKey ? transposeKey(musicalKey, nearest) : undefined
+  const spell = (k: string): string => (keyDetected ? relativeKeyPair(k) : k)
+
+  const active = varispeed !== null
+  const readout =
+    varispeed?.by === 'bpm'
+      ? `${trimmed(playingBpm ?? varispeed.bpm)} BPM`
+      : `${signed(semitones)} st`
+
+  return (
+    <Popover>
+      <Hint label={active ? 'Varispeed is on' : 'Varispeed'}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size={active ? 'sm' : 'icon-sm'}
+            disabled={!current?.playable}
+            noHoverTint={active}
+            className={cn('gap-1', active && 'tnum px-1.5 text-[11px] text-primary')}
+          >
+            <Gauge className="h-3.5 w-3.5" />
+            {active && readout}
+          </Button>
+        </PopoverTrigger>
+      </Hint>
+      <PopoverContent side="top" align="center" className="w-60 p-2.5">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[11px] font-semibold">Varispeed</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!active}
+            onClick={() => setVarispeed(null)}
+            className="h-5 px-1.5 text-[10.5px] text-muted-foreground"
+          >
+            Reset
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-[3.25rem_1fr] items-center gap-x-2 gap-y-1.5">
+          <span className="text-[11px] text-muted-foreground">Tempo</span>
+          <Stepper
+            value={playingBpm}
+            format={trimmed}
+            unit="BPM"
+            held={varispeed?.by === 'bpm'}
+            disabledReason={bpm ? undefined : "This file's tempo isn't known yet"}
+            onStep={(direction, fine) =>
+              playingBpm !== undefined && setBpm(stepFrom(playingBpm, fine ? 0.1 : 1, direction))
+            }
+            onCommit={setBpm}
+          />
+          <span className="text-[11px] text-muted-foreground">Pitch</span>
+          <Stepper
+            value={semitones}
+            format={signed}
+            unit="st"
+            held={varispeed?.by === 'semitones'}
+            onStep={(direction, fine) => setSemitones(stepFrom(semitones, fine ? 0.1 : 1, direction))}
+            onCommit={setSemitones}
+          />
+        </div>
+
+        <div className="tnum mt-2 space-y-0.5 border-t pt-2 text-[10.5px] text-muted-foreground">
+          <div>
+            {bpm ? `${trimmed(bpm)} → ${trimmed(playingBpm ?? bpm)} BPM` : 'Tempo unknown'}
+            {' · '}
+            {Math.round(rate * 1000) / 10}% speed
+          </div>
+          {musicalKey && movedKey && (
+            <div>
+              {spell(musicalKey)} → {spell(movedKey)}
+              {cents !== 0 && ` ${cents > 0 ? '+' : ''}${cents}¢`}
+            </div>
+          )}
+          <div className="text-muted-foreground/60">
+            Tempo and pitch move together, like tape. Shift steps by 0.1.
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/**
+ * A number with a minus and a plus either side. Typed values commit on Enter or on leaving
+ * the field, and Escape puts back what was there - a half-typed "1" applied on every
+ * keystroke would jump a beat an octave down on its way to "140".
+ */
+function Stepper({
+  value,
+  format,
+  unit,
+  held,
+  disabledReason,
+  onStep,
+  onCommit
+}: {
+  value: number | undefined
+  format: (value: number) => string
+  unit: string
+  /** The field the varispeed is being held by, so it is the one drawn as set. */
+  held: boolean
+  disabledReason?: string
+  onStep: (direction: 1 | -1, fine: boolean) => void
+  onCommit: (value: number) => void
+}): React.JSX.Element {
+  const shown = value === undefined ? '' : format(value)
+  const [draft, setDraft] = useState<string | null>(null)
+  const disabled = disabledReason !== undefined
+
+  const commit = (): void => {
+    if (draft === null) return
+    const parsed = Number(draft.replace(/[^\d.+-]/g, ''))
+    setDraft(null)
+    if (draft.trim() !== '' && Number.isFinite(parsed)) onCommit(parsed)
+  }
+
+  return (
+    <div className="flex items-center gap-1" title={disabledReason}>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        disabled={disabled}
+        aria-label="Down"
+        onClick={(event) => onStep(-1, event.shiftKey)}
+      >
+        <Minus className="h-3 w-3" />
+      </Button>
+      <input
+        type="text"
+        inputMode="decimal"
+        disabled={disabled}
+        value={draft ?? shown}
+        placeholder="-"
+        aria-label={unit === 'st' ? 'Semitones' : 'Tempo in BPM'}
+        onChange={(event) => setDraft(event.target.value)}
+        onFocus={(event) => event.target.select()}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          // App.tsx's shortcuts would otherwise read the digits as ratings and Space as play.
+          event.stopPropagation()
+          if (event.key === 'Enter') commit()
+          else if (event.key === 'Escape') setDraft(null)
+          else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+            event.preventDefault()
+            setDraft(null)
+            onStep(event.key === 'ArrowUp' ? 1 : -1, event.shiftKey)
+          }
+        }}
+        className={cn(
+          'tnum h-6 w-full min-w-0 rounded-sm border bg-background px-1.5 text-center text-[12px] outline-none focus:border-primary disabled:opacity-40',
+          held && 'border-primary/60 text-primary'
+        )}
+      />
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        disabled={disabled}
+        aria-label="Up"
+        onClick={(event) => onStep(1, event.shiftKey)}
+      >
+        <Plus className="h-3 w-3" />
+      </Button>
+      <span className="w-7 shrink-0 text-[10.5px] text-muted-foreground">{unit}</span>
+    </div>
   )
 }
 

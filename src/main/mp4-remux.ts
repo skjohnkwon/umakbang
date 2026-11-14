@@ -670,3 +670,380 @@ export async function remuxToProgressive(file: string): Promise<RemuxResult> {
     }
   }
 }
+
+/* --- joining a video file and an audio file ----------------------------------------- */
+
+/** One track lifted out of a file, with its samples where they sit in that file. */
+interface SourceTrack {
+  file: string
+  /** The source's `moov`, which the track's `trak` box is a range of. */
+  moov: Buffer
+  trak: BoxRef
+  mvhd: BoxRef
+  samples: Sample[]
+  timescale: number
+}
+
+/** The four-letter handler of a `trak`: `vide`, `soun`, or something neither. */
+function handlerOf(moov: Buffer, trak: BoxRef): string {
+  const mdia = child(moov, trak, 'mdia')
+  const hdlr = mdia ? child(moov, mdia, 'hdlr') : null
+  if (!hdlr) return ''
+  return moov.toString('latin1', hdlr.start + hdlr.header + 8, hdlr.start + hdlr.header + 12)
+}
+
+/**
+ * Samples out of an ordinary MP4's sample tables, for an input that is already progressive.
+ *
+ * YouTube's streams arrive fragmented and go through `parseMoof` instead; this is here so an
+ * input that happens to be flat - a re-muxed file, a different site - is read rather than
+ * refused.
+ */
+function samplesFromTables(moov: Buffer, trak: BoxRef): Sample[] | null {
+  const mdia = child(moov, trak, 'mdia')
+  const minf = mdia ? child(moov, mdia, 'minf') : null
+  const stbl = minf ? child(moov, minf, 'stbl') : null
+  if (!stbl) return null
+  // Where each table's entries start: past the box header and the version/flags word.
+  const table = (type: string): number | null => {
+    const found = child(moov, stbl, type)
+    return found ? found.start + found.header + 4 : null
+  }
+
+  const stsz = table('stsz')
+  const stsc = table('stsc')
+  const stts = table('stts')
+  const stco = table('stco')
+  const co64 = table('co64')
+  if (stsz === null || stsc === null || stts === null || (stco === null && co64 === null)) return null
+
+  const fixed = moov.readUInt32BE(stsz)
+  const count = moov.readUInt32BE(stsz + 4)
+  const sizes: number[] = []
+  for (let i = 0; i < count; i += 1) {
+    sizes.push(fixed !== 0 ? fixed : moov.readUInt32BE(stsz + 8 + i * 4))
+  }
+
+  const chunkOffsets: number[] = []
+  if (co64 !== null) {
+    const n = moov.readUInt32BE(co64)
+    for (let i = 0; i < n; i += 1) chunkOffsets.push(Number(moov.readBigUInt64BE(co64 + 4 + i * 8)))
+  } else if (stco !== null) {
+    const n = moov.readUInt32BE(stco)
+    for (let i = 0; i < n; i += 1) chunkOffsets.push(moov.readUInt32BE(stco + 4 + i * 4))
+  }
+
+  // stsc: runs of (first chunk, samples per chunk), each lasting until the next run starts.
+  const runs: { first: number; per: number }[] = []
+  const runCount = moov.readUInt32BE(stsc)
+  for (let i = 0; i < runCount; i += 1) {
+    runs.push({
+      first: moov.readUInt32BE(stsc + 4 + i * 12),
+      per: moov.readUInt32BE(stsc + 8 + i * 12)
+    })
+  }
+  const offsets: number[] = []
+  for (let chunk = 0; chunk < chunkOffsets.length && offsets.length < count; chunk += 1) {
+    let per = runs[0]?.per ?? 0
+    for (const run of runs) if (run.first <= chunk + 1) per = run.per
+    let at = chunkOffsets[chunk]
+    for (let i = 0; i < per && offsets.length < count; i += 1) {
+      offsets.push(at)
+      at += sizes[offsets.length - 1]
+    }
+  }
+
+  const durations: number[] = []
+  const sttsCount = moov.readUInt32BE(stts)
+  for (let i = 0; i < sttsCount; i += 1) {
+    const n = moov.readUInt32BE(stts + 4 + i * 8)
+    const delta = moov.readUInt32BE(stts + 8 + i * 8)
+    for (let k = 0; k < n; k += 1) durations.push(delta)
+  }
+
+  const compositions: number[] = []
+  const ctts = table('ctts')
+  if (ctts !== null) {
+    const version = moov.readUInt8(ctts - 4)
+    const n = moov.readUInt32BE(ctts)
+    for (let i = 0; i < n; i += 1) {
+      const repeat = moov.readUInt32BE(ctts + 4 + i * 8)
+      const value =
+        version === 0 ? moov.readUInt32BE(ctts + 8 + i * 8) : moov.readInt32BE(ctts + 8 + i * 8)
+      for (let k = 0; k < repeat; k += 1) compositions.push(value)
+    }
+  }
+
+  const stss = table('stss')
+  let sync: Set<number> | null = null
+  if (stss !== null) {
+    sync = new Set<number>()
+    const n = moov.readUInt32BE(stss)
+    for (let i = 0; i < n; i += 1) sync.add(moov.readUInt32BE(stss + 4 + i * 4) - 1)
+  }
+
+  return sizes.map((size, i) => ({
+    offset: offsets[i] ?? 0,
+    size,
+    duration: durations[i] ?? durations[durations.length - 1] ?? 0,
+    compositionOffset: compositions[i] ?? 0,
+    sync: sync === null || sync.has(i),
+    fragment: 0
+  }))
+}
+
+/** The one track of a given kind in a file, fragmented or not. */
+async function readTrack(file: string, kind: 'vide' | 'soun'): Promise<SourceTrack | null> {
+  const info = await stat(file)
+  const handle = await open(file, 'r')
+  try {
+    const boxes = await topLevel(handle, info.size)
+    const moovRef = boxes.find((b) => b.type === 'moov')
+    if (!moovRef) return null
+    const moov = Buffer.alloc(moovRef.size)
+    await handle.read(moov, 0, moovRef.size, moovRef.start)
+    const root = boxesIn(moov)[0]
+    const mvhd = child(moov, root, 'mvhd')
+    const trak = childrenOf(moov, root).find((b) => b.type === 'trak' && handlerOf(moov, b) === kind)
+    if (!mvhd || !trak) return null
+
+    const tkhd = child(moov, trak, 'tkhd')
+    const mdia = child(moov, trak, 'mdia')
+    const mdhd = mdia ? child(moov, mdia, 'mdhd') : null
+    if (!tkhd || !mdhd) return null
+    const version = moov.readUInt8(tkhd.start + tkhd.header)
+    const id = moov.readUInt32BE(tkhd.start + tkhd.header + (version === 1 ? 4 + 8 + 8 : 4 + 4 + 4))
+
+    let samples: Sample[]
+    const moofs = boxes.filter((b) => b.type === 'moof')
+    if (moofs.length > 0) {
+      const defaults = parseTrex(moov)
+      const perTrack = new Map<number, Sample[]>()
+      for (const moofRef of moofs) {
+        const buf = Buffer.alloc(moofRef.size)
+        await handle.read(buf, 0, moofRef.size, moofRef.start)
+        parseMoof(buf, moofRef.start, 0, defaults, perTrack)
+      }
+      samples = perTrack.get(id) ?? []
+    } else {
+      samples = samplesFromTables(moov, trak) ?? []
+    }
+    if (samples.length === 0) return null
+
+    return { file, moov, trak, mvhd, samples, timescale: readTimescale(moov, mdhd.start) }
+  } finally {
+    await handle.close()
+  }
+}
+
+/** A copy of a `trak` with its `tkhd` renumbered, since both inputs call their track 1. */
+function withTrackId(trak: Buffer, id: number): Buffer {
+  const out = Buffer.from(trak)
+  const tkhd = child(out, boxesIn(out)[0], 'tkhd')
+  if (!tkhd) return out
+  const version = out.readUInt8(tkhd.start + tkhd.header)
+  out.writeUInt32BE(id, tkhd.start + tkhd.header + (version === 1 ? 4 + 8 + 8 : 4 + 4 + 4))
+  return out
+}
+
+/**
+ * Moves the video's presentation to start at zero.
+ *
+ * A stream with B-frames presents its first frame some way after its first decode - YouTube's
+ * H.264 carries composition offsets of a frame or two - and the fragmented original said
+ * where presentation starts with an edit list that `rebuildTrak` deliberately does not carry.
+ * Without one, the picture would run that far behind the sound. Pulling every composition
+ * offset back by the earliest presentation time is the same correction made in the sample
+ * table itself, which every player honours; `ctts` version 1 allows the negatives it makes.
+ */
+function presentFromZero(samples: Sample[]): Sample[] {
+  let decode = 0
+  let earliest = Number.POSITIVE_INFINITY
+  for (const sample of samples) {
+    earliest = Math.min(earliest, decode + sample.compositionOffset)
+    decode += sample.duration
+  }
+  if (!Number.isFinite(earliest) || earliest === 0) return samples
+  return samples.map((sample) => ({
+    ...sample,
+    compositionOffset: sample.compositionOffset - earliest
+  }))
+}
+
+/**
+ * Joins a video-only MP4 and an audio-only MP4 into one ordinary, seekable MP4.
+ *
+ * This is what makes a downloaded video possible without ffmpeg. The site serves anything
+ * sharper than 360p as two separate streams - pictures in one file, sound in another - and
+ * joining them is normally ffmpeg's job, which is the binary this app does not carry. But
+ * joining is not encoding: it is two sample tables in one `moov` and the samples copied into
+ * one `mdat`, which is everything `remuxToProgressive` already knows how to do for a single
+ * file. The bytes are copied verbatim, so the picture and the sound are exactly what came
+ * down.
+ *
+ * Interleaved in half-second runs rather than all the video and then all the sound: a player
+ * reading front to back would otherwise have to hold one track's data for the entire length
+ * of the other, and an editor importing it would seek between two ends of the file at every
+ * frame.
+ */
+export async function mergeAudioVideo(
+  videoFile: string,
+  audioFile: string,
+  outFile: string
+): Promise<RemuxResult> {
+  const temporary = `${outFile}.part`
+  try {
+    const video = await readTrack(videoFile, 'vide')
+    if (!video) return { ok: false, reason: 'no video track in the picture stream' }
+    const audio = await readTrack(audioFile, 'soun')
+    if (!audio) return { ok: false, reason: 'no audio track in the sound stream' }
+    video.samples = presentFromZero(video.samples)
+
+    const movieTimescale = readTimescale(video.moov, video.mvhd.start)
+    const tracks = [video, audio]
+
+    // Walk both tracks by decode time, emitting about half a second at a time from whichever
+    // is further behind, so neither runs ahead of the other in the file.
+    type Run = { track: number; from: number; to: number }
+    const runs: Run[] = []
+    const cursor = [0, 0]
+    const clock = [0, 0]
+    const RUN_SECONDS = 0.5
+    while (cursor[0] < video.samples.length || cursor[1] < audio.samples.length) {
+      const next =
+        cursor[1] >= audio.samples.length
+          ? 0
+          : cursor[0] >= video.samples.length
+            ? 1
+            : clock[0] / video.timescale <= clock[1] / audio.timescale
+              ? 0
+              : 1
+      const track = tracks[next]
+      const from = cursor[next]
+      const until = clock[next] / track.timescale + RUN_SECONDS
+      while (cursor[next] < track.samples.length && clock[next] / track.timescale < until) {
+        clock[next] += track.samples[cursor[next]].duration
+        cursor[next] += 1
+      }
+      runs.push({ track: next, from, to: cursor[next] })
+    }
+
+    const dataBytes = tracks.reduce(
+      (sum, track) => sum + track.samples.reduce((total, sample) => total + sample.size, 0),
+      0
+    )
+    const large = dataBytes > 0xffff_0000
+    const mdatHeader = large ? 16 : 8
+
+    // A brand of our own rather than either input's: YouTube's streams say `dash`, which
+    // describes a fragment stream and not the flat file this is.
+    const ftyp = box(
+      'ftyp',
+      Buffer.from('isom', 'latin1'),
+      u32(0x200),
+      Buffer.from('isomiso2avc1mp41', 'latin1')
+    )
+
+    const seconds = tracks.map(
+      (track) => track.samples.reduce((sum, sample) => sum + sample.duration, 0) / track.timescale
+    )
+
+    const buildMoov = (offsets: number[][]): Buffer => {
+      const mvhd = patchDuration(
+        slice(video.moov, video.mvhd),
+        'mvhd',
+        Math.max(...seconds) * movieTimescale
+      )
+      // next_track_ID is the last field of the box, whichever version it is.
+      mvhd.writeUInt32BE(3, mvhd.length - 4)
+      const traks = tracks.map((track, index) =>
+        withTrackId(
+          rebuildTrak(track.moov, track.trak, track.samples, offsets[index], large, movieTimescale),
+          index + 1
+        )
+      )
+      return box('moov', mvhd, ...traks)
+    }
+
+    // Built once to learn its size, then again with real offsets - the same two passes
+    // `remuxToProgressive` makes, and the same check that the size did not move.
+    const sized = buildMoov(tracks.map((track) => track.samples.map(() => 0)))
+    const dataStart = ftyp.length + sized.length + mdatHeader
+
+    const offsets: number[][] = tracks.map((track) => new Array<number>(track.samples.length))
+    let running = dataStart
+    for (const run of runs) {
+      const samples = tracks[run.track].samples
+      for (let i = run.from; i < run.to; i += 1) {
+        offsets[run.track][i] = running
+        running += samples[i].size
+      }
+    }
+    const moov = buildMoov(offsets)
+    if (moov.length !== sized.length) return { ok: false, reason: 'header size moved between passes' }
+
+    const out = createWriteStream(temporary)
+    const write = (chunk: Buffer): Promise<void> =>
+      new Promise((resolve, reject) => {
+        out.write(chunk, (error) => (error ? reject(error) : resolve()))
+      })
+    const handles = await Promise.all(tracks.map((track) => open(track.file, 'r')))
+    try {
+      await write(ftyp)
+      await write(moov)
+      const header = Buffer.alloc(mdatHeader)
+      if (large) {
+        header.writeUInt32BE(1, 0)
+        header.write('mdat', 4, 'latin1')
+        header.writeBigUInt64BE(BigInt(dataBytes + mdatHeader), 8)
+      } else {
+        header.writeUInt32BE(dataBytes + mdatHeader, 0)
+        header.write('mdat', 4, 'latin1')
+      }
+      await write(header)
+
+      // Samples that sit next to each other in the source are copied as one read, which in a
+      // fragmented stream is nearly every run - a fragment's samples are contiguous.
+      const copy = async (handle: FileHandle, start: number, length: number): Promise<void> => {
+        let done = 0
+        while (done < length) {
+          const want = Math.min(1 << 20, length - done)
+          const chunk = Buffer.alloc(want)
+          const { bytesRead } = await handle.read(chunk, 0, want, start + done)
+          if (bytesRead <= 0) throw new Error('a stream ended before its samples did')
+          await write(bytesRead === want ? chunk : chunk.subarray(0, bytesRead))
+          done += bytesRead
+        }
+      }
+      for (const run of runs) {
+        const samples = tracks[run.track].samples
+        let i = run.from
+        while (i < run.to) {
+          const start = samples[i].offset
+          let length = samples[i].size
+          let j = i + 1
+          while (j < run.to && samples[j].offset === start + length) {
+            length += samples[j].size
+            j += 1
+          }
+          await copy(handles[run.track], start, length)
+          i = j
+        }
+      }
+      await new Promise<void>((resolve, reject) => {
+        out.end((error?: Error | null) => (error ? reject(error) : resolve()))
+      })
+    } catch (error) {
+      out.destroy()
+      throw error
+    } finally {
+      await Promise.all(handles.map((handle) => handle.close().catch(() => {})))
+    }
+
+    await rename(temporary, outFile)
+    return { ok: true, samples: video.samples.length + audio.samples.length, bytes: dataBytes }
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
+    return { ok: false, reason: (error as Error).message }
+  }
+}

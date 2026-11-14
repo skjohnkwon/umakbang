@@ -100,6 +100,21 @@ export function fifthsPosition(key: string): number | null {
   return steps / 11
 }
 
+/**
+ * A key moved by a whole number of semitones - "Am" up two is "Bm". Undefined for anything
+ * that isn't a key. Spelled from the same tables as the relative pair, so a transposed key
+ * reads the way the rest of the app writes keys.
+ */
+export function transposeKey(key: string, semitones: number): string | undefined {
+  const normalised = normaliseKey(key)
+  if (!normalised || !Number.isInteger(semitones)) return undefined
+  const minor = normalised.endsWith('m')
+  const pitch = PITCH_OF[minor ? normalised.slice(0, -1) : normalised]
+  if (pitch === undefined) return undefined
+  const moved = (((pitch + semitones) % 12) + 12) % 12
+  return minor ? MINOR_NAMES[moved] : MAJOR_NAMES[moved]
+}
+
 /** True when two spellings name the same key - "Ebm" and "D#m", "Db" and "C#". */
 export function sameKey(a: string, b: string): boolean {
   const na = normaliseKey(a)
