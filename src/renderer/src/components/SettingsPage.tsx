@@ -656,6 +656,7 @@ function RemoteSection(): React.JSX.Element {
   const settings = useLibrary((s) => s.settings)
   const patchSettings = useLibrary((s) => s.patchSettings)
   const roots = useLibrary((s) => s.roots)
+  const isMac = useLibrary((s) => s.platform?.isMac ?? false)
   const [server, setServer] = useState<RemoteServerState | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [syncNote, setSyncNote] = useState<string | null>(null)
@@ -690,6 +691,19 @@ function RemoteSection(): React.JSX.Element {
               // setting - so it has to be told, rather than finding out on the next launch.
               void window.umakbang.remoteRestartServer().then(setServer)
             }}
+          />
+        </Row>
+        <Row
+          label="Run in the background"
+          hint={
+            settings.runInBackground
+              ? `Starts with ${isMac ? 'your Mac' : 'Windows'} and keeps serving with the window closed, from the ${isMac ? 'menu bar' : 'tray'}.`
+              : 'Off. Closing the window quits, and other machines lose this library with it.'
+          }
+        >
+          <Switch
+            checked={settings.runInBackground}
+            onChange={(runInBackground) => patchSettings({ runInBackground })}
           />
         </Row>
       </Section>

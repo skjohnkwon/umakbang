@@ -51,6 +51,13 @@ export type ScannerEvent =
   /** Files present in the saved index that no longer exist on disk. */
   | { type: 'removed'; paths: string[] }
   | { type: 'error'; stage: string; message: string }
+  /**
+   * Every walk has finished *and saved*. Distinct from a `done` progress, which goes out
+   * before the index is written - so a parent that stopped this process on `done` would
+   * throw the scan's whole result away. Running in the background with no window, the
+   * parent stops it on this one, to give back the memory an idle scanner holds.
+   */
+  | { type: 'idle' }
 
 // `parentPort` exists only inside a utilityProcess.
 const port = process.parentPort
@@ -131,7 +138,7 @@ function scanAll(roots: LibraryRoot[], replace: boolean, firstDir = '', full = f
   if (!replace) {
     log(`scan alongside: ${roots.map((root) => root.label).join(', ')}`)
     const mine = generation
-    for (const root of roots) void scanOne(root, () => generation === mine)
+    for (const root of roots) void tracked(root, () => generation === mine)
     return
   }
 
@@ -149,7 +156,7 @@ async function drain(mine: number): Promise<void> {
     while (queue.length > 0 && generation === mine) {
       const root = queue.shift()
       if (!root) break
-      await scanOne(root, () => generation === mine)
+      await tracked(root, () => generation === mine)
     }
     if (generation === mine) log('all folders scanned')
   } finally {
@@ -252,6 +259,25 @@ async function scanRemote(root: LibraryRoot, current: () => boolean): Promise<vo
     progress: { phase: 'done', found: result.tracks.length, probed: 0, total: result.tracks.length }
   })
   log(`fetched ${result.tracks.length} rows in ${Date.now() - startedAt}ms`)
+}
+
+/** Walks in progress, counted so the last one out can say the process has nothing left. */
+let inFlight = 0
+
+/** `scanOne`, counted, with an `idle` once nothing is left running or queued. */
+async function tracked(root: LibraryRoot, current: () => boolean): Promise<void> {
+  inFlight++
+  try {
+    await scanOne(root, current)
+  } finally {
+    inFlight--
+    if (inFlight === 0 && queue.length === 0) {
+      // Flushed first: the parent may stop this process the moment it hears, and the
+      // metadata appended since the last batch would otherwise go with it.
+      flushMetadataCache()
+      post({ type: 'idle' })
+    }
+  }
 }
 
 async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void> {

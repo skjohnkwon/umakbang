@@ -20,6 +20,8 @@
  * restart in the middle of a scan or a track. `quitAndInstall` is deliberately not called.
  */
 
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
@@ -67,6 +69,19 @@ export function initUpdater(getWindow: () => BrowserWindow | null): void {
   // running the old version itself. Updating a folder means replacing the folder.
   if (isPortable()) {
     latest = { state: 'disabled', version: app.getVersion(), reason: 'portable copy' }
+    return
+  }
+  // An unpacked build - `npm run pack`, which is what `release/win-unpacked` is - is packaged
+  // but was never installed, so electron-builder wrote no `app-update.yml` beside it and there
+  // is no installer to hand over to. Left to try, the check failed and Settings showed
+  // "Could not check: ENOENT ... app-update.yml", which reads as a broken updater rather than
+  // as a copy that was never going to update itself.
+  if (!existsSync(join(process.resourcesPath, 'app-update.yml'))) {
+    latest = {
+      state: 'disabled',
+      version: app.getVersion(),
+      reason: 'This copy was unpacked rather than installed, so it cannot replace itself. Install it with the Setup .exe to get updates'
+    }
     return
   }
 
@@ -134,6 +149,24 @@ export async function checkForUpdatesNow(): Promise<UpdateStatus> {
     // Reported through the 'error' event.
   }
   return latest
+}
+
+/** The version downloaded and waiting for a restart, if there is one. */
+export function readyUpdate(): string | null {
+  return latest.state === 'ready' ? (latest.available ?? null) : null
+}
+
+/**
+ * Restarts into the staged version, for the tray's "Restart to update".
+ *
+ * The one place `quitAndInstall` is called, and only because somebody clicked asking for
+ * exactly that. Install-on-quit was enough while quitting was something people did every
+ * day; an app that lives in the tray from one boot to the next may not quit for weeks, and an
+ * update that waits for that is an update nobody gets.
+ */
+export function installUpdateNow(): void {
+  if (latest.state !== 'ready') return
+  autoUpdater.quitAndInstall()
 }
 
 export function stopUpdater(): void {

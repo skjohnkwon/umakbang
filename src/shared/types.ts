@@ -561,6 +561,17 @@ export interface Settings {
    * not something to be true without having been said.
    */
   shareLibrary: boolean
+  /**
+   * Whether umakbang keeps running with its window closed - in the tray on Windows, the menu
+   * bar on a Mac - and starts with the computer, without opening a window.
+   *
+   * What makes the server something you can rely on rather than something that is up while
+   * you happen to have the app open: a phone in another room cannot open it for you. On by
+   * default for the same reason `shareLibrary` is, and one switch rather than two because
+   * starting at login with no way to stay running, or staying running without starting, are
+   * each half of the thing being asked for.
+   */
+  runInBackground: boolean
 }
 
 /** One machine in the tailnet, as `tailscale status` describes it. */
@@ -1000,7 +1011,8 @@ export const DEFAULT_SETTINGS: Settings = {
   deviceId: '',
   remoteDownloadDir: '',
   flUserData: '',
-  shareLibrary: true
+  shareLibrary: true,
+  runInBackground: true
 }
 
 /* ------------------------------------------------------------------ stems */

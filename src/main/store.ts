@@ -691,7 +691,10 @@ const LOCAL_ONLY = [
   // Whether this machine serves its library to the tailnet. A settings file is something
   // people send each other, and starting to serve a library is not something importing one
   // should be able to switch on.
-  'shareLibrary'
+  'shareLibrary',
+  // Whether this computer starts umakbang when it starts. Registered with the OS from this
+  // value, so importing it would quietly add a login item to the receiving machine.
+  'runInBackground'
 ] as const
 
 /**

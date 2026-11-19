@@ -101,7 +101,22 @@ import {
   writeBundle
 } from './bundle'
 import { BUNDLE_EXTENSION, type BundleHeader } from '../shared/bundle'
-import { checkForUpdatesNow, initUpdater, updateStatus } from './updater'
+import {
+  checkForUpdatesNow,
+  initUpdater,
+  installUpdateNow,
+  readyUpdate,
+  updateStatus
+} from './updater'
+import {
+  hideTray,
+  launchedInBackground,
+  noteStillRunning,
+  refreshTray,
+  showTray,
+  syncLoginItem,
+  trayShown
+} from './background'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
 import { downloadRemote, packRemote, previewPack } from './remote-download'
@@ -200,6 +215,13 @@ let pendingScanRoots: { roots: LibraryRoot[]; full: boolean } | null = null
  * must not overlap - see the `progress` case in `ensureScanner`.
  */
 let scanning = false
+/**
+ * True from a scan being asked for until the scanner says `idle` - which, unlike `scanning`,
+ * waits for the index to be *saved*. What decides whether the scanner can be stopped.
+ */
+let scannerBusy = false
+/** Set while the scanner is being stopped on purpose, so its exit is not reported as a crash. */
+let releasingScanner = false
 /** True while a native file drag is running, so a second one can't be started inside it. */
 let dragInFlight = false
 
@@ -380,7 +402,66 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    // Nothing is on screen to watch for, and a re-read has nowhere to go without a window.
+    watchFolders([])
+    // Running on in the background, the scanner is only worth its memory while it has work.
+    releaseScannerIfIdle()
+    // A menu bar app with no window has no business in the Dock as well.
+    if (isMac && trayShown()) app.dock?.hide()
+    if (trayShown()) noteStillRunning()
+    refreshTray()
   })
+}
+
+/**
+ * Brings the window up, making it first if the app has been running without one.
+ *
+ * The one way back in from the background - the tray, a second launch, the Dock - so all of
+ * them land the same way. A fresh window loads, and loading is what starts the scan and
+ * hydrates the library (`did-finish-load`), so nothing extra is needed to make it whole.
+ */
+function showWindow(): void {
+  if (isMac) void app.dock?.show()
+  if (!mainWindow) {
+    createWindow()
+    refreshTray()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/**
+ * Applies `runInBackground`: the login item, the tray icon, and what happens with neither.
+ *
+ * Turned off with no window open - the tray is the only place that can do that - the app
+ * quits. Left running, it would be a process with nothing on screen and nothing in the tray:
+ * serving the library to the network with no visible sign, and no way to stop it short of
+ * Task Manager.
+ */
+function applyBackground(): void {
+  const on = getUserData().settings.runInBackground
+  syncLoginItem(on)
+  if (on) {
+    showTray({
+      openWindow: showWindow,
+      windowOpen: () => mainWindow !== null,
+      server: remoteServerState,
+      updateReady: readyUpdate,
+      installUpdate: installUpdateNow,
+      setRunInBackground: (next) => {
+        const settings = updateSettings({ runInBackground: next })
+        mainWindow?.webContents.send('library:settings', { settings })
+        applyBackground()
+      },
+      quit: () => app.quit()
+    })
+    return
+  }
+  hideTray()
+  if (isMac) void app.dock?.show()
+  if (!mainWindow) app.quit()
 }
 
 /* ------------------------------------------------------------------ menu */
@@ -511,6 +592,17 @@ function ensureScanner(): Electron.UtilityProcess {
       return
     }
 
+    // These two are the parent's own bookkeeping, so they are read whether or not there is
+    // a window to tell. Behind the window check, a scan run in the background - at login, or
+    // for a peer - never cleared `scanning`, and the daily backup and every later peer rescan
+    // waited for the rest of the session on a scan that had long finished.
+    if (event.type === 'progress') scanning = event.progress.phase !== 'done'
+    if (event.type === 'idle') {
+      scannerBusy = false
+      releaseScannerIfIdle()
+      return
+    }
+
     const target = mainWindow
     if (!target || target.isDestroyed()) return
     switch (event.type) {
@@ -526,8 +618,7 @@ function ensureScanner(): Electron.UtilityProcess {
         // straight through, and the scanner replaces that file with a rename when a scan
         // ends - which on Windows fails outright against an open read handle, and
         // `saveIndex` swallows the failure, so a whole scan's index would be lost to a
-        // backup that happened to overlap it.
-        scanning = event.progress.phase !== 'done'
+        // backup that happened to overlap it. Recorded above, before the window check.
         target.webContents.send('library:progress', event.progress)
         break
       case 'metadata':
@@ -550,6 +641,11 @@ function ensureScanner(): Electron.UtilityProcess {
     // Cleared here too, or a scanner that died mid-scan leaves this latched and the daily
     // backup defers for the rest of the session waiting for a `done` that cannot arrive.
     scanning = false
+    scannerBusy = false
+    if (releasingScanner) {
+      releasingScanner = false
+      return
+    }
     mainWindow?.webContents.send('library:error', {
       stage: 'scanner-exit',
       message: `The scanner stopped unexpectedly (code ${code}).`
@@ -562,7 +658,22 @@ function ensureScanner(): Electron.UtilityProcess {
 }
 
 function send(command: ScannerCommand): void {
+  if (command.type === 'scan') scannerBusy = true
   scanner?.postMessage(command)
+}
+
+/**
+ * Stops the scanner when nothing needs it: no window to feed and no scan left to save.
+ *
+ * Running in the background is the case this is for. The scanner holds the whole library's
+ * metadata in memory, and a process left resident from Windows starting up should cost what
+ * the server costs, not that as well. It comes back by itself - every path that scans calls
+ * `ensureScanner` first - so stopping it loses nothing but a fork on the next scan.
+ */
+function releaseScannerIfIdle(): void {
+  if (!scanner || mainWindow || scannerBusy || scanning || pendingScanRoots) return
+  releasingScanner = true
+  scanner.kill()
 }
 
 /**
@@ -572,15 +683,17 @@ function send(command: ScannerCommand): void {
  * list, and clearing it between folders would empty the library halfway through.
  */
 function beginScan(roots: LibraryRoot[], full = false): void {
+  // No window is a scan nobody is watching - at login, running in the background - and it
+  // still has a job: the index on disk is what the server hands to other machines, and it is
+  // only ever brought up to date by a scan.
   const target = mainWindow
-  if (!target) return
   if (roots.length === 0) {
-    target.webContents.send('library:reset', { roots })
+    target?.webContents.send('library:reset', { roots })
     return
   }
 
   ensureScanner()
-  target.webContents.send('library:reset', { roots })
+  target?.webContents.send('library:reset', { roots })
   // Set here rather than waiting for the first `progress`, so the gap between asking for a
   // scan and hearing about it is not a window the daily backup can start in.
   scanning = true
@@ -639,10 +752,15 @@ function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
  * dropping somebody's undo history because they pressed Refresh would be its own bug.
  */
 function rescanRoot(root: LibraryRoot): void {
-  if (!mainWindow || scanning) return
+  // Not gated on a window. A peer asking for a re-read is the one caller that is most likely
+  // to arrive while nobody is at this machine, and refusing it then was refusing it always.
+  if (scanning) return
   ensureScanner()
   scanning = true
+  // A scanner just forked for this (it is stopped while running windowless) is not ready yet,
+  // and sending to it then dropped the request on the floor.
   if (scannerReady) send({ type: 'scan', roots: [root], replace: false })
+  else pendingScanRoots = { roots: [root], full: false }
 }
 
 /**
@@ -1092,6 +1210,7 @@ function registerIpc(): void {
     if (patch.flUserData !== undefined || patch.roots !== undefined) {
       void startRemoteServer()
     }
+    if (patch.runInBackground !== undefined) applyBackground()
     return settings
   })
 
@@ -2269,11 +2388,9 @@ const portableChoice = usePortableDataDir()
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-  })
+  // Opening umakbang while it is already running - in the tray, say - is asking for the
+  // window, which may not exist yet. It used to do nothing at all in that case.
+  app.on('second-instance', () => showWindow())
 
   // Local crash dumps. Nothing is uploaded anywhere; this only means that when the app
   // does go down there is a minidump in `app.getPath('crashDumps')` to look at, instead of
@@ -2319,8 +2436,23 @@ if (!app.requestSingleInstanceLock()) {
     enableSystemAudioCapture()
     registerIpc()
     buildMenu()
-    createWindow()
+    /*
+     * The computer starting is not somebody opening the app.
+     *
+     * Started at login it comes up as the server and the tray icon and nothing else: a window
+     * nobody asked for, on every boot, is the fastest way to get the login item switched off.
+     * The scan still runs, because the index on disk is what the server hands out and nothing
+     * else brings it up to date - `beginScan` works without a window for exactly this.
+     */
+    const quietStart = launchedInBackground() && getUserData().settings.runInBackground
+    if (quietStart) {
+      if (isMac) app.dock?.hide()
+      beginScan(getUserData().settings.roots)
+    } else {
+      createWindow()
+    }
     mark('createWindow')
+    applyBackground()
     // Reads the release feed and stages anything newer; it installs on quit rather than
     // interrupting. Deliberately after the window exists, since it reports to it.
     initUpdater(() => mainWindow)
@@ -2352,6 +2484,7 @@ if (!app.requestSingleInstanceLock()) {
       return true
     })
     void startRemoteServer().then((state) => {
+      refreshTray()
       console.log(
         state.listening
           ? `umakbang: serving on ${state.address}:${state.port}`
@@ -2374,16 +2507,18 @@ if (!app.requestSingleInstanceLock()) {
     })
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      if (BrowserWindow.getAllWindows().length === 0) showWindow()
     })
   })
 
   app.on('window-all-closed', () => {
-    // Standard macOS behaviour is to stay resident until the user quits explicitly.
-    if (!isMac) app.quit()
+    // Standard macOS behaviour is to stay resident until the user quits explicitly. Windows
+    // does the same while umakbang runs in the background: the tray icon is then the app.
+    if (!isMac && !trayShown()) app.quit()
   })
 
   app.on('before-quit', () => {
+    hideTray()
     stopWatchingRemoteServer()
     stopRemoteServer()
     send({ type: 'cancel' })
