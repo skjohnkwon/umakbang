@@ -20,6 +20,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.4.0',
+    date: '2026-11-18',
+    changes: [
+      'umakbang keeps serving with the window closed. It starts with your computer, without opening a window, and lives in the tray on Windows and the menu bar on a Mac, so your other machines can reach this library whether or not you have the app open. Closing the window no longer quits; Quit is in the icon’s menu. Settings, Remote, Run in the background turns all of it off.',
+      'Running in the background costs what the server costs. The library index and the scanner are let go when the window closes and come back when it opens, or when another machine asks for a re-read.',
+      'Another machine can ask for a re-read, and set a star or a tag, while nobody is at this one. A re-read used to be refused whenever the window was closed.',
+      'Updates can be installed from the tray. An app that is never quit would otherwise never install one, so a downloaded update adds Restart to update to the icon’s menu.',
+      'A copy that cannot update itself says so. The unpacked build showed "Could not check" with a missing-file error in Settings, Updates; it now explains that only an installed copy updates.'
+    ]
+  },
+  {
     version: '0.3.3',
     date: '2026-11-14',
     changes: [
