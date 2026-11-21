@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  FolderHint,
   LibraryRoot,
   MetadataPatch,
   PlatformInfo,
@@ -260,6 +261,20 @@ interface LibraryState {
    * so without this a folder you just made wouldn't appear until you put something in it.
    */
   extraDirs: Set<string>
+  /**
+   * Folders the launch knows about before their files have arrived, keyed by root-relative
+   * path, with the count and newest date to show for them meanwhile (`FolderHint`).
+   *
+   * The tree is built from files, so a subfolder of the folder the window opens on used to
+   * appear only with the full replay - a second or two after the files beside it. These are
+   * held in the tree like `extraDirs` and dropped per library folder on `library:replayed`,
+   * when the real nodes have every file and the real numbers.
+   */
+  folderHints: Record<string, FolderHint>
+  /** Adds the launch's folder hints. */
+  addFolderHints: (hints: FolderHint[]) => void
+  /** Drops the hints under one library folder, whose files have all arrived. */
+  dropFolderHints: (label: string) => void
   /**
    * Files umakbang currently cannot reach: moved or deleted outside the app, on a drive that
    * went away, or refused by the OS. Keyed by `Track.path` - what the filesystem answers to,
@@ -670,6 +685,7 @@ export const useLibrary = create<LibraryState>((set, get) => ({
   selection: new Set(),
   clipboard: null,
   extraDirs: new Set(),
+  folderHints: {},
   unreachable: new Set(),
   notice: null,
   undo: null,
@@ -817,8 +833,28 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       // includes every row we had dimmed for being unreachable. The walk is the authority on
       // what is there; nothing dimmed by a single folder's re-read should outlive it.
       extraDirs: sameRoot ? get().extraDirs : new Set(),
+      // The scan this reset precedes sends its own, describing the index it is about to replay.
+      folderHints: {},
       unreachable: new Set()
     })
+  },
+
+  addFolderHints: (hints) => {
+    if (hints.length === 0) return
+    const next = { ...get().folderHints }
+    for (const hint of hints) next[hint.path] = hint
+    set({ folderHints: next })
+  },
+
+  dropFolderHints: (label) => {
+    const current = get().folderHints
+    const lower = label.toLowerCase()
+    const kept = Object.entries(current).filter(([path]) => {
+      const head = path.toLowerCase()
+      return head !== lower && !head.startsWith(`${lower}/`)
+    })
+    if (kept.length === Object.keys(current).length) return
+    set({ folderHints: Object.fromEntries(kept) })
   },
 
   addTracks: (incoming) => {
@@ -932,6 +968,9 @@ export const useLibrary = create<LibraryState>((set, get) => ({
       })
     }
     if (arrived.length > 0) get().addTracks(arrived)
+    // A file landing at, or replacing one at, an annotated path is the moment a rating could
+    // be inherited by the wrong file - see `reconcileAnnotations`.
+    if (arrived.length > 0 || stale.length > 0) scheduleAnnotationCheck()
 
     /*
      * A file that has gone is dimmed, not dropped, and the distinction is about who moved it.
@@ -2404,6 +2443,134 @@ export const useLibrary = create<LibraryState>((set, get) => ({
  * Ratings, tags, notes and analysed tempo are keyed by path, so they have to follow too -
  * moved they go with the file, copied they are shared with the copy.
  */
+/* ------------------------------------------------------------------ annotations follow files */
+
+let annotationTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Checks, shortly, that every rating, tag and note still sits on the file it was made on.
+ * Debounced, since a scan finishing and a folder re-read can arrive together.
+ */
+export function scheduleAnnotationCheck(): void {
+  if (annotationTimer) clearTimeout(annotationTimer)
+  annotationTimer = setTimeout(() => {
+    annotationTimer = null
+    void reconcileAnnotations()
+  }, 1500)
+}
+
+/**
+ * Moves annotations that were left behind at a path onto the file they were made on.
+ *
+ * Annotations are keyed by path, and umakbang's own moves carry them (`applyTransfer`). A move
+ * made anywhere else did not: the rating stayed at the old path, and the next file to arrive
+ * there inherited it - a different song exported under the same name came up already rated
+ * and tagged. `UserData.annotatedAs` remembers which file each path's annotations describe,
+ * by size and mtime, so the two cases can be told apart here:
+ *
+ *   - the file at the path still matches: nothing to do;
+ *   - it is gone or different, and exactly one file elsewhere in the library has the same
+ *     name, size and mtime and no annotations of its own: that is the file, moved. Its
+ *     annotations go with it, and whatever is at the old path starts clean. A move keeps a
+ *     file's mtime, which is what makes the match possible at all;
+ *   - no such file: left exactly as it is. It may be a re-export of the same song, which
+ *     should keep its stars - or the original may sit in a folder no scan has reached yet,
+ *     and re-pointing the record now would lose the trail before the next scan finds it.
+ *
+ * Which paths no longer hold their file is asked of main, which checks the disk
+ * (`changedAnnotatedFiles`) - this window's own row for a swapped-out path can still describe
+ * the original. The search for the moved file is over the index, and only on a complete one:
+ * halfway through a scan the moved file may not have arrived, and "no match" would be a guess.
+ */
+async function reconcileAnnotations(): Promise<void> {
+  const before = useLibrary.getState()
+  if (before.scanning || before.tracks.length === 0) return
+  const changed = await window.umakbang.changedAnnotatedFiles()
+  const store = useLibrary.getState()
+  if (store.scanning || changed.length === 0) return
+
+  const remote = new Set(store.roots.filter((root) => root.remote).map((root) => root.label))
+  const isLocal = (track: Track): boolean => {
+    const slash = track.rel.indexOf('/')
+    return !remote.has(slash === -1 ? track.rel : track.rel.slice(0, slash))
+  }
+  const annotated = new Set([
+    ...Object.keys(store.ratings),
+    ...Object.keys(store.tags),
+    ...Object.keys(store.notes)
+  ])
+
+  // Built only if something is out of place: a pass over every row in the library.
+  let byFingerprint: Map<string, Track[]> | null = null
+  const fingerprint = (name: string, size: number, mtimeMs: number): string =>
+    `${name.toLowerCase()}|${size}|${mtimeMs}`
+  const candidates = (name: string, size: number, mtimeMs: number): Track[] => {
+    if (!byFingerprint) {
+      byFingerprint = new Map()
+      for (const track of store.tracks) {
+        if (!isLocal(track)) continue
+        const key = fingerprint(track.name, track.size, track.mtimeMs)
+        const list = byFingerprint.get(key)
+        if (list) list.push(track)
+        else byFingerprint.set(key, [track])
+      }
+    }
+    return byFingerprint.get(fingerprint(name, size, mtimeMs)) ?? []
+  }
+
+  const moves: Array<{ fromKey: string; from: string; to: Track }> = []
+  const claimed = new Set<string>()
+
+  for (const [key, size, mtimeMs] of changed) {
+    const name = key.slice(Math.max(key.lastIndexOf('/'), key.lastIndexOf('\\')) + 1)
+    const found = candidates(name, size, mtimeMs).filter((track) => {
+      const at = keyOf(track)
+      return at !== key && !annotated.has(at) && !claimed.has(at)
+    })
+    if (found.length !== 1) continue
+    claimed.add(keyOf(found[0]))
+    moves.push({ fromKey: key, from: store.byPath.get(key)?.path ?? key, to: found[0] })
+  }
+
+  if (moves.length === 0) return
+
+  const ratings = { ...store.ratings }
+  const tags = { ...store.tags }
+  const notes = { ...store.notes }
+  for (const { fromKey, from, to } of moves) {
+    const toKey = keyOf(to)
+    // Cleared at the old path before being set at the new one, so the record main keeps for
+    // the old path goes with its last annotation and the new path's is read off the moved file.
+    const rating = ratings[fromKey]
+    if (rating !== undefined) {
+      delete ratings[fromKey]
+      ratings[toKey] = rating
+      void window.umakbang.setRating(from, 0)
+      void window.umakbang.setRating(to.path, rating)
+    }
+    const applied = tags[fromKey]
+    if (applied) {
+      delete tags[fromKey]
+      tags[toKey] = applied
+      void window.umakbang.setTags(from, [])
+      void window.umakbang.setTags(to.path, applied)
+    }
+    const note = notes[fromKey]
+    if (note !== undefined) {
+      delete notes[fromKey]
+      notes[toKey] = note
+      void window.umakbang.setNote(from, '')
+      void window.umakbang.setNote(to.path, note)
+    }
+  }
+  useLibrary.setState({ ratings, tags, notes })
+  store.notify(
+    moves.length === 1
+      ? `${moves[0].to.name}'s rating and tags followed it to ${parentPath(moves[0].to.rel) || 'its new folder'}.`
+      : `Ratings and tags followed ${moves.length} files that were moved outside umakbang.`
+  )
+}
+
 function applyTransfer(result: TransferResult, mode: TransferMode): void {
   const store = useLibrary.getState()
   // Moves are checked too: an empty folder produces no files at all, and it still has to
@@ -2865,8 +3032,14 @@ export function connectLibraryEvents(): () => void {
     ),
     window.umakbang.onTracks((tracks) => useLibrary.getState().addTracks(tracks)),
     window.umakbang.onRemoved((paths) => useLibrary.getState().removeTracks(paths)),
+    window.umakbang.onFolderHints((hints) => useLibrary.getState().addFolderHints(hints)),
+    window.umakbang.onReplayed((label) => useLibrary.getState().dropFolderHints(label)),
     window.umakbang.onMetadata((patches) => useLibrary.getState().applyMetadata(patches)),
-    window.umakbang.onProgress((progress) => useLibrary.getState().setProgress(progress)),
+    window.umakbang.onProgress((progress) => {
+      useLibrary.getState().setProgress(progress)
+      // A finished scan is a complete index, which is what the annotation check needs.
+      if (progress.phase === 'done') scheduleAnnotationCheck()
+    }),
     // Both channels existed for years with no listener: a scanner crash emptied the
     // library in silence, and a declined folder pick closed its dialog and said nothing.
     window.umakbang.onLibraryError(({ message }) => useLibrary.getState().notify(message, 'error')),

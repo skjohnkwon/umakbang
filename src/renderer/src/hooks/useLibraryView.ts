@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { SortKey, Track, TrackKind } from '@shared/types'
+import type { FolderHint, SortKey, Track, TrackKind } from '@shared/types'
 import { isPageView, useLibrary } from '@/state/library'
 import { usePaneValue } from '@/state/pane'
 import { compareTracks, isEmptyQuery, matchesQuery, parseQuery, scoreMatch } from '@/lib/search'
@@ -50,22 +50,54 @@ let cache: TreeCache | null = null
 
 function buildTree(tracks: Track[], extraDirs: Set<string>): FolderTree {
   let fresh = false
-  // Nodes can be grafted on but not pruned, so a folder leaving the hand-held set - a
-  // deleted or renamed empty folder - means starting the tree over. That only happens on
-  // an explicit action, never during a scan.
-  const pruned = cache !== null && cache.extras !== extraDirs && !covers(extraDirs, cache.extras)
-
-  if (!cache || cache.tracks !== tracks || cache.processed > tracks.length || pruned) {
+  const start = (): TreeCache => {
     const root = makeNode('', '')
-    cache = { tracks, processed: 0, root, index: new Map([['', root]]), extras: extraDirs }
     fresh = true
+    return { tracks, processed: 0, root, index: new Map([['', root]]), extras: extraDirs }
   }
 
+  if (!cache || cache.tracks !== tracks || cache.processed > tracks.length) cache = start()
   if (!fresh && cache.processed === tracks.length && cache.extras === extraDirs) return cache
 
   // Only folders that gained a child need re-sorting.
   const dirty = new Set<FolderNode>()
+  foldTail(cache, tracks, dirty)
 
+  /*
+   * Nodes can be grafted on but not pruned, so a hand-held folder leaving the set with
+   * nothing else holding it up - a deleted or renamed empty folder - means starting over.
+   *
+   * Only then, and only after the newest rows are folded in. Launch hints
+   * (`folderHints`) leave the set the moment the replay has arrived, and by then every real
+   * folder among them has files of its own; judging them before the fold, or treating any
+   * departure as a prune, rebuilt the whole tree from 328k rows at the end of every launch.
+   */
+  if (!fresh && cache.extras !== extraDirs && !covers(extraDirs, cache.extras)) {
+    const current = cache
+    const orphaned = [...current.extras].some(
+      (dir) => !extraDirs.has(dir) && (current.index.get(dir)?.totalCount ?? 0) === 0
+    )
+    if (orphaned) {
+      cache = start()
+      dirty.clear()
+      foldTail(cache, tracks, dirty)
+    }
+  }
+
+  // Folders holding nothing indexable - a new one, or one you just pasted - have no file
+  // to put them in the tree, so they're grafted on by hand.
+  if (fresh || cache.extras !== extraDirs) {
+    for (const dir of extraDirs) ensureDir(cache, dir, dirty)
+    cache.extras = extraDirs
+  }
+
+  for (const node of dirty) node.children.sort((a, b) => COLLATOR.compare(a.name, b.name))
+
+  return cache
+}
+
+/** Folds every row the cache has not seen yet into the tree. */
+function foldTail(cache: TreeCache, tracks: Track[], dirty: Set<FolderNode>): void {
   for (let i = cache.processed; i < tracks.length; i++) {
     const track = tracks[i]
     const root = cache.root
@@ -108,17 +140,25 @@ function buildTree(tracks: Track[], extraDirs: Set<string>): FolderTree {
   }
 
   cache.processed = tracks.length
+}
 
-  // Folders holding nothing indexable - a new one, or one you just pasted - have no file
-  // to put them in the tree, so they're grafted on by hand.
-  if (fresh || cache.extras !== extraDirs) {
-    for (const dir of extraDirs) ensureDir(cache, dir, dirty)
-    cache.extras = extraDirs
-  }
-
-  for (const node of dirty) node.children.sort((a, b) => COLLATOR.compare(a.name, b.name))
-
-  return cache
+/**
+ * A folder row's file count and newest date: the launch's hint while there is one, the tree's
+ * own figures otherwise.
+ *
+ * The hint wins outright rather than whichever number is bigger. The replay arrives in
+ * thousand-row batches, so for that second the tree's counts climb from nothing - drawing
+ * them would be numbers ticking upwards on rows that are standing still, and folders sorted
+ * by date reshuffling under the pointer. The hint is dropped as soon as the replay is whole.
+ */
+export function folderFigures(
+  node: FolderNode,
+  hints: Record<string, FolderHint>
+): { totalCount: number; latestMtime: number } {
+  const hint = hints[node.path]
+  return hint
+    ? { totalCount: hint.totalCount, latestMtime: hint.latestMtime }
+    : { totalCount: node.totalCount, latestMtime: node.latestMtime }
 }
 
 /** True if `next` holds everything `previous` did. */
@@ -187,17 +227,20 @@ export function useFolderTree(): FolderTree {
   const structureRevision = useLibrary((s) => s.structureRevision)
   const extraDirs = useLibrary((s) => s.extraDirs)
   const roots = useLibrary((s) => s.roots)
+  const folderHints = useLibrary((s) => s.folderHints)
 
   // Every library folder is held in the tree by hand, on the same footing as an empty
   // folder somebody just created. The tree is derived from files, so a folder that holds
   // no audio at all - or one whose scan hasn't reached it yet - would otherwise not be in
   // the sidebar, and a folder you just added appearing to do nothing is indistinguishable
-  // from it having failed.
+  // from it having failed. The launch's folder hints are held the same way until the
+  // files beneath them arrive.
   const held = useMemo(() => {
     const next = new Set(extraDirs)
     for (const root of roots) next.add(root.label)
+    for (const path in folderHints) next.add(path)
     return next
-  }, [extraDirs, roots])
+  }, [extraDirs, roots, folderHints])
 
   return useMemo(
     () => buildTree(tracks, held),
@@ -238,6 +281,7 @@ export function useVisibleRows(): Row[] {
   const downloads = useLibrary((s) => s.downloads)
   const roots = useLibrary((s) => s.roots)
   const { index } = useFolderTree()
+  const folderHints = useLibrary((s) => s.folderHints)
 
   return useMemo(() => {
     const parsed = parseQuery(query)
@@ -388,7 +432,9 @@ export function useVisibleRows(): Row[] {
     if (sortKey === 'mtimeMs') {
       const sign = sortDir === 'asc' ? 1 : -1
       subfolders.sort(
-        (a, b) => sign * (a.latestMtime - b.latestMtime) || COLLATOR.compare(a.name, b.name)
+        (a, b) =>
+          sign * (folderFigures(a, folderHints).latestMtime - folderFigures(b, folderHints).latestMtime) ||
+          COLLATOR.compare(a.name, b.name)
       )
     } else if (sortKey === 'name' && sortDir === 'desc') subfolders.reverse()
     const folders = subfolders.map((child): Row => ({ type: 'folder', node: child }))
@@ -413,7 +459,8 @@ export function useVisibleRows(): Row[] {
     tagFilter,
     ratings,
     downloads,
-    roots
+    roots,
+    folderHints
   ])
 }
 

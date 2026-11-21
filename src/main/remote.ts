@@ -46,13 +46,17 @@ export const REMOTE_PORT = 47828
 
 /** Bumped when the wire format changes in a way an older build would mis-read. */
 /**
+ * 3 since `/list`, `/search`, `/random` and `/stat` (`remote-browse.ts`): a peer browses this
+ * machine's rows in place instead of pulling a copy of the whole index. The phone checks for 3
+ * before using them and asks for a desktop update below it.
+ *
  * 2 since tags, ratings and the two writes that go with them.
  *
  * Read by peers to decide what to offer rather than whether to connect: a phone talking to a
  * machine still on 1 browses and plays exactly as before and simply has no stars to draw. That
  * is the whole reason this is a number in `/hello` and not an assumption.
  */
-export const REMOTE_PROTOCOL = 2
+export const REMOTE_PROTOCOL = 3
 
 /** Long enough for a busy machine to answer, short enough to sweep a tailnet briskly. */
 const PROBE_TIMEOUT_MS = 1_500

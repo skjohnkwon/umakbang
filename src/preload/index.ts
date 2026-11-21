@@ -42,7 +42,8 @@ import type {
   YoutubeFetched,
   YoutubeInfo,
   YoutubeProgress,
-  YoutubeToolStatus
+  YoutubeToolStatus,
+  FolderHint
 } from '../shared/types'
 
 /** Wraps an ipcRenderer subscription so callers get a plain unsubscribe function. */
@@ -70,6 +71,9 @@ const api = {
     ipcRenderer.invoke('store:setTags', path, tags),
   setRating: (path: string, rating: number): Promise<Record<string, number>> =>
     ipcRenderer.invoke('store:setRating', path, rating),
+  /** Annotated paths whose file is gone or different, with the size and mtime it had. */
+  changedAnnotatedFiles: (): Promise<Array<[string, number, number]>> =>
+    ipcRenderer.invoke('store:changedAnnotatedFiles'),
   setDetectedBpm: (path: string, bpm: number): Promise<void> =>
     ipcRenderer.invoke('store:setDetectedBpm', path, bpm),
   setDetectedKey: (path: string, key: string, fit?: number): Promise<void> =>
@@ -259,6 +263,12 @@ const api = {
     subscribe('library:metadata', handler),
   onRemoved: (handler: (paths: string[]) => void): (() => void) =>
     subscribe('library:removed', handler),
+  /** The opening folder's subfolders, ahead of the files beneath them. */
+  onFolderHints: (handler: (folders: FolderHint[]) => void): (() => void) =>
+    subscribe('library:folderHints', handler),
+  /** One library folder's saved index has arrived in full; its hints are no longer needed. */
+  onReplayed: (handler: (label: string) => void): (() => void) =>
+    subscribe('library:replayed', handler),
   /** Something went wrong scanning - a root that couldn't be walked, a scanner crash. */
   onLibraryError: (
     handler: (payload: { stage: string; message: string }) => void

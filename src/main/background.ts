@@ -20,11 +20,17 @@
  */
 
 import { app, Menu, nativeImage, Tray, type NativeImage } from 'electron'
+// Copied into the build by electron-vite and resolved to its path inside the app, since
+// `build/` itself is not packed. See `trayImage` for why the exe's own icon is not used.
+import appIconPath from '../../build/icon.ico?asset'
 import type { RemoteServerState } from '../shared/types'
 import { isPortable } from './portable'
 
 /** The argument a login item launches with, so the launch knows not to open a window. */
 const BACKGROUND_FLAG = '--background'
+
+/** The registry value 0.4.0 wrote its login item under. Never to change; see `syncLoginItem`. */
+const LOGIN_ITEM_NAME = 'electron.app.umakbang'
 
 /** How often the tray re-reads the server's state, for a status line that is not stale. */
 const REFRESH_MS = 15_000
@@ -82,7 +88,11 @@ export function syncLoginItem(enabled: boolean): void {
     app.setLoginItemSettings({
       openAtLogin: enabled,
       // Windows only; macOS reports the same thing through `wasOpenedAtLogin`.
-      args: [BACKGROUND_FLAG]
+      args: [BACKGROUND_FLAG],
+      // Pinned, because the default is the AppUserModelID, and that changed after 0.4.0
+      // shipped (see `setAppUserModelId` in index.ts). Following it would have left 0.4.0's
+      // entry in the registry beside the new one, and umakbang starting twice at every login.
+      name: LOGIN_ITEM_NAME
     })
   } catch (error) {
     console.log(`umakbang: could not ${enabled ? 'add' : 'remove'} the login item (${String(error)})`)
@@ -182,11 +192,22 @@ export function refreshTray(): void {
 /**
  * The tray picture.
  *
- * Windows gets the executable's own icon, read back off the file, which is the app's icon in
- * a packaged build without shipping a second copy of it. A Mac menu bar wants something else:
- * a *template* image, black on transparent, which the system tints for a light or dark bar and
- * for the highlighted state. A coloured app icon there is the one thing in the bar that does
- * not follow the theme. So the logo's own shapes - three keys over a plus - are drawn here.
+ * Windows gets the app's own `icon.ico`, bundled into the build by the `?asset` import above.
+ * It used to read the icon back off the executable with `app.getFileIcon`, on the grounds that
+ * a packaged exe already carries it - and on the machine it shipped to, Windows answered with
+ * the generic application icon instead, so the tray showed a stock window frame that looked
+ * like somebody else's program. The shell's icon cache is what answers that call, and it is
+ * the same cache that keeps showing an old icon after the exe is replaced (see Updates in
+ * CLAUDE.md), so nothing about the answer was ever guaranteed to be ours.
+ *
+ * Each tray size is resized from the icon separately rather than letting Windows shrink the
+ * 256px frame: the tray is 16px at 100% scaling, 24px at 150% and 32px at 200%, and Windows
+ * picks the representation that matches the display.
+ *
+ * A Mac menu bar wants something else: a *template* image, black on transparent, which the
+ * system tints for a light or dark bar and for the highlighted state. A coloured app icon
+ * there is the one thing in the bar that does not follow the theme. So the logo's own shapes -
+ * three keys over a plus - are drawn here.
  */
 async function trayImage(): Promise<NativeImage> {
   if (process.platform === 'darwin') {
@@ -196,12 +217,21 @@ async function trayImage(): Promise<NativeImage> {
     image.setTemplateImage(true)
     return image
   }
-  try {
-    const icon = await app.getFileIcon(process.execPath, { size: 'small' })
-    if (!icon.isEmpty()) return icon
-  } catch {
-    // Falls through to the drawn one, which is legible if not as pretty.
+  const source = nativeImage.createFromPath(appIconPath)
+  if (!source.isEmpty()) {
+    const image = nativeImage.createEmpty()
+    for (const [scaleFactor, size] of [
+      [1, 16],
+      [1.25, 20],
+      [1.5, 24],
+      [2, 32]
+    ] as const) {
+      const sized = source.resize({ width: size, height: size, quality: 'best' })
+      image.addRepresentation({ scaleFactor, width: size, height: size, buffer: sized.toBitmap() })
+    }
+    return image
   }
+  // Only if the bundled file is somehow missing. Legible, if not as pretty.
   const fallback = nativeImage.createEmpty()
   fallback.addRepresentation({ scaleFactor: 1, ...glyph(16, [255, 255, 255]) })
   return fallback

@@ -76,6 +76,17 @@ export type TrackMetadata = Pick<
   | 'projectSeconds'
 >
 
+/**
+ * A folder's place in the list before its files have arrived: how many files sit at or below
+ * it and the newest of them, from the summary written beside the index (`index-store.ts`).
+ * `path` is root-relative, label first, like `Track.relDir`.
+ */
+export interface FolderHint {
+  path: string
+  totalCount: number
+  latestMtime: number
+}
+
 export interface ScanProgress {
   phase: 'walking' | 'probing' | 'done'
   /** Files discovered so far. */
@@ -864,6 +875,18 @@ export interface UserData {
    * would need `remapBackup` taught about one more path-keyed map for a visual nicety.
    */
   detectedKeyFit: Record<string, number>
+  /**
+   * Which file a path's rating, tags and note were made on: its size and mtime when they
+   * were last set, by the same key as the annotations.
+   *
+   * The annotations are keyed by path alone, so a file moved away *outside* umakbang left
+   * them behind, and the next file to land at that path took them over - a different song
+   * exported under the same name came up already rated and tagged. With this the app can
+   * tell that the file at a path is no longer the one that was rated, and go and find the
+   * one that was (`reconcileAnnotations` in the renderer). Not in settings exports: it
+   * describes files on this machine, and a missing entry is simply filled in again.
+   */
+  annotatedAs: Record<string, [number, number]>
 }
 
 export interface PlatformInfo {

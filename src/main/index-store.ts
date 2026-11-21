@@ -22,7 +22,8 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { INDEXABLE_SIGNATURE } from '../shared/files'
-import type { Track } from '../shared/types'
+import type { FolderHint, Track } from '../shared/types'
+export type { FolderHint }
 
 let dataDir = ''
 
@@ -136,9 +137,17 @@ const EARLY_FALLBACK_ROWS = 2000
  * nobody can perceive. The renderer wants the whole index in memory (`useVisibleRows` is
  * synchronous by design), so nothing about a query engine removes that second.
  */
+/** The folder a launch opens on, and where its rows and its subfolders are to be sent. */
+export interface EarlyReplay {
+  dir: string
+  emit: (tracks: Track[]) => void
+  /** Its subfolders from the summary record. See `FolderSummaryRecord`. */
+  folders?: (hints: FolderHint[]) => void
+}
+
 export function loadIndex(
   root: string,
-  early?: { dir: string; emit: (tracks: Track[]) => void }
+  early?: EarlyReplay
 ): Track[] | null {
   // Whatever the last read left for the walk is superseded by this one, including when this
   // one finds nothing: a walk must never be handed an index that is not the one it is about
@@ -213,7 +222,7 @@ export function takeIndexReplay(root: string): { tracks: Track[]; openingDir: st
 function emitEarly(
   root: string,
   buffer: Buffer,
-  early: { dir: string; emit: (tracks: Track[]) => void },
+  early: EarlyReplay,
   pool: StringPool
 ): void {
   try {
@@ -263,6 +272,12 @@ function emitEarly(
     }
 
     if (rows.length > 0) early.emit(rows)
+    // After the rows, which are the part already on its way, and in the same breath: the
+    // subfolders beside them, so the folder opens whole rather than files first.
+    if (early.folders) {
+      const hints = readFolderHints(root, early.dir)
+      if (hints.length > 0) early.folders(hints)
+    }
   } catch {
     // The early pass is an optimisation; failing it only costs the loading screen.
   }
@@ -343,6 +358,108 @@ interface FolderRecord {
   /** What counted as an indexable file when this was written. See `loadFolderMtimes`. */
   indexable?: string
   dirs: Record<string, number>
+}
+
+/* ------------------------------------------------------------------ folder summaries */
+
+/**
+ * Every folder's recursive file count and newest file, beside the index that produced them.
+ *
+ * For the launch, and only for it. The rows of the folder the window opens on go out before
+ * the index is parsed (`emitEarly`), but a *subfolder* has no row of its own - the tree is
+ * built from files - so it could not appear until the files beneath it arrived with the full
+ * replay. On the real library, opened on its root, that was the whole visible list: 63 files
+ * at once and eleven folders a second and a half behind them. Working the folders out of the
+ * raw index at launch measured 322ms, since for the root that is every row; reading this
+ * record and picking out one folder's children is a few milliseconds.
+ *
+ * Its own file rather than a field of the `.dirs` record, which follows different rules: that
+ * one is written only after a walk and must be refused when stale, where this is a hint the
+ * window drops the moment the real tree has arrived (`library:replayed`). Keyed like
+ * `Track.relDir`: label-prefixed, forward slashes.
+ */
+interface FolderSummaryRecord {
+  indexMtimeMs: number
+  indexSize: number
+  /** relDir -> [files at or below it, newest mtime among them] */
+  folders: Record<string, [number, number]>
+}
+
+function summaryPath(root: string): string {
+  return `${indexPath(root)}.folders`
+}
+
+function writeFolderSummary(root: string, file: string, tracks: Track[]): void {
+  try {
+    const folders = new Map<string, [number, number]>()
+    for (const track of tracks) {
+      // The file's own folder and every one above it, up to and including the label.
+      let dir = track.relDir
+      for (;;) {
+        const entry = folders.get(dir)
+        if (entry) {
+          entry[0]++
+          if (track.mtimeMs > entry[1]) entry[1] = track.mtimeMs
+        } else {
+          folders.set(dir, [1, track.mtimeMs])
+        }
+        const cut = dir.lastIndexOf('/')
+        if (cut === -1) break
+        dir = dir.slice(0, cut)
+      }
+    }
+    const info = statSync(file)
+    const record: FolderSummaryRecord = {
+      indexMtimeMs: info.mtimeMs,
+      indexSize: info.size,
+      folders: Object.fromEntries(folders)
+    }
+    writeFileSync(summaryPath(root), JSON.stringify(record), 'utf8')
+  } catch {
+    // Without it the folders arrive with the full replay, which is what they always did.
+  }
+}
+
+/**
+ * Writes the summary when there is none for the index as it stands. For a scan that found
+ * nothing to change, which saves no index and so would otherwise never write one - and every
+ * install upgrading to this has an index and no summary.
+ */
+export function ensureFolderSummary(root: string, tracks: Track[]): void {
+  if (!dataDir) return
+  const file = indexPath(root)
+  try {
+    const info = statSync(file)
+    if (existsSync(summaryPath(root))) {
+      const record = JSON.parse(readFileSync(summaryPath(root), 'utf8')) as FolderSummaryRecord
+      if (record.indexMtimeMs === info.mtimeMs && record.indexSize === info.size) return
+    }
+  } catch {
+    // No index, or a torn summary: written below if there is an index to describe.
+  }
+  if (existsSync(file)) writeFolderSummary(root, file, tracks)
+}
+
+/**
+ * The folders directly inside `dir` (root-relative) according to the record - or, above the
+ * roots, this library folder's own node. Empty when the record is missing or describes some
+ * other version of the index.
+ */
+function readFolderHints(root: string, dir: string): FolderHint[] {
+  try {
+    const record = JSON.parse(readFileSync(summaryPath(root), 'utf8')) as FolderSummaryRecord
+    const info = statSync(indexPath(root))
+    if (record.indexMtimeMs !== info.mtimeMs || record.indexSize !== info.size) return []
+    const hints: FolderHint[] = []
+    for (const [path, [totalCount, latestMtime]] of Object.entries(record.folders)) {
+      const cut = path.lastIndexOf('/')
+      if ((cut === -1 ? '' : path.slice(0, cut)) !== dir) continue
+      hints.push({ path, totalCount, latestMtime })
+    }
+    return hints
+  } catch {
+    return []
+  }
 }
 
 function dirsPath(root: string): string {
@@ -447,6 +564,7 @@ export function saveIndex(root: string, tracks: Track[]): void {
     }
     renameSync(tmp, file)
     writeFolderMtimes(root, file)
+    writeFolderSummary(root, file, patched)
     rmSync(patchPath(root), { force: true })
   } catch {
     // The index is a cache; failing to write it only costs a slower next launch.
@@ -459,6 +577,7 @@ export function clearIndex(root: string): void {
     rmSync(indexPath(root), { force: true })
     rmSync(patchPath(root), { force: true })
     rmSync(dirsPath(root), { force: true })
+    rmSync(summaryPath(root), { force: true })
   } catch {
     // Nothing depends on removal succeeding.
   }

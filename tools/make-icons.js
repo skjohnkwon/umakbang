@@ -99,7 +99,10 @@ async function main() {
   console.log(`wrote ${masterPath} (${MASTER_SIZE}px, ${(fs.statSync(masterPath).size / 1024).toFixed(0)} KB)`)
 
   const icoPath = path.join(OUT_DIR, 'icon.ico')
-  fs.writeFileSync(icoPath, buildIco(ICO_SIZES.map((size) => ({ size, data: png(size) }))))
+  fs.writeFileSync(
+    icoPath,
+    buildIco(ICO_SIZES.map((size) => ({ size, data: size >= 256 ? png(size) : dib(png(size), size) })))
+  )
   console.log(`wrote ${icoPath} (${ICO_SIZES.join(', ')}px)`)
 
   window.destroy()
@@ -107,11 +110,48 @@ async function main() {
 }
 
 /**
- * Assembles a .ico from PNG-encoded entries.
+ * An icon entry as a classic 32bpp DIB: BITMAPINFOHEADER, bottom-up BGRA rows, then an
+ * all-clear AND mask, with the header's height doubled to cover both - which is how an icon
+ * DIB is laid out.
  *
- * The container is a six-byte header, a sixteen-byte directory entry per image, then the
- * images themselves. PNG payloads are read by Windows Vista and later, which is why there
- * is no BMP path here.
+ * Everything under 256px goes this way, and that is not a matter of taste. The .ico used to
+ * carry PNG at every size, on the grounds that Windows has read PNG entries since Vista. It
+ * does in a loose .ico file, and the window icon Electron loads did fine with it - but once
+ * stamped into the exe, the shell's own extraction (the taskbar, a pinned shortcut, Explorer,
+ * `app.getFileIcon`) could not use the small PNG entries and drew the generic application
+ * frame instead. Measured: the same exe re-stamped with these entries as DIBs shows the logo.
+ * The 256px entry stays PNG, which is the one size Windows expects compressed.
+ */
+function dib(png, size) {
+  // BGRA, premultiplied - which an icon DIB is not, so each pixel is divided back out.
+  const bitmap = nativeImage.createFromBuffer(png).toBitmap()
+  const header = Buffer.alloc(40)
+  header.writeUInt32LE(40, 0) // header size
+  header.writeInt32LE(size, 4)
+  header.writeInt32LE(size * 2, 8) // colour rows plus mask rows
+  header.writeUInt16LE(1, 12) // planes
+  header.writeUInt16LE(32, 14) // bits per pixel
+  const pixels = Buffer.alloc(size * size * 4)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const from = (y * size + x) * 4
+      const to = ((size - 1 - y) * size + x) * 4 // bottom-up
+      const alpha = bitmap[from + 3]
+      const straight = (c) => (alpha === 0 ? 0 : Math.min(255, Math.round((c * 255) / alpha)))
+      pixels[to] = straight(bitmap[from])
+      pixels[to + 1] = straight(bitmap[from + 1])
+      pixels[to + 2] = straight(bitmap[from + 2])
+      pixels[to + 3] = alpha
+    }
+  }
+  // The alpha channel does the masking; the AND mask is still required, and all clear.
+  const maskRow = Math.ceil(size / 32) * 4
+  return Buffer.concat([header, pixels, Buffer.alloc(maskRow * size)])
+}
+
+/**
+ * Assembles a .ico: a six-byte header, a sixteen-byte directory entry per image, then the
+ * images themselves - DIBs below 256px and PNG at 256 (see `dib`).
  */
 function buildIco(entries) {
   const header = Buffer.alloc(6)

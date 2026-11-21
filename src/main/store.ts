@@ -14,6 +14,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -26,7 +27,8 @@ import {
   type Settings,
   type UserData
 } from '../shared/types'
-import { labelForRoot } from '../shared/roots'
+import { labelForRoot, rootFor } from '../shared/roots'
+import { stat } from 'node:fs/promises'
 import { keyedRecord, pathKey } from '../shared/path-key'
 import type { SettingsBackup } from '../shared/backup'
 import { backupsDir, isPortable } from './portable'
@@ -52,7 +54,8 @@ let userData: UserData = {
   notes: {},
   detectedBpm: {},
   detectedKey: {},
-  detectedKeyFit: {}
+  detectedKeyFit: {},
+  annotatedAs: {}
 }
 let peaksCache: Record<string, PeaksEntry> = {}
 
@@ -192,6 +195,8 @@ export function initStore(): void {
   userData.detectedKey ??= {}
   // Absent from every file written before the column started saying how sure it is.
   userData.detectedKeyFit ??= {}
+  // Absent from every file written before annotations remembered which file they were on.
+  userData.annotatedAs ??= {}
 
   // Every path-keyed map composed once, here, where it arrives.
   //
@@ -276,7 +281,8 @@ function enterFirstRun(): UserData {
     notes: {},
     detectedBpm: {},
     detectedKey: {},
-    detectedKeyFit: {}
+    detectedKeyFit: {},
+    annotatedAs: {}
   }
   // Written now rather than left to the first patch, so what is on disk matches what is on
   // screen even if the session is killed rather than quit.
@@ -571,8 +577,81 @@ export function setRating(path: string, rating: number): Record<string, number> 
   const clamped = Math.max(0, Math.min(5, Math.round(rating)))
   if (clamped === 0) delete userData.ratings[key]
   else userData.ratings[key] = clamped
+  noteAnnotatedFile(path, key)
   scheduleWrite(userDataFile, () => userData)
   return userData.ratings
+}
+
+/**
+ * Records which file a path's annotations now describe, or forgets it once it has none.
+ *
+ * Read off the disk at the moment of annotating rather than taken from the caller: the
+ * rating is a statement about the file that is there now, and `annotatedAs` exists to notice
+ * when that stops being true. A path that cannot be read - another machine's library - is
+ * left without an entry, which only means it is never second-guessed.
+ */
+function noteAnnotatedFile(path: string, key: string): void {
+  const annotated =
+    userData.ratings[key] !== undefined || userData.tags[key] !== undefined || userData.notes[key] !== undefined
+  if (!annotated) {
+    delete userData.annotatedAs[key]
+    return
+  }
+  try {
+    const info = statSync(path)
+    userData.annotatedAs[key] = [info.size, info.mtimeMs]
+  } catch {
+    delete userData.annotatedAs[key]
+  }
+}
+
+/**
+ * Annotated paths whose file is no longer the one that was annotated - gone, or different -
+ * each with the size and mtime of the file that was.
+ *
+ * Asked of the disk, never of the window's index. The window replays the saved index first
+ * and keeps the row it already holds for a path when the walk reports a changed file there,
+ * so to the window a path whose file was swapped out still looks exactly like the original -
+ * which is precisely the case this is for. Library folders on another machine are skipped:
+ * their paths cannot be read from here, and every one would look missing.
+ *
+ * Paths annotated before records were kept get one now, from the file that is there.
+ */
+export async function changedAnnotatedFiles(): Promise<Array<[string, number, number]>> {
+  const local = userData.settings.roots.filter((root) => !root.remote)
+  const keys = new Set([
+    ...Object.keys(userData.ratings),
+    ...Object.keys(userData.tags),
+    ...Object.keys(userData.notes)
+  ])
+  const changed: Array<[string, number, number]> = []
+  let filled = false
+  const all = [...keys].filter((key) => rootFor(local, key) !== null)
+  // A few at a time: thousands of stats on a spinning disk, kept off one long burst.
+  for (let i = 0; i < all.length; i += 32) {
+    await Promise.all(
+      all.slice(i, i + 32).map(async (key) => {
+        const was = userData.annotatedAs[key]
+        let now: [number, number] | null = null
+        try {
+          const info = await stat(key)
+          now = [info.size, info.mtimeMs]
+        } catch {
+          // Gone from here. Reported below if there is a record of what it was.
+        }
+        if (!was) {
+          if (now) {
+            userData.annotatedAs[key] = now
+            filled = true
+          }
+          return
+        }
+        if (!now || now[0] !== was[0] || now[1] !== was[1]) changed.push([key, was[0], was[1]])
+      })
+    )
+  }
+  if (filled) scheduleWrite(userDataFile, () => userData, 3000)
+  return changed
 }
 
 export function setDetectedBpm(path: string, bpm: number): void {
@@ -620,6 +699,7 @@ export function setNote(path: string, note: string): void {
   const key = pathKey(path)
   if (trimmed) userData.notes[key] = trimmed
   else delete userData.notes[key]
+  noteAnnotatedFile(path, key)
   // Short debounce, unlike the analysis maps: this is typing, and a note lost to a crash is
   // a sentence the user has to remember writing.
   scheduleWrite(userDataFile, () => userData, 800)
@@ -630,6 +710,7 @@ export function setTags(path: string, tags: string[]): Record<string, string[]> 
   const key = pathKey(path)
   if (cleaned.length === 0) delete userData.tags[key]
   else userData.tags[key] = cleaned
+  noteAnnotatedFile(path, key)
   scheduleWrite(userDataFile, () => userData)
   return userData.tags
 }

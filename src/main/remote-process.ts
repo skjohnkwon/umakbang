@@ -25,6 +25,7 @@ import type { RemoteHello, RemoteLibrary, RemoteRequestLog, RemoteStats } from '
 import { indexFileFor, initIndexStore, patchFileFor } from './index-store'
 import { flRelative, parseRange, relativeToLibrary, resolveInLibrary, resolveUnder } from './remote-routes'
 import { collectFlpContents } from './flp'
+import { dropAllBrowsing, listFolder, randomFile, searchLibrary, statFiles, type Answer } from './remote-browse'
 import { readPluginInventory } from './plugins'
 import { pathKey } from '../shared/path-key'
 import { readFileSync } from 'node:fs'
@@ -531,6 +532,36 @@ function handle(request: IncomingMessage, response: ServerResponse): void {
   const params = url.searchParams
 
   switch (url.pathname) {
+    case '/list':
+    case '/search':
+    case '/random':
+    case '/stat': {
+      // Protocol 3: browsing from this machine's rows instead of a copy of them. See
+      // `remote-browse.ts`. Same bare 404 as every other route for a library that is not ours.
+      const library = libraryOf(params)
+      if (!library) {
+        fail(response, 404)
+        return
+      }
+      let answer: Answer
+      try {
+        answer =
+          url.pathname === '/list'
+            ? listFolder(library, params, current.dataDir)
+            : url.pathname === '/search'
+              ? searchLibrary(library, params, current.dataDir)
+              : url.pathname === '/random'
+                ? randomFile(library, params)
+                : statFiles(library, params)
+      } catch {
+        fail(response, 500)
+        return
+      }
+      if (answer.body === undefined) fail(response, answer.status)
+      else sendJson(response, answer.body, answer.status)
+      return
+    }
+
     case '/hello':
       sendJson(response, hello())
       return
@@ -927,6 +958,8 @@ function stop(): void {
   const current = server
   server = null
   if (current) current.close()
+  // A stopped server answers nobody, so the rows it held for browsing are only memory.
+  dropAllBrowsing()
 }
 
 process.parentPort?.on('message', (message) => {

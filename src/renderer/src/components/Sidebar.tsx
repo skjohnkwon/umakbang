@@ -27,7 +27,7 @@ import {
 } from '@/components/ui/context-menu'
 import { TagBar } from '@/components/TagBar'
 import { YoutubeIcon } from '@/components/DownloadPage'
-import { useFolderTree, useLocalTracks, type FolderNode } from '@/hooks/useLibraryView'
+import { folderFigures, useFolderTree, useLocalTracks, type FolderNode } from '@/hooks/useLibraryView'
 import { baseName } from '@/lib/paths'
 import { useFolderDrop, type FolderDrop } from '@/hooks/useFolderDrop'
 import { collapseVariants } from '@/lib/motion'
@@ -659,6 +659,8 @@ function FolderRows({
   // The virtual root above every library folder has no name of its own.
   const label = isRoot ? 'Library' : (name ?? node.name)
   const drop = useFolderDrop(node.path)
+  // The same figures the table shows for this folder, launch hint included.
+  const count = useLibrary((s) => folderFigures(node, s.folderHints).totalCount)
 
   // A top-level node is one of the library's own folders: one segment, and not the
   // virtual root above them all. Only those can be removed from the library.
@@ -675,7 +677,7 @@ function FolderRows({
           isOpen ? <FolderOpen className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />
         }
         label={label}
-        count={node.totalCount}
+        count={count}
         depth={depth}
         active={isActive}
         chevron={

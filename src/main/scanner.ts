@@ -83,6 +83,15 @@ export interface ScanOptions {
    * read it again - has to be able to turn it off.
    */
   fullWalk?: boolean
+  /**
+   * Folders known to have changed, read for real even when their mtime says otherwise.
+   *
+   * What the library watcher saw while the window was closed (`library-watch.ts`). A file
+   * saved over in place moves its own mtime and not its folder's, so without this the skip
+   * would hand back the old row for exactly the file the watcher just reported. Absolute
+   * paths; anything outside this root simply never matches.
+   */
+  touched?: string[]
 }
 
 /**
@@ -101,7 +110,7 @@ export function startScan(
   // the `loadIndex` that produced it, and so the reference is dropped either way - holding
   // a second one to a 326k-entry array for the life of a scan is what this pass exists to
   // stop doing.
-  const plan = planRevalidation(root, label, options.fullWalk === true)
+  const plan = planRevalidation(root, label, options.fullWalk === true, options.touched ?? [])
   const done = run(root, label, callbacks, () => cancelled, () => {
     walkCompleted = true
   }, plan).catch((error) => {
@@ -152,8 +161,9 @@ async function run(
  * caller diffs what the walk found against the saved index and calls the difference deleted,
  * so a folder that is skipped and silent is a folder whose every file is reported as gone.
  *
- * `keep` is the folder the window is opening on. It is never skipped - the one folder the
- * user is looking at is the one place a stale row is read as a bug rather than as a cache.
+ * `keep` is never skipped: the folder the window is opening on - the one folder the user is
+ * looking at is the one place a stale row is read as a bug rather than as a cache - and every
+ * folder the library watcher saw change (`ScanOptions.touched`).
  */
 interface Revalidation {
   /**
@@ -168,7 +178,7 @@ interface Revalidation {
     mtimes: Map<string, number>
     children: Map<string, string[]>
     byDir: Map<string, Track[]>
-    keep: string
+    keep: Set<string>
   } | null
 }
 
@@ -186,7 +196,12 @@ function dirKey(dir: string): string {
   return dir
 }
 
-function planRevalidation(root: string, label: string, fullWalk: boolean): Revalidation | null {
+function planRevalidation(
+  root: string,
+  label: string,
+  fullWalk: boolean,
+  touched: string[]
+): Revalidation | null {
   const replay = takeIndexReplay(root)
   if (!replay) return null
 
@@ -220,8 +235,8 @@ function planRevalidation(root: string, label: string, fullWalk: boolean): Reval
   // `openingDir` is root-relative and led by the folder's label; the walk deals in absolute
   // paths, so it is converted once here rather than per folder.
   const parts = replay.openingDir.split('/')
-  const keep =
-    replay.openingDir && parts[0] === label ? dirKey(join(root, ...parts.slice(1))) : ''
+  const keep = new Set(touched.map(dirKey))
+  if (replay.openingDir && parts[0] === label) keep.add(dirKey(join(root, ...parts.slice(1))))
 
   return { byPath, skip: { mtimes, children, byDir, keep } }
 }
@@ -304,7 +319,7 @@ async function walk(
     // change, the toolbar re-reads it by hand for a share where the watch never fires, and
     // a rescan walks everything. This is also why `keep` exists.
     const skip = plan?.skip
-    if (skip && dirMtimeMs !== null && key !== skip.keep && skip.mtimes.get(key) === dirMtimeMs) {
+    if (skip && dirMtimeMs !== null && !skip.keep.has(key) && skip.mtimes.get(key) === dirMtimeMs) {
       visited.set(key, dirMtimeMs)
       for (const track of skip.byDir.get(key) ?? []) emit(track, false)
       for (const child of skip.children.get(key) ?? []) queue.push(child)

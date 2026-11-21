@@ -40,7 +40,7 @@ import {
   type ExplorerActions,
   type MenuContext
 } from '@/components/ExplorerMenu'
-import { collectFiles, useSort, type Row } from '@/hooks/useLibraryView'
+import { collectFiles, folderFigures, useSort, type Row } from '@/hooks/useLibraryView'
 import { useFolderDrop } from '@/hooks/useFolderDrop'
 import { beginRowDrag, consumeDragClick } from '@/lib/drag'
 import { setExplorerShortcuts, type ShortcutEvent } from '@/lib/explorer-shortcuts'
@@ -568,6 +568,8 @@ export function FileTable({
   // need - a `useLibrary` per row is the subscription this table exists to avoid.
   const shortcuts = useLibrary((s) => s.settings.shortcuts)
   const { key: sortKey, dir: sortDir } = useSort()
+  // Launch hints for folders whose files are still on their way - see `folderFigures`.
+  const folderHints = useLibrary((s) => s.folderHints)
   const revealNonce = usePaneValue('revealNonce')
   const setView = useLibrary((s) => s.setView)
   const patchSettings = useLibrary((s) => s.patchSettings)
@@ -1680,6 +1682,7 @@ export function FileTable({
                   if (row.type === 'folder') {
                     const absolute =
                       roots.length > 0 ? absolutePath(roots, row.node.path) : row.node.path
+                    const figures = folderFigures(row.node, folderHints)
                     return (
                       <FolderRow
                         key={`dir:${row.node.path}`}
@@ -1688,8 +1691,8 @@ export function FileTable({
                         /* Tree nodes are mutated in place as the scan progresses, so the
                            changing values are passed as primitives - otherwise memo would
                            hold a stale count. */
-                        totalCount={row.node.totalCount}
-                        latestMtime={row.node.latestMtime}
+                        totalCount={figures.totalCount}
+                        latestMtime={figures.latestMtime}
                         tags={tags[absolute]}
                         absolute={absolute}
                         columns={visible}

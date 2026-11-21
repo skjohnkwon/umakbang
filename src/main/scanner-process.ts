@@ -23,7 +23,14 @@ import { plausibleBpm } from '../shared/tempo'
 import { startScan, type ScanHandle } from './scanner'
 import { readFlpTempo } from './flp'
 import { flushMetadataCache, initMetadataCache } from './metadata-cache'
-import { initIndexStore, loadIndex, patchFileFor, saveIndex } from './index-store'
+import {
+  ensureFolderSummary,
+  initIndexStore,
+  loadIndex,
+  patchFileFor,
+  saveIndex,
+  type FolderHint
+} from './index-store'
 import { fetchRemoteIndex } from './remote-index'
 
 export type ScannerCommand =
@@ -40,7 +47,15 @@ export type ScannerCommand =
    * even though both replay the index first, which is why this is its own flag rather than
    * being read off `revalidating`.
    */
-  | { type: 'scan'; roots: LibraryRoot[]; replace: boolean; firstDir?: string; full?: boolean }
+  | {
+      type: 'scan'
+      roots: LibraryRoot[]
+      replace: boolean
+      firstDir?: string
+      full?: boolean
+      /** Folders the library watcher saw change; read whatever their mtime says. */
+      touched?: string[]
+    }
   | { type: 'cancel' }
 
 export type ScannerEvent =
@@ -58,6 +73,10 @@ export type ScannerEvent =
    * parent stops it on this one, to give back the memory an idle scanner holds.
    */
   | { type: 'idle' }
+  /** The subfolders of the folder the window opens on, ahead of the files beneath them. */
+  | { type: 'folders'; folders: FolderHint[] }
+  /** One library folder's saved index has been sent in full; folder hints for it are done. */
+  | { type: 'replayed'; label: string }
 
 // `parentPort` exists only inside a utilityProcess.
 const port = process.parentPort
@@ -117,6 +136,8 @@ let draining = false
 let openingDir = ''
 /** Set by a rescan, so the walk visits folders the saved mtimes say are unchanged. */
 let fullWalk = false
+/** Set by the library watcher's refresh: folders to read even if their mtime has not moved. */
+let touchedDirs: string[] = []
 
 /**
  * `replace` is the difference between opening the library and adding to it.
@@ -131,10 +152,17 @@ let fullWalk = false
  * looking at right now - so it starts immediately, beside whatever is already running,
  * rather than joining the back of a queue it would sit in for the rest of the scan.
  */
-function scanAll(roots: LibraryRoot[], replace: boolean, firstDir = '', full = false): void {
+function scanAll(
+  roots: LibraryRoot[],
+  replace: boolean,
+  firstDir = '',
+  full = false,
+  touched: string[] = []
+): void {
   loggedErrors = 0
   openingDir = firstDir
   fullWalk = full
+  touchedDirs = touched
   if (!replace) {
     log(`scan alongside: ${roots.map((root) => root.label).join(', ')}`)
     const mine = generation
@@ -311,6 +339,11 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
         progress: { phase: 'walking', found: tracks.length, probed: 0, total: tracks.length, revalidating: true }
       })
       log(`opened ${openingDir || '<root>'} with ${tracks.length} files in ${earlyAt}ms`)
+    },
+    folders: (folders) => {
+      if (!current()) return
+      post({ type: 'folders', folders })
+      log(`opened ${openingDir || '<root>'} with ${folders.length} folders in ${Date.now() - startedAt}ms`)
     }
   })
   if (cached) {
@@ -331,6 +364,9 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
       }
     })
   }
+  // Posted with or without a replay: the window holds folder hints for this root until it
+  // hears this, and a root whose index could not be read has nothing better coming.
+  if (current()) post({ type: 'replayed', label: root.label })
 
   const collected: Track[] = []
   const metaByPath = new Map<string, TrackMetadata>()
@@ -374,7 +410,7 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
         post({ type: 'error', stage, message: describe(error) })
       }
     }
-  }, { fullWalk })
+  }, { fullWalk, touched: touchedDirs })
   active.add(handle)
   await handle.done
   active.delete(handle)
@@ -462,6 +498,8 @@ async function scanOne(root: LibraryRoot, current: () => boolean): Promise<void>
 
   if (unchanged) {
     log(`${root.label} finished in ${Math.round((Date.now() - startedAt) / 1000)}s, nothing changed (${why})`)
+    // No save means no summary written - see `ensureFolderSummary`.
+    ensureFolderSummary(root.path, collected)
     return
   }
 
@@ -628,7 +666,7 @@ port.on('message', (message) => {
       // One folder at a time. Walking several at once would contend for the same disk and
       // finish no sooner, and the renderer would get progress from two passes interleaved
       // into one meaningless counter.
-      scanAll(command.roots, command.replace, command.firstDir, command.full)
+      scanAll(command.roots, command.replace, command.firstDir, command.full, command.touched)
       break
     }
 

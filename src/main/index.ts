@@ -63,6 +63,7 @@ import {
   flushStore,
   getDataDir,
   getPeaks,
+  changedAnnotatedFiles,
   getUserData,
   importBackup,
   initStore,
@@ -117,6 +118,7 @@ import {
   syncLoginItem,
   trayShown
 } from './background'
+import { unwatchLibrary, watchLibrary } from './library-watch'
 import { backupsDir, usePortableDataDir } from './portable'
 import { initAutoBackup } from './auto-backup'
 import { downloadRemote, packRemote, previewPack } from './remote-download'
@@ -182,6 +184,8 @@ import {
 
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
+/** `appId` in electron-builder.yml. Must stay equal to it - see `setAppUserModelId` below. */
+const APP_USER_MODEL_ID = 'dev.umakbang.app'
 
 /**
  * Launch timing, behind `UMAKBANG_TIMING=1`.
@@ -207,7 +211,7 @@ let sawTracks = false
 let restoreBounds: Electron.Rectangle | null = null
 let boundsTimer: ReturnType<typeof setTimeout> | null = null
 /** A scan requested before the child reported ready, replayed once it does. */
-let pendingScanRoots: { roots: LibraryRoot[]; full: boolean } | null = null
+let pendingScanRoots: { roots: LibraryRoot[]; full: boolean; touched?: string[] } | null = null
 /**
  * True between a scan starting and its `done` progress report.
  *
@@ -220,8 +224,8 @@ let scanning = false
  * waits for the index to be *saved*. What decides whether the scanner can be stopped.
  */
 let scannerBusy = false
-/** Set while the scanner is being stopped on purpose, so its exit is not reported as a crash. */
-let releasingScanner = false
+/** Scanners stopped on purpose, so their exit is neither reported as a crash nor allowed to reset the live one. */
+const released = new WeakSet<Electron.UtilityProcess>()
 /** True while a native file drag is running, so a second one can't be started inside it. */
 let dragInFlight = false
 
@@ -316,6 +320,11 @@ function enableSystemAudioCapture(): void {
 function createWindow(): void {
   const { windowBounds, windowMaximized } = getUserData().settings
 
+  // A window brings its own watching and its own scan (`did-finish-load` -> `beginScan`), which
+  // covers everything the background watch had queued, so both stand down here.
+  unwatchLibrary()
+  queuedRefresh.clear()
+
   // Only reuse saved bounds that still land on a connected display - a monitor that has
   // since been unplugged would otherwise open the window off-screen.
   const usable =
@@ -404,11 +413,16 @@ function createWindow(): void {
     mainWindow = null
     // Nothing is on screen to watch for, and a re-read has nowhere to go without a window.
     watchFolders([])
-    // Running on in the background, the scanner is only worth its memory while it has work.
-    releaseScannerIfIdle()
     // A menu bar app with no window has no business in the Dock as well.
     if (isMac && trayShown()) app.dock?.hide()
-    if (trayShown()) noteStillRunning()
+    if (trayShown()) {
+      noteStillRunning()
+      // Nothing on screen is watching the disk any more, and the server is still answering.
+      // Before the release below, so a scanner about to be needed is not stopped first.
+      watchWhileWindowless(true)
+    }
+    // Running on in the background, the scanner is only worth its memory while it has work.
+    releaseScannerIfIdle()
     refreshTray()
   })
 }
@@ -574,6 +588,8 @@ function ensureScanner(): Electron.UtilityProcess {
   })
 
   child.on('message', (event: ScannerEvent) => {
+    // Anything a released child still had in flight describes nothing that is running now.
+    if (released.has(child)) return
     if (event.type === 'ready') {
       mark('scanner ready')
       scannerReady = true
@@ -586,7 +602,8 @@ function ensureScanner(): Electron.UtilityProcess {
           roots: queued.roots,
           replace: true,
           firstDir: openingDir(),
-          full: queued.full
+          full: queued.full,
+          touched: queued.touched
         })
       }
       return
@@ -599,6 +616,8 @@ function ensureScanner(): Electron.UtilityProcess {
     if (event.type === 'progress') scanning = event.progress.phase !== 'done'
     if (event.type === 'idle') {
       scannerBusy = false
+      // Whatever queued up while this scan ran goes next; only then is the scanner idle.
+      drainRefresh()
       releaseScannerIfIdle()
       return
     }
@@ -627,6 +646,12 @@ function ensureScanner(): Electron.UtilityProcess {
       case 'removed':
         target.webContents.send('library:removed', event.paths)
         break
+      case 'folders':
+        target.webContents.send('library:folderHints', event.folders)
+        break
+      case 'replayed':
+        target.webContents.send('library:replayed', event.label)
+        break
       case 'error':
         target.webContents.send('library:error', { stage: event.stage, message: event.message })
         break
@@ -636,16 +661,19 @@ function ensureScanner(): Electron.UtilityProcess {
   })
 
   child.on('exit', (code) => {
+    // A child stopped on purpose was already let go by `releaseScannerIfIdle`, and a new one
+    // may be running by the time this one finishes exiting. Its exit must not clear the new
+    // one's state, or a scan just handed to the replacement reads as finished.
+    if (released.has(child)) {
+      released.delete(child)
+      return
+    }
     scanner = null
     scannerReady = false
     // Cleared here too, or a scanner that died mid-scan leaves this latched and the daily
     // backup defers for the rest of the session waiting for a `done` that cannot arrive.
     scanning = false
     scannerBusy = false
-    if (releasingScanner) {
-      releasingScanner = false
-      return
-    }
     mainWindow?.webContents.send('library:error', {
       stage: 'scanner-exit',
       message: `The scanner stopped unexpectedly (code ${code}).`
@@ -671,9 +699,18 @@ function send(command: ScannerCommand): void {
  * `ensureScanner` first - so stopping it loses nothing but a fork on the next scan.
  */
 function releaseScannerIfIdle(): void {
-  if (!scanner || mainWindow || scannerBusy || scanning || pendingScanRoots) return
-  releasingScanner = true
-  scanner.kill()
+  if (!scanner || mainWindow || scannerBusy || scanning || pendingScanRoots || queuedRefresh.size > 0) {
+    return
+  }
+  // Forgotten here rather than on its `exit`, which arrives later. In between, the next scan
+  // request found the dying child through `ensureScanner`, was sent to it and was lost - and
+  // the window closing does exactly that, releasing the scanner and then asking for its
+  // catch-up scan in the same turn.
+  const child = scanner
+  released.add(child)
+  scanner = null
+  scannerReady = false
+  child.kill()
 }
 
 /**
@@ -754,13 +791,61 @@ function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
 function rescanRoot(root: LibraryRoot): void {
   // Not gated on a window. A peer asking for a re-read is the one caller that is most likely
   // to arrive while nobody is at this machine, and refusing it then was refusing it always.
-  if (scanning) return
+  refreshRoot(root, [])
+}
+
+/**
+ * Re-reads of one root waiting their turn, keyed by its path.
+ *
+ * Queued rather than refused. `rescanRoot` used to return when a scan was already running,
+ * which was harmless while its only callers were a person pressing a button they could press
+ * again - and not once the library watcher was one of them: a save landing during a refresh
+ * would simply never be read. Requests for one root merge, so a burst is one walk.
+ */
+const queuedRefresh = new Map<string, { root: LibraryRoot; touched: string[] | null }>()
+
+/**
+ * Re-reads one root into the index, now or as soon as the scanner is free.
+ *
+ * `touched` names folders to read even if their mtime has not moved - what the library watcher
+ * saw change - and null asks for a full walk, which is the watcher's answer when it lost
+ * count. An empty list is the ordinary revalidation.
+ */
+function refreshRoot(root: LibraryRoot, touched: string[] | null): void {
+  const queued = queuedRefresh.get(root.path)
+  if (!queued) queuedRefresh.set(root.path, { root, touched })
+  else if (queued.touched === null || touched === null) queued.touched = null
+  else queued.touched = [...new Set([...queued.touched, ...touched])]
+  drainRefresh()
+}
+
+function drainRefresh(): void {
+  if (scanning || scannerBusy || pendingScanRoots) return
+  const next = queuedRefresh.values().next()
+  if (next.done) return
+  const { root, touched } = next.value
+  queuedRefresh.delete(root.path)
   ensureScanner()
   scanning = true
+  const full = touched === null
   // A scanner just forked for this (it is stopped while running windowless) is not ready yet,
   // and sending to it then dropped the request on the floor.
-  if (scannerReady) send({ type: 'scan', roots: [root], replace: false })
-  else pendingScanRoots = { roots: [root], full: false }
+  if (scannerReady) send({ type: 'scan', roots: [root], replace: false, full, touched: touched ?? [] })
+  else pendingScanRoots = { roots: [root], full, touched: touched ?? [] }
+}
+
+/**
+ * Keeps the index current while there is no window - see `library-watch.ts`.
+ *
+ * `catchUp` also re-reads every root once, for a window that has just closed: the on-screen
+ * watch only ever saw the folders that were on screen, so a bounce into any other folder
+ * during the session is still missing from the index the server is about to hand out. A
+ * login launch passes false, since its own scan has just done exactly that.
+ */
+function watchWhileWindowless(catchUp: boolean): void {
+  const roots = getUserData().settings.roots.filter((root) => !root.remote)
+  watchLibrary(roots, (root, dirs) => refreshRoot(root, dirs))
+  if (catchUp) for (const root of roots) refreshRoot(root, [])
 }
 
 /**
@@ -1178,6 +1263,8 @@ function registerIpc(): void {
   ipcMain.handle('update:check', (): Promise<UpdateStatus> => checkForUpdatesNow())
 
   ipcMain.handle('store:userData', () => getUserData())
+  // Which file each rating, tag and note was made on - see `UserData.annotatedAs`.
+  ipcMain.handle('store:changedAnnotatedFiles', () => changedAnnotatedFiles())
 
   ipcMain.handle('store:updateSettings', (_event, patch: Partial<Settings>) => {
     // Clamped on the way in rather than only when applied, so the number in the settings file
@@ -2384,6 +2471,18 @@ function registerIpc(): void {
 // installed copy and quits.
 const portableChoice = usePortableDataDir()
 
+/*
+ * Which taskbar button this process belongs to.
+ *
+ * Windows groups a window with a pinned shortcut only when both carry the same AppUserModelID.
+ * Electron's default for the process is `electron.app.umakbang`; a shortcut pinned by hand
+ * carries none, and the installer's carry electron-builder's `appId`. So a pinned umakbang
+ * and the running one sat side by side as two buttons that looked identical. The id is the
+ * `appId` from electron-builder.yml, which is what the installer stamps on its shortcuts, and
+ * what `umakbang.lnk` is stamped with too.
+ */
+if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
+
 // A second instance would fight over the same JSON store, so hand focus back instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -2448,6 +2547,7 @@ if (!app.requestSingleInstanceLock()) {
     if (quietStart) {
       if (isMac) app.dock?.hide()
       beginScan(getUserData().settings.roots)
+      watchWhileWindowless(false)
     } else {
       createWindow()
     }
@@ -2519,6 +2619,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     hideTray()
+    unwatchLibrary()
     stopWatchingRemoteServer()
     stopRemoteServer()
     send({ type: 'cancel' })
