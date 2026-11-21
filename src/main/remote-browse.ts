@@ -23,6 +23,14 @@
  * Paths on the wire are within the library folder with no label (`''` is the folder itself) -
  * the same rule `/file` follows, since a label is only this machine's name for the folder.
  * Nothing here opens a file by a string from the request: everything is answered from memory.
+ *
+ * The rows themselves are `Track`s exactly as `/index` sends them, which means their `rel` and
+ * `relDir` *do* carry this machine's label in front (`SECRET SAUCE/Stems`). So the two forms
+ * meet at the peer: `/list?dir=Stems` answers with rows whose `relDir` is `SECRET SAUCE/Stems`,
+ * and a peer turning a row back into a `dir` takes the first segment off. The response's own
+ * `dir` echoes the label-free form it was asked for. `/stat` is the one route that takes a
+ * file path, and it accepts either form, since echoing a row's `rel` is the obvious thing to
+ * send it.
  */
 
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
@@ -492,15 +500,39 @@ export function statFiles(library: RemoteLibrary, params: URLSearchParams): Answ
   const browse = current(library)
   if (!browse) return { status: 404 }
   const files: Record<string, { size: number; mtimeMs: number }> = {}
+  // From the index, not the disk: the index is what the phone was shown, and a stat per
+  // saved file per launch is not worth what it would tell it.
+  const lookup = (path: string): Track | undefined => {
+    const dir = parentOf(path)
+    const name = path.slice(path.lastIndexOf('/') + 1)
+    return browse.byDir.get(dir)?.find((row) => row.name === name)
+  }
   for (const rel of rels) {
     const clean = folderParam(rel)
     if (!clean) continue
-    const dir = parentOf(clean)
-    const name = clean.slice(clean.lastIndexOf('/') + 1)
-    // From the index, not the disk: the index is what the phone was shown, and a stat per
-    // saved file per launch is not worth what it would tell it.
-    const track = browse.byDir.get(dir)?.find((row) => row.name === name)
+    /*
+     * Either spelling of the path. The wire form is within the library with no label, but
+     * every row a listing hands out carries `rel` *with* this machine's label in front - so a
+     * peer echoing back the `rel` it was given was told nothing matched, which reads exactly
+     * like "gone on that machine". The label-free form is tried first, so a real subfolder that
+     * happens to share the label's name still resolves to itself.
+     */
+    let track = lookup(clean)
+    const cut = clean.indexOf('/')
+    if (!track && cut !== -1 && clean.slice(0, cut) === labelOf(browse)) track = lookup(clean.slice(cut + 1))
     if (track) files[rel] = { size: track.size, mtimeMs: track.mtimeMs }
   }
   return { status: 200, body: { files } }
+}
+
+/**
+ * The label the index's rows carry in front of their `rel` and `relDir`. Taken from the rows
+ * rather than from the settings, since the rows are what a peer was shown.
+ */
+function labelOf(browse: Browse): string {
+  for (const track of browse.byPath.values()) {
+    const cut = track.relDir.indexOf('/')
+    return cut === -1 ? track.relDir : track.relDir.slice(0, cut)
+  }
+  return browse.library.label
 }

@@ -259,14 +259,15 @@ export function compareTracks(a: Track, b: Track, key: SortKey, dir: 'asc' | 'de
     case 'kind':
       // The Type column shows the extension, so that's what it should sort by.
       return sign * (COLLATOR.compare(a.ext, b.ext) || COLLATOR.compare(a.name, b.name))
+    // The direction is handed in rather than applied here: see `compareOptionalNumber`.
     case 'musicalKey':
-      return sign * compareOptionalText(a.musicalKey, b.musicalKey, a, b)
+      return compareOptionalText(a.musicalKey, b.musicalKey, a, b, sign)
     case 'duration':
-      return sign * compareOptionalNumber(a.duration, b.duration, a, b)
+      return compareOptionalNumber(a.duration, b.duration, a, b, sign)
     case 'bpm':
-      return sign * compareOptionalNumber(a.bpm, b.bpm, a, b)
+      return compareOptionalNumber(a.bpm, b.bpm, a, b, sign)
     case 'sampleRate':
-      return sign * compareOptionalNumber(a.sampleRate, b.sampleRate, a, b)
+      return compareOptionalNumber(a.sampleRate, b.sampleRate, a, b, sign)
     case 'size':
       return sign * (a.size - b.size || COLLATOR.compare(a.name, b.name))
     case 'mtimeMs':
@@ -276,27 +277,36 @@ export function compareTracks(a: Track, b: Track, key: SortKey, dir: 'asc' | 'de
   }
 }
 
-/** Unprobed/absent values always sink to the bottom, whichever way the column sorts. */
+/**
+ * Unprobed/absent values always sink to the bottom, whichever way the column sorts.
+ *
+ * Which is why the direction is applied in here, to the comparison of two real values only.
+ * The caller used to multiply the whole result by it, and that turned "missing goes last"
+ * into "missing goes first" for every descending sort: BPM high-to-low opened on a page of
+ * files with no tempo at all, in the window and over the wire alike.
+ */
 function compareOptionalNumber(
   a: number | undefined,
   b: number | undefined,
   trackA: Track,
-  trackB: Track
+  trackB: Track,
+  sign: number
 ): number {
-  if (a === undefined && b === undefined) return COLLATOR.compare(trackA.name, trackB.name)
+  if (a === undefined && b === undefined) return sign * COLLATOR.compare(trackA.name, trackB.name)
   if (a === undefined) return 1
   if (b === undefined) return -1
-  return a - b || COLLATOR.compare(trackA.name, trackB.name)
+  return sign * (a - b || COLLATOR.compare(trackA.name, trackB.name))
 }
 
 function compareOptionalText(
   a: string | undefined,
   b: string | undefined,
   trackA: Track,
-  trackB: Track
+  trackB: Track,
+  sign: number
 ): number {
-  if (!a && !b) return COLLATOR.compare(trackA.name, trackB.name)
+  if (!a && !b) return sign * COLLATOR.compare(trackA.name, trackB.name)
   if (!a) return 1
   if (!b) return -1
-  return COLLATOR.compare(a, b) || COLLATOR.compare(trackA.name, trackB.name)
+  return sign * (COLLATOR.compare(a, b) || COLLATOR.compare(trackA.name, trackB.name))
 }
