@@ -20,6 +20,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    version: '0.4.1',
+    date: '2026-11-21',
+    changes: [
+      'Folders show up with the files beside them when the app opens. They used to arrive a second or two later, with their counts climbing as the library loaded; they now appear at once with their final numbers.',
+      'A rating, tags and a note follow a file you move in Explorer. They used to stay behind at the old location, so a different song saved later under the same name came up already rated and tagged.',
+      'With the window closed, umakbang notices new and changed files across the whole library, so your other machines see a beat bounced while the app sat in the tray. Closing the window also catches up anything saved into folders you were not looking at.',
+      'Sorting BPM, key, duration or sample rate high to low puts files with no value at the end. They were landing at the top.',
+      'The umakbang icon shows in the tray and on the taskbar again, and a pinned umakbang and the running one are a single taskbar button. Windows was drawing a generic application icon in both places.',
+      'Other machines and the phone can browse this library folder by folder and search it without first downloading the whole index, which on a large library was a quarter of a gigabyte on most launches.'
+    ]
+  },
+  {
     version: '0.4.0',
     date: '2026-11-18',
     changes: [
