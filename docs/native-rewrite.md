@@ -8,7 +8,11 @@ the cutover is done. Both read the same data files, so the switch is not a migra
 any copy whose file name says setup) into `%LOCALAPPDATA%\Programs\umakbang`, starts at login as
 `umakbang`, serves the tailnet in Electron's place, and updates itself from the GitHub releases
 `electron-builder.yml` names: a release carries `umakbang-native-<version>-win-x64.exe` and its
-`.sha256`, and an update without a checksum is never installed. With no paths on its command line
+`.sha256`, and an update without a checksum is never installed. Releases are built by
+`.github/workflows/release.yml` from a `v<version>` tag matching `native/Cargo.toml`, which also
+publishes a `umakbang-setup-<version>-win-x64.exe` copy for new installs and takes its notes from
+`native/assets/changelog.json`. `build.rs` stamps the logo and version into the exe, which is
+what every shortcut, the Apps entry and Explorer draw it from. With no paths on its command line
 it uses the Electron app's profile and its own database, or a `data` folder beside the exe
 (portable). A crash leaves `crash.log` or a minidump beside the database and is reported on the
 next launch. Windows only for now: a macOS build needs the platform layer split out and a Mac (or

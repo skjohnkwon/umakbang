@@ -1,16 +1,16 @@
-# Build both platforms from one tag, into one release.
+# Build the native app from a tag, into one release.
 #
-# Every release so far was built twice, on two machines, racing on one version number, and
-# every way that can go wrong it did: 0.3.2 went out with no Windows build at all, 0.3.1
-# shipped three different binaries under one number, and 0.2.0 was signed with the wrong
-# certificate and refused by every Mac it reached. The fix is not care. It is one tag, two
-# runners, one release, and no human uploading anything.
+# umakbang is the Rust app in native/ since 0.5.0; the Electron build this file used to run is
+# kept in the repository as the reference implementation and is no longer released. Push a tag
+# matching native/Cargo.toml and the Windows build is made, checked and published from it:
 #
-# Push a tag and both halves build from the same commit:
+#   edit native/Cargo.toml's version, add the entry to native/assets/changelog.json
+#   git commit -am "0.5.0" && git push
+#   git tag v0.5.0 && git push origin v0.5.0
 #
-#   npm version 0.3.3 --no-git-tag-version   # or edit package.json
-#   git commit -am "0.3.3" && git push
-#   git tag v0.3.3 && git push origin v0.3.3
+# No human uploads anything. Every release that was built on two machines racing on one
+# version number went wrong in a different way (0.3.1 shipped three binaries under one
+# number, 0.3.2 had no Windows build at all), and one tag, one runner, one upload is the fix.
 name: Release
 
 on:
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build (for example v0.3.3)
+        description: Existing tag to build (for example v0.5.0)
         required: true
 
 permissions:
@@ -30,140 +30,86 @@ env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  # The release exists before either build starts, as a draft.
-  #
-  # Both of the alternatives are worse. Letting each build create it races two API calls at
-  # the same tag, and `releaseType: release` in electron-builder.yml means whichever wins
-  # publishes it immediately - at which point the second build hits the publisher's own
-  # "existing release published more than 2 hours ago" guard, skips every upload, and still
-  # exits 0. That is exactly how 0.3.1 ended up with no Windows assets and a green build log.
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create the draft release if it is not there
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "$TAG already exists, uploading into it"
-          else
-            gh release create "$TAG" --draft --title "${TAG#v}" --notes "Built by CI from $TAG."
-          fi
-
-  build:
-    needs: prepare
-    strategy:
-      # One platform failing must not cancel the other, or a mac signing problem takes the
-      # Windows build down with it and the release is half-finished again.
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            args: --win --x64
-          - os: macos-latest
-            args: --mac
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-
-      # Typechecks both projects on the way through; there is no other automated check.
-      - run: npm run build
-
-      # The Developer ID Application certificate, which is what an installed copy's
-      # designated requirement actually names. Without it electron-builder signs with
-      # whatever identity it can find - an `Apple Development` one has the same team and the
-      # wrong lineage, and 0.2.0 was built, signed, uploaded and then refused by every Mac
-      # running 0.1.2. Skipped when the secret is absent so a fork still builds an unsigned
-      # mac app rather than failing at a step it cannot satisfy.
-      - name: Import the mac signing certificate
-        if: matrix.os == 'macos-latest'
-        env:
-          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
-          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-        run: |
-          # Checked here rather than in `if:`, because a step's own `env:` is not readable
-          # from its `if:` and a fork without the secret must skip rather than fail.
-          if [ -z "$MAC_CERT_P12" ]; then
-            echo "No MAC_CERT_P12 secret; building an unsigned mac app."
-            exit 0
-          fi
-          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$MAC_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MAC_CERT_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
-          rm -f "$RUNNER_TEMP/cert.p12"
-
-      # `--publish never`, deliberately, and the upload is the step below.
-      #
-      # It still writes `latest.yml` and `latest-mac.yml` - verified, not assumed - so
-      # nothing is lost by keeping electron-builder's publisher out of it, and what is
-      # gained is that no build can silently skip an upload or decide a release is too old
-      # to touch. `app-update.yml` lands beside the packaged app either way; a `--dir` build
-      # is the one that omits it, which is why this is a real target build.
-      - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
-
-      # Names matter more than they look. `latest.yml` points at `umakbang-Setup-x.y.z.exe`
-      # with hyphens, and the file on disk has spaces in it - uploaded as-is, GitHub turns
-      # those spaces into dots and the updater asks for a file that does not exist. So the
-      # installer is copied to the name the manifest already names.
-      - name: Upload the Windows assets
-        if: matrix.os == 'windows-latest'
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd release
-          for f in *" "*; do [ -e "$f" ] || continue; cp "$f" "${f// /-}"; done
-          gh release upload "$TAG" \
-            latest.yml \
-            umakbang-Setup-*.exe \
-            umakbang-Setup-*.exe.blockmap \
-            umakbang-*-win.zip \
-            --clobber
-
-      - name: Upload the mac assets
-        if: matrix.os == 'macos-latest'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd release
-          gh release upload "$TAG" \
-            latest-mac.yml \
-            umakbang-*-mac.zip umakbang-*-mac.zip.blockmap \
-            umakbang-*.dmg umakbang-*.dmg.blockmap \
-            --clobber
-
-  # Only once both halves are in. A release that goes live with one platform missing is the
-  # thing this whole file exists to prevent: the other platform's installs see a version
-  # they cannot download and report an error instead of an update.
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check both platforms arrived, then publish
+        with:
+          ref: ${{ env.TAG }}
+
+      # The updater compares the tag with the version compiled into the running copy, so a
+      # tag that disagrees with Cargo.toml would offer every install an update it already has,
+      # or one that installs and then offers itself again.
+      - name: Check the tag matches native/Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' native/Cargo.toml | cut -d'"' -f2)
+          [ "v$version" = "$TAG" ] || { echo "Cargo.toml says $version, the tag is $TAG"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Test
+        working-directory: native
+        run: cargo test --release --locked
+
+      - name: Build
+        working-directory: native
+        run: cargo build --release --locked
+
+      # The names are what the updater looks for: `umakbang-native-<version>-win-x64.exe` and
+      # a `.sha256` beside it, and nothing unverified is ever installed. The setup copy is the
+      # same bytes; a file name containing "setup" is what makes the exe install itself rather
+      # than run, which is what somebody downloading it for the first time wants.
+      - name: Name and checksum the build
+        run: |
+          version=${TAG#v}
+          mkdir -p out
+          cp native/target/release/umakbang-native.exe "out/umakbang-native-$version-win-x64.exe"
+          cp native/target/release/umakbang-native.exe "out/umakbang-setup-$version-win-x64.exe"
+          cd out
+          for f in *.exe; do sha256sum "$f" | sed 's/ \*/  /' > "$f.sha256"; done
+          cat *.sha256
+
+      - name: Release notes from the changelog
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          $entry = Get-Content native/assets/changelog.json -Raw | ConvertFrom-Json | Where-Object version -eq $version
+          if (-not $entry) { throw "native/assets/changelog.json has no entry for $version" }
+          $lines = @($entry.changes | ForEach-Object { "- $_" })
+          $lines += ''
+          $lines += "New install: download ``umakbang-setup-$version-win-x64.exe`` and run it. Installed copies update themselves."
+          $lines -join "`n" | Set-Content -Encoding utf8 out/notes.md
+
+      # Electron installs (0.4.x and older) read latest.yml and latest-mac.yml from the newest
+      # release, and report "Cannot find latest.yml" when they are missing. Carrying the
+      # previous release's manifests across tells them, truthfully, that there is no newer
+      # Electron build. Only when absent, so a later upload into this release replaces them.
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-          echo "$names"
-          for required in latest.yml latest-mac.yml; do
-            echo "$names" | grep -qx "$required" || { echo "missing $required"; exit 1; }
+          cd out
+          version=${TAG#v}
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$version" --notes-file notes.md \
+              "umakbang-native-$version-win-x64.exe" "umakbang-native-$version-win-x64.exe.sha256" \
+              "umakbang-setup-$version-win-x64.exe" "umakbang-setup-$version-win-x64.exe.sha256"
+          else
+            gh release upload "$TAG" --clobber \
+              "umakbang-native-$version-win-x64.exe" "umakbang-native-$version-win-x64.exe.sha256" \
+              "umakbang-setup-$version-win-x64.exe" "umakbang-setup-$version-win-x64.exe.sha256"
+          fi
+          have=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          previous=$(gh release list --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' | grep -vx "$TAG" | head -1)
+          for manifest in latest.yml latest-mac.yml; do
+            if ! echo "$have" | grep -qx "$manifest" && [ -n "$previous" ]; then
+              gh release download "$previous" -p "$manifest" -D . --clobber && gh release upload "$TAG" "$manifest" || true
+            fi
           done
-          gh release edit "$TAG" --draft=false
