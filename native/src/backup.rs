@@ -489,8 +489,13 @@ pub fn bundle_name() -> String {
 }
 
 /// Where bundles go when nobody has said: beside the executable, as the Electron app keeps them,
-/// or the profile's folder when that is not writable.
+/// or the profile's folder when that is not writable. On a Mac the executable lives inside the
+/// signed .app, where a written file breaks the signature and an update's bundle swap would
+/// discard it, so there it is always the profile's folder.
 pub fn default_dir(data_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        return data_dir.join("backups");
+    }
     if let Some(beside) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("backups"))) {
         // Writability proved by writing, not by asking.
         let probe = beside.join(".umakbang-write-test");
