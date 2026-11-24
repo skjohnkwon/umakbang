@@ -457,12 +457,24 @@ pub struct Result {
 /// `analysis:externalKey`: the command with `{file}` filled in, through the shell, its output
 /// put through the same normalising a tag's key is.
 pub fn external_key(template: &str, path: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt;
     if template.trim().is_empty() || !Path::new(path).exists() {
         return None;
     }
     let command = template.replace("{file}", path);
-    let out = std::process::Command::new("cmd.exe").args(["/d", "/s", "/c"]).raw_arg(&command).creation_flags(0x0800_0000).stdin(std::process::Stdio::null()).output().ok()?;
+    #[cfg(windows)]
+    let mut shell = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd.exe");
+        c.args(["/d", "/s", "/c"]).raw_arg(&command);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut shell = {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", &command]);
+        c
+    };
+    let out = crate::process::quiet(&mut shell).stdin(std::process::Stdio::null()).output().ok()?;
     if !out.status.success() {
         return None;
     }

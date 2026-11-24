@@ -15,6 +15,7 @@
 
 mod analyser;
 mod analysis;
+#[cfg_attr(target_os = "macos", path = "mac/clipboard.rs")]
 mod clipboard;
 mod columns;
 mod docstore;
@@ -36,6 +37,7 @@ mod settings_page;
 mod stats;
 mod youtube;
 mod download_page;
+#[cfg_attr(target_os = "macos", path = "mac/dialogs.rs")]
 mod dialogs;
 mod contracts;
 mod contracts_page;
@@ -47,6 +49,7 @@ mod trim;
 mod color_picker;
 mod server;
 mod tailscale;
+#[cfg_attr(target_os = "macos", path = "mac/tray.rs")]
 mod tray;
 mod fl_plugins;
 mod remote;
@@ -55,6 +58,7 @@ mod import_wizard;
 mod tour;
 mod crash;
 mod portable;
+mod process;
 mod updater;
 mod essentia_key;
 mod stem_dialog;

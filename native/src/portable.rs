@@ -22,11 +22,25 @@ pub struct Paths {
     pub refused: Option<String>,
 }
 
-/// The `data` folder beside the running executable, if there is one.
+/// The `data` folder beside the running executable, if there is one. On a Mac the executable
+/// is inside `umakbang.app/Contents/MacOS`, so "beside it" means beside the bundle - what the
+/// user sees in Finder.
 fn marker() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.join("data");
+    let beside = exe.parent()?;
+    #[cfg(target_os = "macos")]
+    let beside = if beside.ends_with("Contents/MacOS") { beside.parent().and_then(Path::parent).and_then(Path::parent).unwrap_or(beside) } else { beside };
+    let dir = beside.join("data");
     dir.is_dir().then_some(dir)
+}
+
+/// The user's home folder.
+pub fn home() -> PathBuf {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(PathBuf::from).unwrap_or_default()
 }
 
 /// Proven by writing a real file: Windows' access check on a folder means nothing.
@@ -45,8 +59,19 @@ pub fn resolve() -> Paths {
         }
         refused = Some(format!("The data folder beside umakbang ({}) can't be written to, so this copy is keeping its library on this computer instead.", dir.display()));
     }
-    let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| roaming.clone());
+    #[cfg(windows)]
+    let (roaming, local) = {
+        let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| roaming.clone());
+        (roaming, local)
+    };
+    // Electron's `userData` on a Mac is `~/Library/Application Support/umakbang`, so reading the
+    // profile there carries every tag and rating over from the Electron app.
+    #[cfg(not(windows))]
+    let (roaming, local) = {
+        let support = home().join("Library").join("Application Support");
+        (support.clone(), support)
+    };
     Paths { db: local.join("umakbang-native").join("library.db"), profile: roaming.join("umakbang").join("umakbang-data.json"), refused }
 }
 

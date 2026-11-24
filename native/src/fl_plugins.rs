@@ -105,13 +105,21 @@ pub fn read_catalog(user_data: &Path) -> Catalog {
 }
 
 /// Whether FL Studio is open.
+#[cfg(windows)]
 pub fn fl_running() -> bool {
-    use std::os::windows::process::CommandExt;
-    std::process::Command::new("tasklist")
+    crate::process::quiet(&mut std::process::Command::new("tasklist"))
         .args(["/fi", "imagename eq FL64.exe", "/nh"])
-        .creation_flags(0x0800_0000)
         .output()
         .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).to_lowercase().contains("fl64.exe"))
+}
+
+/// Whether FL Studio is open: its Mac bundle is `FL Studio <year>.app`, whatever the year.
+#[cfg(not(windows))]
+pub fn fl_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", "/FL Studio[^/]*\\.app/Contents/MacOS/"])
+        .output()
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Favourites added or taken away. Failures are per plugin, so a batch keeps what worked.

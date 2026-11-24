@@ -73,8 +73,7 @@ pub fn library_id(device_id: &str, path: &str) -> String {
 
 /// FL Studio's user data folder where it puts it by default.
 pub fn default_fl_user_data() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    home.join("Documents").join("Image-Line").join("FL Studio")
+    crate::portable::home().join("Documents").join("Image-Line").join("FL Studio")
 }
 
 /// A write arriving from a peer, on its way to the app.

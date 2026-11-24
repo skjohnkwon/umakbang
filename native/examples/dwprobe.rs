@@ -1,5 +1,14 @@
+//! DirectWrite's glyphs at each pen phase. Windows only.
+#[cfg(windows)]
 #[path = "../src/ui/dwrite.rs"]
 mod dwrite;
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("dwprobe reads DirectWrite, which is Windows only.");
+}
+
+#[cfg(windows)]
 fn main() {
     let mut r = dwrite::Raster::new().expect("factory");
     let path = std::path::PathBuf::from(r"C:\Windows\Fonts\segoeui.ttf");

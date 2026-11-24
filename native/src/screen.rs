@@ -675,7 +675,7 @@ fn title_bar(s: &State, t: &Theme) -> El<Action> {
                 .h_full()
                 .shrink0()
                 .items_center()
-                .pl(12.0)
+                .pl(12.0 + TRAFFIC_LIGHTS)
                 .pr(2.0)
                 .gap(6.0)
                 .on(Action::Drag)
@@ -806,7 +806,18 @@ pub fn format_time_pub(seconds: f64) -> String {
     format_time(seconds)
 }
 
+/// The room the Mac's own window buttons (the traffic lights) take at the left of the title
+/// bar. Windows has none there: its caption buttons are drawn at the right, below.
+#[cfg(target_os = "macos")]
+pub const TRAFFIC_LIGHTS: f32 = 70.0;
+#[cfg(not(target_os = "macos"))]
+pub const TRAFFIC_LIGHTS: f32 = 0.0;
+
 fn caption_buttons(s: &State, t: &Theme) -> El<Action> {
+    // A Mac window keeps the system's traffic lights, at the left; nothing is drawn here.
+    if cfg!(target_os = "macos") {
+        return div();
+    }
     let glyph = |kind: u8, color: Rgba| -> Painter {
         Rc::new(move |pm: &mut PixmapMut, r: [f32; 4], scale: f32| {
             let (cx, cy) = (((r[0] + r[2]) / 2.0).round() + 0.5, ((r[1] + r[3]) / 2.0).round() + 0.5);

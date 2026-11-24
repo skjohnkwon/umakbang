@@ -1,5 +1,65 @@
 # Porting native umakbang to macOS
 
+## Status (November 2026)
+
+**The native app builds, tests and runs on macOS** (`cargo build --release` on a Mac; 45 of 45
+tests pass, the protocol 4 tree hashes among them). Every row of the table below has a Mac side
+now. The Windows build still type-checks from a Mac (see "Checking the Windows build" below).
+
+How it is arranged: modules that were Windows from top to bottom have a Mac twin in
+`native/src/mac/` (`clipboard.rs`, `dialogs.rs`, `tray.rs`, `dwrite.rs`), chosen in `main.rs` and
+`ui/mod.rs` with `#[cfg_attr(target_os = "macos", path = ...)]`, so nothing that calls them
+changes. Files with only a line or two of Windows in them carry a `cfg` at that spot.
+`process::quiet` replaces each `creation_flags(CREATE_NO_WINDOW)`.
+
+What else changed for the Mac, beyond the table:
+
+- **The window keeps the system's frame**: a transparent title bar over our own (Electron's
+  `titleBarStyle: 'hidden'`), so the traffic lights, rounded corners, shadow and resize edges
+  are the system's. `screen::TRAFFIC_LIGHTS` leaves room for them; the drawn Windows caption
+  buttons and the hand-rolled resize edges are off on a Mac.
+- **Shortcuts use ⌘** where Windows uses Ctrl (`App::command_key`), and Cmd-click multi-selects.
+  Ctrl-click is a right click. In text fields Option moves by word and ⌘ to the ends of the line,
+  and Option types characters rather than being swallowed as a shortcut.
+- **Cmd+Q saves**: AppKit ends the process itself, which winit reports only as `exiting`, so
+  the app flushes its document there.
+- **Fonts**: SF Pro, SF Mono and Arial, with Apple Symbols for the stars; family names are read
+  from the files. Glyphs come from swash (grayscale), which is how macOS draws text anyway.
+- **Profile**: `~/Library/Application Support/umakbang/umakbang-data.json`, where Electron kept
+  it, and the database in `~/Library/Application Support/umakbang-native/library.db`. A `data`
+  folder beside `umakbang.app` makes a copy portable.
+- **Menu bar item** (`tray-icon`), a LaunchAgent for the login item
+  (`~/Library/LaunchAgents/dev.umakbang.native.plist`), one copy per profile through a socket
+  in `$TMPDIR`, and the Dock's reopen event brings a hidden window back.
+- **Updates**: `umakbang-native-<version>-mac-arm64.zip` / `-mac-x64.zip`, checksum required as
+  on Windows; the bundle inside must be signed by the same team as the running copy; "Restart
+  to update" swaps the `.app` and reopens it, putting the old one back if the copy fails.
+- **Packaging**: `native/tools/bundle-mac.sh` makes the `.app` (bundle id `dev.umakbang.app`,
+  hardened runtime), the zip, its `.sha256` and a dmg. `.github/workflows/release.yml` has a
+  `mac` job that builds both architectures after the Windows job and uploads into the same
+  release. It signs when `MAC_CERT_P12` / `MAC_CERT_PASSWORD` are set and notarises when
+  `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` are set too.
+
+Not done yet:
+
+- **`shell_icon.rs`** has no Mac source of file-type icons, so rows draw the app's own glyphs.
+  `NSWorkspace.iconForContentType` is the call.
+- **Moving the Electron Mac users across automatically will not work as described below.** The
+  0.3.3 and 0.4.1 Mac releases are not Developer ID signed: they carry Electron's ad-hoc
+  signature (`Identifier=Electron`, `TeamIdentifier=not set`), so their designated requirement
+  is a hash of the Electron binary itself, and Squirrel.Mac will refuse any other bundle,
+  signed or not. Those users need to download the dmg once.
+- Not yet tried on Intel hardware, or against a real library.
+
+### Checking the Windows build from a Mac
+
+`cargo check --target x86_64-pc-windows-msvc` type-checks the Windows side, but three crates
+compile C in their build scripts and there are no Windows headers on a Mac. For a check (not a
+build) those objects are never linked, so a stand-in compiler that writes empty files is
+enough: point `CC_x86_64_pc_windows_msvc` and `AR_x86_64_pc_windows_msvc` at two short scripts
+that create whatever `-o` / `-out:` names.
+
+
 For whoever builds the Mac version of the native app. Everything needed is in this repository;
 nothing has been deleted to make room for the native app.
 

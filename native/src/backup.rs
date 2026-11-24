@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(doc["settings"]["lalalKey"], json!("secret"));
         assert_eq!(doc["settings"]["themePrimary"], json!("#123456"));
         assert_eq!(doc["tags"][r"C:\x.wav"], json!(["old"]));
-        assert_eq!(doc["tags"][format!(r"{target}\a.wav")], json!(["new"]));
+        assert_eq!(doc["tags"][format!("{target}{}a.wav", std::path::MAIN_SEPARATOR)], json!(["new"]));
         assert_eq!(doc["settings"]["roots"][0]["label"], json!("My Library"));
         assert_eq!((kept.tags, kept.ratings, opened.len()), (1, 1, 1));
         let _ = std::fs::remove_dir_all(&dir);

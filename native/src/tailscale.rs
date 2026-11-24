@@ -32,10 +32,19 @@ pub struct Status {
     pub peers: Vec<Node>,
 }
 
+#[cfg(windows)]
 const CANDIDATES: [&str; 2] = [r"C:\Program Files\Tailscale\tailscale.exe", r"C:\Program Files (x86)\Tailscale\tailscale.exe"];
+#[cfg(windows)]
+const ON_PATH: &str = "tailscale.exe";
+/// The App Store and standalone apps both carry the CLI inside the bundle; Homebrew's
+/// `tailscale` formula puts it on the PATH instead.
+#[cfg(not(windows))]
+const CANDIDATES: [&str; 3] = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"];
+#[cfg(not(windows))]
+const ON_PATH: &str = "tailscale";
 
 fn binary() -> String {
-    CANDIDATES.iter().find(|c| std::path::Path::new(c).exists()).map_or_else(|| "tailscale.exe".to_string(), |c| c.to_string())
+    CANDIDATES.iter().find(|c| std::path::Path::new(c).exists()).map_or_else(|| ON_PATH.to_string(), |c| c.to_string())
 }
 
 fn node(id: &str, raw: &Value) -> Node {
@@ -56,11 +65,8 @@ fn failed(state: State, reason: &str) -> Status {
 
 /// Five seconds at most: a wedged daemon is a reason to say so, not to hang.
 pub fn read() -> Status {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let child = Command::new(binary())
+    let child = crate::process::quiet(&mut Command::new(binary()))
         .args(["status", "--json"])
-        .creation_flags(CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

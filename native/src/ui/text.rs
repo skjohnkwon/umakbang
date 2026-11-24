@@ -67,6 +67,63 @@ pub struct Text {
     shaped: HashMap<Key, Shaped>,
     raster: Option<Raster>,
     blend: Blend,
+    /// The family names `Font::Sans`, `Font::Mono` and `Font::Arial` resolve to here.
+    families: [String; 3],
+}
+
+/// Segoe UI, Cascadia Mono and Arial, from the Windows fonts folder - only their files, not
+/// every font on the system.
+#[cfg(windows)]
+fn load_fonts(db: &mut fontdb::Database) -> [String; 3] {
+    let fonts_dir = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
+    // The italics too: without them an italic line is set upright, as nothing says so.
+    for file in ["segoeui.ttf", "seguisb.ttf", "segoeuib.ttf", "segoeuii.ttf", "seguisbi.ttf", "segoeuiz.ttf", "seguisym.ttf", "CascadiaMono.ttf", "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"] {
+        let _ = db.load_font_file(format!("{fonts_dir}\\{file}"));
+    }
+    ["Segoe UI".into(), "Cascadia Mono".into(), "Arial".into()]
+}
+
+/// What Chromium resolves the same stacks to on a Mac: `system-ui` is SF Pro, `ui-monospace`
+/// SF Mono, and Arial is in Supplemental. Apple Symbols carries the rating stars. The family
+/// names are read back from the files, since Apple's internal names change between releases.
+#[cfg(target_os = "macos")]
+fn load_fonts(db: &mut fontdb::Database) -> [String; 3] {
+    let sets: [(&[&str], &str); 3] = [
+        (&["/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/SFNSItalic.ttf"], "Helvetica Neue"),
+        (&["/System/Library/Fonts/SFNSMono.ttf", "/System/Library/Fonts/SFNSMonoItalic.ttf"], "Menlo"),
+        (
+            &[
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf",
+            ],
+            "Helvetica",
+        ),
+    ];
+    let mut families: [String; 3] = Default::default();
+    for (slot, (files, fallback)) in sets.iter().enumerate() {
+        let before = db.len();
+        for file in *files {
+            let _ = db.load_font_file(file);
+        }
+        let loaded = db.faces().skip(before).next().and_then(|f| f.families.first().map(|(name, _)| name.clone()));
+        families[slot] = match loaded {
+            Some(name) => name,
+            None => {
+                // The fallback family lives in a collection beside it.
+                let file = match *fallback {
+                    "Helvetica Neue" => "/System/Library/Fonts/HelveticaNeue.ttc",
+                    "Menlo" => "/System/Library/Fonts/Menlo.ttc",
+                    _ => "/System/Library/Fonts/Helvetica.ttc",
+                };
+                let _ = db.load_font_file(file);
+                fallback.to_string()
+            }
+        };
+    }
+    let _ = db.load_font_file("/System/Library/Fonts/Apple Symbols.ttf");
+    families
 }
 
 /// Chromium draws `font-weight: 500` in Segoe UI as Semibold: the family has no medium, and
@@ -83,14 +140,10 @@ fn face_weight(weight: u16) -> u16 {
 impl Text {
     pub fn new() -> Text {
         let mut db = fontdb::Database::new();
-        let fonts_dir = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-        // The italics too: without them an italic line is set upright, as nothing says so.
-        for file in ["segoeui.ttf", "seguisb.ttf", "segoeuib.ttf", "segoeuii.ttf", "seguisbi.ttf", "segoeuiz.ttf", "seguisym.ttf", "CascadiaMono.ttf", "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"] {
-            let _ = db.load_font_file(format!("{fonts_dir}\\{file}"));
-        }
-        db.set_sans_serif_family("Segoe UI");
+        let families = load_fonts(&mut db);
+        db.set_sans_serif_family(families[0].clone());
         let fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
-        Text { fonts, glyphs: SwashCache::new(), shaped: HashMap::new(), raster: Raster::new(), blend: Blend::new() }
+        Text { fonts, glyphs: SwashCache::new(), shaped: HashMap::new(), raster: Raster::new(), blend: Blend::new(), families }
     }
 
     fn key(text: &str, style: &TextStyle) -> Key {
@@ -123,9 +176,9 @@ impl Text {
             }
             let mut attrs = Attrs::new()
                 .family(Family::Name(match style.font {
-                    Font::Sans => "Segoe UI",
-                    Font::Mono => "Cascadia Mono",
-                    Font::Arial => "Arial",
+                    Font::Sans => &self.families[0],
+                    Font::Mono => &self.families[1],
+                    Font::Arial => &self.families[2],
                 }))
                 .style(if style.italic { cosmic_text::Style::Italic } else { cosmic_text::Style::Normal })
                 .weight(Weight(face_weight(style.weight)))

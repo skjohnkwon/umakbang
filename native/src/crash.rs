@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 /// The dump's path, wide and NUL-terminated, made before anything can go wrong: the filter
 /// runs on a broken process and should not have to allocate to name a file.
+#[cfg_attr(not(windows), allow(dead_code))]
 static DUMP: OnceLock<Vec<u16>> = OnceLock::new();
 
 const KEEP: usize = 5;
@@ -54,11 +55,15 @@ pub fn install(dir: &Path) {
         previous(info);
     }));
 
+    // On a Mac a native fault is written up by the system itself, in
+    // ~/Library/Logs/DiagnosticReports; only the panic hook above is ours.
+    #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Diagnostics::Debug::SetUnhandledExceptionFilter(Some(on_fault));
     }
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn on_fault(pointers: *const windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL};

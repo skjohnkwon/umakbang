@@ -24,6 +24,21 @@ use std::time::Duration;
 
 const FEED: &str = include_str!("../../electron-builder.yml");
 
+/// The release asset this build updates from, by its name's ending; a `.sha256` of the same
+/// name beside it is required.
+#[cfg(windows)]
+const ASSET: &str = "win-x64.exe";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const ASSET: &str = "mac-arm64.zip";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const ASSET: &str = "mac-x64.zip";
+
+/// What a staged download is saved as: the exe itself on Windows, the zipped bundle on a Mac.
+#[cfg(windows)]
+const STAGED_EXT: &str = "exe";
+#[cfg(not(windows))]
+const STAGED_EXT: &str = "zip";
+
 #[derive(Clone, Debug, Default)]
 pub enum Status {
     #[default]
@@ -31,7 +46,7 @@ pub enum Status {
     Disabled(String),
     Checking,
     UpToDate,
-    /// A newer version, with no native Windows build attached to it.
+    /// A newer version, with no native build for this platform attached to it.
     NoBuild(String),
     Downloading(String, f32),
     /// Downloaded and verified: the version, waiting for a restart.
@@ -81,9 +96,14 @@ fn feed() -> Option<(String, String)> {
 /// Why this copy will not update itself, if it will not.
 pub fn disabled_reason() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    let lower = exe.to_string_lossy().to_lowercase();
-    if lower.contains("\\target\\release\\") || lower.contains("\\target\\debug\\") {
+    let lower = exe.to_string_lossy().to_lowercase().replace('\\', "/");
+    if lower.contains("/target/release/") || lower.contains("/target/debug/") {
         return Some("Updates are off: this is a development build. Install umakbang to get them.".into());
+    }
+    // On a Mac an update replaces the whole `.app`; a bare binary has no bundle to replace.
+    #[cfg(target_os = "macos")]
+    if bundle_of(&exe).is_none() {
+        return Some("Updates are off: this copy is not running from umakbang.app.".into());
     }
     // `UMAKBANG_UPDATE_FEED=<base url>` stands in for api.github.com in a test, and is the
     // one way a test copy is allowed to update.
@@ -135,9 +155,14 @@ fn clear_old(dir: &Path) {
     let current = version(env!("CARGO_PKG_VERSION"));
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let staged = name.strip_prefix("umakbang-").and_then(|n| n.strip_suffix(".exe")).map(version);
+        let staged = name.strip_prefix("umakbang-").map(|n| n.trim_end_matches(".exe").trim_end_matches(".zip")).map(version);
         if name.ends_with(".part") || staged.is_some_and(|v| v <= current) {
-            let _ = std::fs::remove_file(entry.path());
+            // A Mac update is unpacked into a folder of the same name beside its zip.
+            if entry.path().is_dir() {
+                let _ = std::fs::remove_dir_all(entry.path());
+            } else {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }
@@ -167,14 +192,15 @@ fn check(dir: &Path, changed: &dyn Fn()) {
         }
         let assets = release["assets"].as_array().cloned().unwrap_or_default();
         let find = |pred: &dyn Fn(&str) -> bool| assets.iter().find(|a| a["name"].as_str().is_some_and(pred)).and_then(|a| a["browser_download_url"].as_str().map(str::to_string));
-        let Some(exe_url) = find(&|n: &str| n.starts_with("umakbang-native") && n.ends_with("win-x64.exe")) else { return Ok(Status::NoBuild(latest)) };
+        let sum_name = format!("{ASSET}.sha256");
+        let Some(exe_url) = find(&|n: &str| n.starts_with("umakbang-native") && n.ends_with(ASSET)) else { return Ok(Status::NoBuild(latest)) };
         // Never installed unverified: no checksum published, no update.
-        let Some(sum_url) = find(&|n: &str| n.starts_with("umakbang-native") && n.ends_with("win-x64.exe.sha256")) else { return Ok(Status::NoBuild(latest)) };
+        let Some(sum_url) = find(&|n: &str| n.starts_with("umakbang-native") && n.ends_with(&sum_name)) else { return Ok(Status::NoBuild(latest)) };
         let mut sum_response = agent(Duration::from_secs(20)).get(&sum_url).header("User-Agent", "umakbang-updater").call().map_err(|e| e.to_string())?;
         let expected = sum_response.body_mut().read_to_string().map_err(|e| e.to_string())?.split_whitespace().next().unwrap_or("").to_lowercase();
         let _ = std::fs::create_dir_all(dir);
-        let target = dir.join(format!("umakbang-{latest}.exe"));
-        let part = dir.join(format!("umakbang-{latest}.exe.part"));
+        let target = dir.join(format!("umakbang-{latest}.{STAGED_EXT}"));
+        let part = dir.join(format!("umakbang-{latest}.{STAGED_EXT}.part"));
         let response = agent(Duration::from_secs(1800)).get(&exe_url).header("User-Agent", "umakbang-updater").call().map_err(|e| format!("Download failed: {e}"))?;
         let total = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let mut reader = response.into_body().into_reader();
@@ -201,6 +227,9 @@ fn check(dir: &Path, changed: &dyn Fn()) {
             return Err("The download did not match its published checksum, so it was thrown away.".into());
         }
         std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
+        // On a Mac the staged thing is the unpacked bundle, checked before it is offered.
+        #[cfg(target_os = "macos")]
+        let target = mac::unpack_and_verify(&target, &latest)?;
         if let Ok(mut s) = STAGED.lock() {
             *s = Some((latest.clone(), target));
         }
@@ -215,13 +244,110 @@ fn check(dir: &Path, changed: &dyn Fn()) {
 pub fn restart_into_update(args: &[String]) -> bool {
     let Some((_, staged)) = STAGED.lock().ok().and_then(|s| s.clone()) else { return false };
     let Ok(current) = std::env::current_exe() else { return false };
+    // On a Mac what is replaced is the bundle, and what runs the hand-over is the staged
+    // bundle's own executable.
+    #[cfg(target_os = "macos")]
+    let (staged, current) = match (mac::executable_in(&staged), bundle_of(&current)) {
+        (Some(exe), Some(bundle)) => (exe, bundle),
+        _ => return false,
+    };
     let mut command = std::process::Command::new(&staged);
     command.arg("--apply-update").arg(&current).arg(std::process::id().to_string()).args(args);
     command.spawn().is_ok()
 }
 
+/// The `.app` bundle an executable sits in: `X.app/Contents/MacOS/x` -> `X.app`.
+#[cfg(target_os = "macos")]
+pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
+    let bundle = exe.parent()?.parent()?.parent()?;
+    (bundle.extension().is_some_and(|e| e == "app") && exe.parent()?.ends_with("Contents/MacOS")).then(|| bundle.to_path_buf())
+}
+
+/// The staged bundle's half on a Mac: waits for the old process to go, moves the old bundle
+/// aside, copies this bundle into its place, and opens it. If the copy fails the old bundle is
+/// put back, so umakbang always comes back.
+#[cfg(target_os = "macos")]
+pub fn apply(target: &Path, pid: u32, args: &[String]) {
+    // kill(pid, 0) answers whether the process is still there without touching it.
+    for _ in 0..120 {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let reopen = |bundle: &Path| {
+        let _ = std::process::Command::new("/usr/bin/open").arg("-n").arg(bundle).arg("--args").args(args).spawn();
+    };
+    let Some(me) = std::env::current_exe().ok().and_then(|e| bundle_of(&e)) else { return reopen(target) };
+    // Only ever a bundle, checked by name before anything is moved.
+    if target.extension().is_none_or(|e| e != "app") {
+        return reopen(target);
+    }
+    let aside = target.with_extension("app.old");
+    let _ = std::fs::remove_dir_all(&aside);
+    if std::fs::rename(target, &aside).is_err() {
+        return reopen(target);
+    }
+    let copied = std::process::Command::new("/usr/bin/ditto").arg(&me).arg(target).status().is_ok_and(|s| s.success());
+    if copied {
+        let _ = std::fs::remove_dir_all(&aside);
+    } else {
+        let _ = std::fs::remove_dir_all(target);
+        let _ = std::fs::rename(&aside, target);
+    }
+    reopen(target);
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::path::{Path, PathBuf};
+
+    /// `X.app/Contents/MacOS/<CFBundleExecutable>`.
+    pub fn executable_in(bundle: &Path) -> Option<PathBuf> {
+        let dir = bundle.join("Contents").join("MacOS");
+        std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).find(|p| p.is_file())
+    }
+
+    /// The Team ID a bundle is signed by, if it is signed.
+    fn team_of(bundle: &Path) -> Option<String> {
+        let out = std::process::Command::new("/usr/bin/codesign").arg("-dv").arg(bundle).output().ok()?;
+        // codesign writes its details to stderr.
+        String::from_utf8_lossy(&out.stderr).lines().find_map(|l| l.strip_prefix("TeamIdentifier=")).map(str::to_string).filter(|t| t != "not set")
+    }
+
+    /// Unzips the staged download beside it and checks the bundle inside: a valid signature,
+    /// and the same team as the running copy when the running copy is signed. Answers the
+    /// bundle's path.
+    pub fn unpack_and_verify(zip: &Path, version: &str) -> Result<PathBuf, String> {
+        let dir = zip.with_file_name(format!("umakbang-{version}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let unpacked = std::process::Command::new("/usr/bin/ditto").arg("-x").arg("-k").arg(zip).arg(&dir).status().is_ok_and(|s| s.success());
+        let _ = std::fs::remove_file(zip);
+        if !unpacked {
+            return Err("The update could not be unpacked.".into());
+        }
+        let bundle = std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "app")))
+            .ok_or("The update held no app.")?;
+        let current = std::env::current_exe().ok().and_then(|e| super::bundle_of(&e));
+        if let Some(team) = current.as_deref().and_then(team_of) {
+            let valid = std::process::Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&bundle).status().is_ok_and(|s| s.success());
+            if !valid || team_of(&bundle).as_deref() != Some(team.as_str()) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err("The update was not signed by the same developer, so it was thrown away.".into());
+            }
+        }
+        // Downloaded by this process, so it carries no quarantine flag; clear one anyway, as a
+        // flagged bundle opened from a script would be stopped by Gatekeeper.
+        let _ = std::process::Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine"]).arg(&bundle).status();
+        Ok(bundle)
+    }
+}
+
 /// The staged copy's half: waits for the old process to go, puts itself where it was, and
 /// starts it. Retried, because Windows can hold an exe open a moment after its process exits.
+#[cfg(windows)]
 pub fn apply(target: &Path, pid: u32, args: &[String]) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
@@ -248,26 +374,32 @@ pub fn apply(target: &Path, pid: u32, args: &[String]) {
 
 /* ------------------------------------------------------------------ installing */
 
+#[cfg(windows)]
 fn programs_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Programs").join("umakbang")
 }
 
+#[cfg(windows)]
 fn start_menu() -> PathBuf {
     std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join(r"Microsoft\Windows\Start Menu\Programs\umakbang.lnk")
 }
 
+#[cfg(windows)]
 fn desktop() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Desktop\umakbang.lnk")
 }
 
+#[cfg(windows)]
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\umakbang";
 
 /// Whether this run is the installer: `--install`, or a file name that says setup.
+#[cfg(windows)]
 pub fn is_setup(args: &[String]) -> bool {
     args.iter().any(|a| a == "--install")
         || std::env::current_exe().ok().and_then(|e| e.file_name().map(|n| n.to_string_lossy().to_lowercase())).is_some_and(|n| n.contains("setup"))
 }
 
+#[cfg(windows)]
 fn message(text: &str, flags: u32) -> i32 {
     use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
@@ -277,6 +409,7 @@ fn message(text: &str, flags: u32) -> i32 {
 
 /// A shortcut, made by the shell's own scripting object - the paths go through the
 /// environment rather than the command line, since a name with an apostrophe in it is normal.
+#[cfg(windows)]
 fn shortcut(at: &Path, target: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     std::process::Command::new("powershell.exe")
@@ -288,6 +421,7 @@ fn shortcut(at: &Path, target: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+#[cfg(windows)]
 fn set_reg(key: windows_sys::Win32::System::Registry::HKEY, name: &str, value: &str) {
     use windows_sys::Win32::System::Registry::{RegSetValueExW, REG_SZ};
     let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -295,6 +429,7 @@ fn set_reg(key: windows_sys::Win32::System::Registry::HKEY, name: &str, value: &
     unsafe { RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr() as *const u8, (data.len() * 2) as u32) };
 }
 
+#[cfg(windows)]
 fn set_reg_dword(key: windows_sys::Win32::System::Registry::HKEY, name: &str, value: u32) {
     use windows_sys::Win32::System::Registry::{RegSetValueExW, REG_DWORD};
     let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -304,6 +439,7 @@ fn set_reg_dword(key: windows_sys::Win32::System::Registry::HKEY, name: &str, va
 /// Installs this copy for the current user: `%LOCALAPPDATA%\Programs\umakbang\umakbang.exe`,
 /// a Start menu and a Desktop shortcut, and an entry under Apps that uninstalls it. Then
 /// starts it. Nothing needs administrator rights, the same as electron-builder's per-user NSIS.
+#[cfg(windows)]
 pub fn install() -> Result<PathBuf, String> {
     use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE};
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -349,6 +485,7 @@ pub fn install() -> Result<PathBuf, String> {
 /// `--uninstall`, from Apps: asked first, then the shortcuts, the start-at-login entry and the
 /// Apps entry go, and the program folder is removed once this process has let go of it. The
 /// library, the tags and the ratings are left exactly where they are.
+#[cfg(windows)]
 pub fn uninstall() {
     use windows_sys::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
     use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO};
@@ -373,6 +510,7 @@ pub fn uninstall() {
 }
 
 /// Setup's whole run: install, say so if it could not, start the installed copy.
+#[cfg(windows)]
 pub fn run_setup() {
     use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR;
     match install() {
@@ -384,6 +522,21 @@ pub fn run_setup() {
         }
     }
 }
+
+/// On a Mac the app is installed by dragging it out of the disk image; there is no setup run.
+#[cfg(not(windows))]
+pub fn is_setup(_args: &[String]) -> bool {
+    false
+}
+
+/// Uninstalling on a Mac is moving the app to the Bin; the login item goes with it below.
+#[cfg(not(windows))]
+pub fn uninstall() {
+    crate::tray::set_login_item(false, &[]);
+}
+
+#[cfg(not(windows))]
+pub fn run_setup() {}
 
 #[cfg(test)]
 mod tests {

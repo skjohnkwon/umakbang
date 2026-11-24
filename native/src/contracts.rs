@@ -208,7 +208,8 @@ fn preset_key(p: &Preset) -> String {
 }
 
 fn documents_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Documents")).unwrap_or_else(|| PathBuf::from("."))
+    let home = crate::portable::home();
+    if home.as_os_str().is_empty() { PathBuf::from(".") } else { home.join("Documents") }
 }
 
 /// `toISOString().slice(0, 19)`: UTC, to the second.
@@ -513,8 +514,14 @@ pub struct Fonts {
 
 impl Fonts {
     pub fn load() -> Option<Fonts> {
-        let dir = std::env::var("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts"));
-        let faces = ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"]
+        #[cfg(windows)]
+        let (dir, files) = (
+            std::env::var("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts")),
+            ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
+        );
+        #[cfg(not(windows))]
+        let (dir, files) = (PathBuf::from("/System/Library/Fonts/Supplemental"), ["Arial.ttf", "Arial Bold.ttf", "Arial Italic.ttf", "Arial Bold Italic.ttf"]);
+        let faces = files
             .iter()
             .map(|f| {
                 let path = dir.join(f);

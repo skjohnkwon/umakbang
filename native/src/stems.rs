@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn names_things() {
-        assert_eq!(folder_name_for(Path::new(r"C:\a\beat: one.wav")), "beat_ one");
+        assert_eq!(folder_name_for(&Path::new("a").join("beat: one.wav")), "beat_ one");
         assert!(content_disposition("ü.wav").contains("filename*=UTF-8''%C3%BC.wav"));
     }
 }

@@ -31,6 +31,10 @@ pub fn edit_field(s: &mut SearchBox, event: &KeyEvent, ctrl: bool, shift: bool, 
         let skip = rest.len() - rest.trim_start().len();
         at + skip + rest[skip..].find(char::is_whitespace).unwrap_or(rest.len() - skip)
     };
+    // Which modifier moves by word, and which to the ends of the line. `ctrl` is the command
+    // key: Ctrl on Windows, where it also moves by word; ⌘ on a Mac, where Option moves by word
+    // and ⌘ goes to the start or end.
+    let (word, line) = if cfg!(target_os = "macos") { (alt, ctrl) } else { (ctrl, false) };
     let (lo, hi) = (s.caret.min(s.anchor), s.caret.max(s.anchor));
     let remove = |s: &mut SearchBox, from: usize, to: usize| {
         s.value.replace_range(from..to, "");
@@ -44,7 +48,7 @@ pub fn edit_field(s: &mut SearchBox, event: &KeyEvent, ctrl: bool, shift: bool, 
             if lo != hi {
                 remove(s, lo, hi);
             } else if s.caret > 0 {
-                let from = if ctrl { word_left(&s.value, s.caret) } else { prev(&s.value, s.caret) };
+                let from = if line { 0 } else if word { word_left(&s.value, s.caret) } else { prev(&s.value, s.caret) };
                 remove(s, from, s.caret);
             }
         }
@@ -52,7 +56,7 @@ pub fn edit_field(s: &mut SearchBox, event: &KeyEvent, ctrl: bool, shift: bool, 
             if lo != hi {
                 remove(s, lo, hi);
             } else if s.caret < s.value.len() {
-                let to = if ctrl { word_right(&s.value, s.caret) } else { next(&s.value, s.caret) };
+                let to = if line { s.value.len() } else if word { word_right(&s.value, s.caret) } else { next(&s.value, s.caret) };
                 remove(s, s.caret, to);
             }
         }
@@ -63,9 +67,11 @@ pub fn edit_field(s: &mut SearchBox, event: &KeyEvent, ctrl: bool, shift: bool, 
                 // Without Shift, an arrow over a selection collapses it to that side.
                 Key::Named(NamedKey::ArrowLeft) if !shift && lo != hi => lo,
                 Key::Named(NamedKey::ArrowRight) if !shift && lo != hi => hi,
-                Key::Named(NamedKey::ArrowLeft) if ctrl => word_left(&s.value, s.caret),
+                Key::Named(NamedKey::ArrowLeft) if line => 0,
+                Key::Named(NamedKey::ArrowLeft) if word => word_left(&s.value, s.caret),
                 Key::Named(NamedKey::ArrowLeft) => prev(&s.value, s.caret),
-                _ if ctrl => word_right(&s.value, s.caret),
+                _ if line => s.value.len(),
+                _ if word => word_right(&s.value, s.caret),
                 _ => next(&s.value, s.caret),
             };
             s.caret = to;
@@ -96,7 +102,8 @@ pub fn edit_field(s: &mut SearchBox, event: &KeyEvent, ctrl: bool, shift: bool, 
             s.caret += pasted.len();
             s.anchor = s.caret;
         }
-        _ if ctrl || alt => return Edit::Ignored,
+        // Option on a Mac types characters (Option-e, Option-8); it is not a shortcut there.
+        _ if ctrl || (alt && !cfg!(target_os = "macos")) => return Edit::Ignored,
         _ => {
             let Some(typed) = event.text.as_ref().filter(|t| t.chars().all(|c| !c.is_control())) else { return Edit::Ignored };
             remove(s, lo, hi);
@@ -907,12 +914,7 @@ impl App {
         let Some(proxy) = self.proxy.clone() else { return };
         self.notify(format!("Unpacking {}…", archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
         std::thread::spawn(move || {
-            use std::os::windows::process::CommandExt;
-            let quote = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
-            let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Expand-Archive -LiteralPath {} -DestinationPath {} -Force", quote(&archive), quote(&target))])
-                .creation_flags(0x0800_0000)
-                .output();
+            let output = unpack_command(&archive, &target).output();
             let outcome = match output {
                 Ok(out) if out.status.success() => Ok(target),
                 Ok(out) => Err(format!("Could not unpack it: {}", String::from_utf8_lossy(&out.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("it failed").trim())),
@@ -1154,7 +1156,7 @@ impl App {
     /// The explorer's own keys for what the menu does: Delete, F2 (and Ctrl+Enter), the
     /// clipboard trio, Duplicate and New folder. True when the key was one of them.
     pub(super) fn file_key(&mut self, key: &Key) -> bool {
-        let ctrl = self.modifiers.control_key();
+        let ctrl = self.command_key();
         let shift = self.modifiers.shift_key();
         let has_selection = !self.state.selection.is_empty();
         let cmd = match key {
@@ -1200,9 +1202,28 @@ fn set_text(text: &str) {
     }
 }
 
+/// The command that unpacks a zip into `target`: Windows' own `Expand-Archive`, or on a Mac
+/// `ditto`, which is what Finder's Archive Utility uses and keeps names and permissions.
+#[cfg(windows)]
+fn unpack_command(archive: &Path, target: &Path) -> std::process::Command {
+    let quote = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &format!("Expand-Archive -LiteralPath {} -DestinationPath {} -Force", quote(archive), quote(target))]);
+    crate::process::quiet(&mut command);
+    command
+}
+
+#[cfg(not(windows))]
+fn unpack_command(archive: &Path, target: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/ditto");
+    command.arg("-x").arg("-k").arg(archive).arg(target);
+    command
+}
+
 /// Opens a file with whatever Windows has registered for it.
 /// ShellExecute's "open", which is what a double click in Explorer does - the file's own
 /// registered app, not Explorer guessing from a command line.
+#[cfg(windows)]
 pub(super) fn open_externally(path: &Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -1213,7 +1234,24 @@ pub(super) fn open_externally(path: &Path) {
     }
 }
 
+/// Opens a file in its default app, as a double click in Finder does.
+#[cfg(not(windows))]
+pub(super) fn open_externally(path: &Path) {
+    let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
+}
+
+/// Shows a path in Finder: selected inside its folder (`open -R`), or the folder itself.
+#[cfg(not(windows))]
+pub(super) fn reveal(path: &Path, select: bool) {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if select {
+        command.arg("-R");
+    }
+    let _ = command.arg(path).spawn();
+}
+
 /// Shows a path in Explorer: selected inside its folder, or the folder itself.
+#[cfg(windows)]
 pub(super) fn reveal(path: &Path, select: bool) {
     let mut command = std::process::Command::new("explorer.exe");
     if select {
@@ -1361,7 +1399,7 @@ impl App {
 
     /// Keys while the tag editor is open. Escape keeps a half-typed tag rather than losing it.
     pub(super) fn tag_key(&mut self, event: &KeyEvent) {
-        let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+        let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
         let Some(editor) = self.state.tag_editor.as_mut() else { return };
         match &event.logical_key {
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
@@ -1436,7 +1474,7 @@ impl App {
     /// Keys in a Notes cell: they are the cell's, so a "3" in a note does not rate the file.
     /// Each change is saved as it is typed; an emptied note is deleted rather than kept as "".
     pub(super) fn note_key(&mut self, event: &KeyEvent) {
-        let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+        let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
         let Some((path, field)) = self.state.note_edit.as_mut() else { return };
         let before = field.value.clone();
         match edit_field(field, event, ctrl, shift, alt) {

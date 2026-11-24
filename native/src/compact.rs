@@ -34,7 +34,7 @@ pub fn mini(s: &State, t: &Theme, viewport: (f32, f32)) -> El<Action> {
         .shrink0()
         .items_center()
         .gap(6.0)
-        .pl(6.0)
+        .pl(6.0 + crate::screen::TRAFFIC_LIGHTS)
         .bg(t.background)
         .child(div().size(24.0, 24.0).items_center().justify_center().rounded(6.0).hover_bg(t.accent).on(Action::Tool("mini-exit")).child(icon("maximize2", 14.0, t.foreground)))
         .child(div().grow().h_full().on(Action::Drag).items_center().child(crate::screen::logo(t.primary.alpha(0.6), 14.0)))

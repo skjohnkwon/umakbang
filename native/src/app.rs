@@ -216,6 +216,8 @@ pub struct App {
     volume_close_at: Option<Instant>,
     cursor_icon: CursorIcon,
     modifiers: ModifiersState,
+    /// A Mac Ctrl-click in progress: its release is a right click's, whatever Ctrl does meanwhile.
+    ctrl_click: bool,
     /// Which folders the tree has open; the virtual Library starts open, as
     /// `useState(new Set(['']))` does.
     tree_open: HashSet<i64>,
@@ -489,6 +491,7 @@ impl App {
             volume_close_at: None,
             cursor_icon: CursorIcon::Default,
             modifiers: ModifiersState::empty(),
+            ctrl_click: false,
             tree_open: HashSet::from([crate::library::LIBRARY]),
             search_tx: None,
             search_shared: Arc::new(RwLock::new(crate::search::Shared::default())),
@@ -1019,7 +1022,7 @@ impl App {
 
     fn form_key(&mut self, event: &KeyEvent) {
         let Some(key) = self.state.form.focus else { return };
-        let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+        let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
         let before = self.state.form.value(key).to_string();
         let in_dialog = self.state.contracts.draft.is_some();
         if Self::is_area(key) {
@@ -1202,10 +1205,10 @@ impl App {
     fn may_register() -> bool {
         let temp = std::env::temp_dir();
         // Never a portable copy either: it would try to start from a stick that has gone home.
-        // Nor a development build, which would leave Windows starting whatever was last built.
+        // Nor a development build, which would leave the OS starting whatever was last built at login.
         let dev = std::env::current_exe().is_ok_and(|exe| {
-            let lower = exe.to_string_lossy().to_lowercase();
-            lower.contains(r"\target\release\") || lower.contains(r"\target\debug\")
+            let lower = exe.to_string_lossy().to_lowercase().replace('\\', "/");
+            lower.contains("/target/release/") || lower.contains("/target/debug/")
         });
         std::env::var("UMAKBANG_SERVE").is_err() && std::env::current_exe().is_ok_and(|exe| !exe.starts_with(&temp)) && !crate::portable::is_portable() && !dev
     }
@@ -2357,7 +2360,7 @@ impl App {
             self.shortcut_refused = None;
         } else if matches!(key, Key::Named(NamedKey::Control | NamedKey::Shift | NamedKey::Alt | NamedKey::Super)) {
             return;
-        } else if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+        } else if self.command_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
             self.shortcut_refused = Some("Only keys without Ctrl, ⌘ or Alt can be changed here.".into());
         } else if let Some(name) = Self::key_name(key) {
             match crate::keys::shortcut_conflict(&self.data.settings.shortcuts, id, &name) {
@@ -2376,7 +2379,7 @@ impl App {
     /// `matchesShortcut`: which of the rebindable actions a bare key means, and whether the key
     /// is the old default of one that has been moved elsewhere (which then does nothing).
     fn shortcut_for(&self, key: &Key) -> (Option<&'static str>, bool) {
-        if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+        if self.command_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
             return (None, false);
         }
         let Some(name) = Self::key_name(key).map(|n| n.to_lowercase()) else { return (None, false) };
@@ -3111,7 +3114,7 @@ impl App {
     /// Keys for the link field. Enter downloads when there is something to download.
     fn youtube_key(&mut self, event: &KeyEvent) {
         let before = self.state.youtube.link.value.clone();
-        let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+        let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
         match ops::edit_field(&mut self.state.youtube.link, event, ctrl, shift, alt) {
             ops::Edit::Enter => self.start_download(),
             ops::Edit::Escape => self.state.youtube.link.focused = false,
@@ -4027,7 +4030,7 @@ impl App {
                     match what {
                         0 => {
                             if let Some(pdf) = &record.pdf_path {
-                                let _ = std::process::Command::new("explorer.exe").arg(pdf).spawn();
+                                ops::open_externally(std::path::Path::new(pdf));
                             }
                         }
                         1 => {
@@ -4367,7 +4370,7 @@ impl App {
                     // OS file manager.
                     None => {
                         if let Some(quick) = self.state.quick.get(index) {
-                            let _ = std::process::Command::new("explorer.exe").arg(&quick.path).spawn();
+                            ops::reveal(std::path::Path::new(&quick.path), false);
                         }
                     }
                 }
@@ -4654,7 +4657,7 @@ impl App {
     /// folder navigates in, a file plays - as does a double click. Ctrl toggles a row, Shift
     /// extends from the last one pressed.
     fn press_row(&mut self, index: usize, double: bool) {
-        let ctrl = self.modifiers.control_key();
+        let ctrl = self.command_key();
         let shift = self.modifiers.shift_key();
         if shift {
             let anchor = self.state.focus.unwrap_or(index);
@@ -4727,7 +4730,7 @@ impl App {
     /// Editing keys while the search box has the keyboard. True when the key was its.
     fn search_key(&mut self, event: &KeyEvent) -> bool {
         let before = self.state.search.value.clone();
-        let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+        let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
         match ops::edit_field(&mut self.state.search, event, ctrl, shift, alt) {
             // Escape empties the box and lets go of the keyboard, as `setQuery('')` and
             // `blur()` do.
@@ -4745,7 +4748,7 @@ impl App {
     /// Keys while something floats over the explorer: it has them all. True when one did.
     fn overlay_key(&mut self, event: &KeyEvent) -> bool {
         if self.state.prompt.is_some() {
-            let (ctrl, shift, alt) = (self.modifiers.control_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
+            let (ctrl, shift, alt) = (self.command_key(), self.modifiers.shift_key(), self.modifiers.alt_key());
             let Some(prompt) = self.state.prompt.as_mut() else { return false };
             match ops::edit_field(&mut prompt.field, event, ctrl, shift, alt) {
                 ops::Edit::Escape => self.state.prompt = None,
@@ -5239,10 +5242,10 @@ impl App {
                     self.state.selection.clear();
                 }
             }
-            Key::Character(c) if c.as_str() == "a" && self.modifiers.control_key() => {
+            Key::Character(c) if c.as_str() == "a" && self.command_key() => {
                 self.state.selection = (0..total).collect();
             }
-            Key::Character(c) if !self.modifiers.control_key() && c.len() == 1 && ("0".."6").contains(&c.as_str()) => {
+            Key::Character(c) if !self.command_key() && c.len() == 1 && ("0".."6").contains(&c.as_str()) => {
                 let stars: u8 = c.parse().unwrap_or(0);
                 let paths: Vec<String> = self
                     .state
@@ -5325,7 +5328,16 @@ impl App {
     }
 
     /// Which window edge the pointer is on, if any. A maximised window has none.
+    /// The shortcut modifier: Ctrl on Windows, ⌘ on a Mac (where Ctrl-click is a right click).
+    pub(crate) fn command_key(&self) -> bool {
+        if cfg!(target_os = "macos") { self.modifiers.super_key() } else { self.modifiers.control_key() }
+    }
+
     fn edge(&self) -> Option<ResizeDirection> {
+        // A Mac window keeps its system frame, which resizes from its own edges.
+        if cfg!(target_os = "macos") {
+            return None;
+        }
         let window = self.window.as_ref()?;
         if window.is_maximized() {
             return None;
@@ -5644,6 +5656,13 @@ fn format_size(bytes: i64) -> String {
 }
 
 impl ApplicationHandler<Wake> for App {
+    /// Quitting from the Mac's app menu or Dock (Cmd+Q) ends the process through AppKit, which
+    /// winit reports here and nowhere else; what has not been written yet is written now.
+    #[cfg(target_os = "macos")]
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.flush_doc();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -5653,8 +5672,16 @@ impl ApplicationHandler<Wake> for App {
             .with_inner_size(LogicalSize::new(1360.0, 860.0))
             .with_min_inner_size(LogicalSize::new(900.0, 560.0))
             // The title bar is ours, as it is in the Electron app; the OS keeps the resize edges.
-            .with_decorations(false)
+            .with_decorations(cfg!(target_os = "macos"))
             .with_visible(!self.start_hidden);
+        // On a Mac the title bar is still ours, but drawn under a transparent system one, so the
+        // traffic lights, the rounded corners and the shadow are the system's own (Electron's
+        // `titleBarStyle: 'hidden'`).
+        #[cfg(target_os = "macos")]
+        let attributes = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
+        };
         let window = Rc::new(event_loop.create_window(attributes).expect("window"));
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -6017,6 +6044,16 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // On a Mac, Ctrl-click is the right click: the context menu, not a multi-select.
+        let event = match event {
+            WindowEvent::MouseInput { device_id, state, button: MouseButton::Left }
+                if cfg!(target_os = "macos") && (if state == ElementState::Pressed { self.modifiers.control_key() } else { self.ctrl_click }) =>
+            {
+                self.ctrl_click = state == ElementState::Pressed;
+                WindowEvent::MouseInput { device_id, state, button: MouseButton::Right }
+            }
+            other => other,
+        };
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
@@ -6281,10 +6318,10 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
-                    && self.modifiers.control_key()
+                    && self.command_key()
                     && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("f")) =>
             {
-                // Ctrl+F, the View menu's Focus Search: focus it with everything selected.
+                // Ctrl+F (⌘F on a Mac), the View menu's Focus Search: focus it with everything selected.
                 let s = &mut self.state.search;
                 s.focused = true;
                 s.anchor = 0;

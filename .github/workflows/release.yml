@@ -2,7 +2,7 @@
 #
 # umakbang is the Rust app in native/ since 0.5.0; the Electron build this file used to run is
 # kept in the repository as the reference implementation and is no longer released. Push a tag
-# matching native/Cargo.toml and the Windows build is made, checked and published from it:
+# matching native/Cargo.toml and the Windows and Mac builds are made, checked and published from it:
 #
 #   edit native/Cargo.toml's version, add the entry to native/assets/changelog.json
 #   git commit -am "0.5.0" && git push
@@ -113,3 +113,88 @@ jobs:
               gh release download "$previous" -p "$manifest" -D . --clobber && gh release upload "$TAG" "$manifest" || true
             fi
           done
+
+  # The Mac build, into the same release once the Windows job has made it. Apple silicon and
+  # Intel are built on one runner from the same commit, each as its own zip (what the updater
+  # installs: `umakbang-native-<version>-mac-<arch>.zip` and its `.sha256`) and disk image
+  # (what a first install opens). See native/tools/bundle-mac.sh and docs/macos-port.md.
+  mac:
+    needs: windows
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Test
+        working-directory: native
+        run: cargo test --release --locked
+
+      - name: Build
+        working-directory: native
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      # The Developer ID Application certificate, as the Electron workflow imports it. Without
+      # the secret the app is signed ad hoc: it runs, but Gatekeeper stops it on other Macs
+      # until it is opened from the context menu, and the updater's same-team check has
+      # nothing to compare.
+      - name: Import the signing certificate
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERT_P12" ]; then
+            echo "No MAC_CERT_P12 secret; the app will be signed ad hoc."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MAC_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MAC_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "MAC_SIGN_IDENTITY=Developer ID Application: Jung Ho Kwon (8CXYS29KVP)" >> "$GITHUB_ENV"
+
+      # Notarised only when all three Apple ID secrets are there too.
+      - name: Bundle, sign and package
+        working-directory: native
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mkdir -p ../out/arm64 ../out/x64
+          tools/bundle-mac.sh target/aarch64-apple-darwin/release/umakbang-native arm64 ../out/arm64
+          tools/bundle-mac.sh target/x86_64-apple-darwin/release/umakbang-native x64 ../out/x64
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${TAG#v}
+          files=()
+          for arch in arm64 x64; do
+            files+=("out/$arch/umakbang-native-$version-mac-$arch.zip" "out/$arch/umakbang-native-$version-mac-$arch.zip.sha256" "out/$arch/umakbang-$version-mac-$arch.dmg")
+          done
+          gh release upload "$TAG" --clobber "${files[@]}"
+          body=$(gh release view "$TAG" --json body --jq .body)
+          if ! printf '%s' "$body" | grep -q 'mac-arm64.dmg'; then
+            printf '%s\n\nNew install on a Mac: open `umakbang-%s-mac-arm64.dmg` (Apple silicon) or `umakbang-%s-mac-x64.dmg` (Intel) and drag umakbang to Applications.\n' "$body" "$version" "$version" > notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi

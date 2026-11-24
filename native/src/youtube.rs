@@ -7,17 +7,22 @@
 //! before the next download, with the file's own mtime as the clock.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+#[cfg(windows)]
 const RELEASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+/// The universal macOS build: one file, runs on Apple silicon and Intel.
+#[cfg(target_os = "macos")]
+const RELEASE_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+#[cfg(windows)]
+const TOOL_NAME: &str = "yt-dlp.exe";
+#[cfg(not(windows))]
+const TOOL_NAME: &str = "yt-dlp";
 const STALE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// `CREATE_NO_WINDOW`: without it every call flashes a console over the app.
-const NO_WINDOW: u32 = 0x0800_0000;
 
 /// Where the files go: the Electron page's `DOWNLOAD_DIR` on the machine that has it, otherwise
 /// the YT2MP3 fallback folder from Settings, then the OS Downloads folder. That folder used to
@@ -73,7 +78,7 @@ impl Downloader {
     }
 
     fn tool(&self) -> PathBuf {
-        self.tools.join("yt-dlp.exe")
+        self.tools.join(TOOL_NAME)
     }
 
     pub fn status(&self, send: impl Fn(Event) + Send + 'static) {
@@ -91,7 +96,7 @@ impl Downloader {
                 let response = ureq::get(RELEASE_URL).call().map_err(|e| format!("Could not reach the release: {e}"))?;
                 let total = response.body().content_length().unwrap_or(0);
                 let mut reader = response.into_body().into_reader();
-                let part = tool.with_extension("exe.part");
+                let part = tool.with_file_name(format!("{TOOL_NAME}.part"));
                 let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
                 let (mut seen, mut buf) = (0u64, vec![0u8; 64 * 1024]);
                 loop {
@@ -106,6 +111,11 @@ impl Downloader {
                     }
                 }
                 drop(out);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+                }
                 let _ = std::fs::remove_file(&tool);
                 std::fs::rename(&part, &tool).map_err(|e| e.to_string())
             })();
@@ -197,7 +207,7 @@ impl Downloader {
 
 fn command(tool: &Path) -> Command {
     let mut c = Command::new(tool);
-    c.creation_flags(NO_WINDOW).stdin(Stdio::null());
+    crate::process::quiet(&mut c).stdin(Stdio::null());
     c
 }
 

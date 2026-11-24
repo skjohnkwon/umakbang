@@ -3,6 +3,7 @@
 //! docs/native-rewrite.md for why it is CPU-drawn and why it is ours.
 
 pub mod color;
+#[cfg_attr(target_os = "macos", path = "../mac/dwrite.rs")]
 pub mod dwrite;
 pub mod icons;
 pub mod text;

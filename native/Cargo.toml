@@ -13,11 +13,9 @@ rusqlite = { version = "0.43.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order"] }
 softbuffer = "0.4.8"
-notify = { version = "8", default-features = false }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 taffy = "0.15.1"
 trash = "5"
-windows = { version = "0.62.2", features = ["Win32_Graphics_DirectWrite", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell_Common", "Win32_System_Com"] }
-windows-sys = { version = "0.61.2", features = ["Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Com", "Win32_System_Time", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_SystemInformation"] }
 winit = "0.30.13"
 ureq = "3"
 zune-jpeg = "0.5.15"
@@ -31,6 +29,18 @@ tiny_http = "0.12"
 flate2 = "1.1.11"
 sha2 = "0.11.1"
 sha1 = "0.11.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_DirectWrite", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Com", "Win32_System_Time", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_SystemInformation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSData", "NSDictionary", "NSValue", "NSGeometry", "NSFileManager", "NSError", "NSObject"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSApplication", "NSRunningApplication", "NSResponder", "NSView", "NSWindow"] }
+rfd = { version = "0.15", default-features = false }
+tray-icon = "0.21"
 
 [profile.release]
 opt-level = 3

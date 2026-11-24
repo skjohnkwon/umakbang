@@ -86,6 +86,7 @@ pub fn describe(path: &Path, dir: &str) -> Option<FileRow> {
 
 /// The OS Downloads folder, wherever the user has moved it - what `app.getPath('downloads')`
 /// answers.
+#[cfg(windows)]
 pub fn downloads_dir() -> Option<std::path::PathBuf> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
@@ -103,6 +104,12 @@ pub fn downloads_dir() -> Option<std::path::PathBuf> {
         }
     }
     std::env::var("USERPROFILE").ok().map(|home| Path::new(&home).join("Downloads"))
+}
+
+/// `~/Downloads`: macOS never moves it, it only localises the name Finder shows.
+#[cfg(not(windows))]
+pub fn downloads_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| Path::new(&home).join("Downloads"))
 }
 
 /// The Downloads folder's indexable files, newest first: listed on demand, never indexed - it

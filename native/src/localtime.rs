@@ -2,11 +2,14 @@
 //! system locale, which on this machine is en-US - "Nov 07, 2021 03:45 PM", the year left off
 //! inside the current one. ICU puts a narrow no-break space before the day period, drawn here as a space.
 
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+#[cfg(windows)]
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+#[cfg(windows)]
 fn local(ms: f64) -> Option<SYSTEMTIME> {
     // FILETIME counts 100ns intervals from 1601.
     let ticks = ((ms + 11_644_473_600_000.0) * 10_000.0) as u64;
@@ -20,6 +23,42 @@ fn local(ms: f64) -> Option<SYSTEMTIME> {
         }
     }
     Some(local)
+}
+
+/// The same fields Windows' `SYSTEMTIME` carries, so everything below reads one shape.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+struct Local {
+    wYear: u16,
+    wMonth: u16,
+    wDayOfWeek: u16,
+    wDay: u16,
+    wHour: u16,
+    wMinute: u16,
+    wSecond: u16,
+    wMilliseconds: u16,
+}
+
+#[cfg(not(windows))]
+fn local(ms: f64) -> Option<Local> {
+    let secs = (ms / 1000.0).floor();
+    let millis = (ms - secs * 1000.0).clamp(0.0, 999.0) as u16;
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r writes only into the struct it is handed.
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return None;
+    }
+    Some(Local {
+        wYear: (tm.tm_year + 1900) as u16,
+        wMonth: (tm.tm_mon + 1) as u16,
+        wDayOfWeek: tm.tm_wday as u16,
+        wDay: tm.tm_mday as u16,
+        wHour: tm.tm_hour as u16,
+        wMinute: tm.tm_min as u16,
+        wSecond: tm.tm_sec.min(59) as u16,
+        wMilliseconds: millis,
+    })
 }
 
 fn now_ms() -> f64 {
