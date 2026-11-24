@@ -244,7 +244,7 @@ pub fn page(s: &State, t: &Theme, middle: f32) -> El<Action> {
             column = column.child(first);
 
             // Where it lands.
-            let dir = crate::youtube::download_dir();
+            let dir = crate::youtube::download_dir(s.settings_values.yt_dir.as_deref());
             column = column.child(
                 section(t).child(header(s, t, "Where it lands", "lands")).child(
                     div()

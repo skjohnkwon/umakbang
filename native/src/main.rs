@@ -143,7 +143,7 @@ fn main() {
         println!("tool: {:?}", downloader.status_now());
         let (tx, rx) = std::sync::mpsc::channel();
         let started = std::time::Instant::now();
-        downloader.fetch(args[3].clone(), args[4].clone(), 192, youtube::download_dir(), move |e| {
+        downloader.fetch(args[3].clone(), args[4].clone(), 192, youtube::download_dir(None), move |e| {
             let _ = tx.send(e);
         });
         let mut last = String::new();

@@ -19,10 +19,19 @@ const STALE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// `CREATE_NO_WINDOW`: without it every call flashes a console over the app.
 const NO_WINDOW: u32 = 0x0800_0000;
 
-/// Where the files go: the Electron page's `DOWNLOAD_DIR`, the one folder downloads always
-/// land in. `UMAKBANG_DOWNLOAD_DIR` points a test somewhere harmless.
-pub fn download_dir() -> PathBuf {
-    std::env::var_os("UMAKBANG_DOWNLOAD_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"Z:\SECRET SAUCE\Stems\zmisc"))
+/// Where the files go: the Electron page's `DOWNLOAD_DIR` on the machine that has it, otherwise
+/// the YT2MP3 fallback folder from Settings, then the OS Downloads folder. That folder used to
+/// be the only answer, which on any other machine is a drive that is not there, so every
+/// download failed. `UMAKBANG_DOWNLOAD_DIR` points a test somewhere harmless.
+pub fn download_dir(setting: Option<&str>) -> PathBuf {
+    if let Some(dir) = std::env::var_os("UMAKBANG_DOWNLOAD_DIR") {
+        return dir.into();
+    }
+    let own = PathBuf::from(r"Z:\SECRET SAUCE\Stems\zmisc");
+    if own.is_dir() {
+        return own;
+    }
+    setting.filter(|d| !d.is_empty()).map(PathBuf::from).or_else(crate::files::downloads_dir).unwrap_or(own)
 }
 
 #[derive(Clone, Debug, Default)]

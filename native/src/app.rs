@@ -3104,7 +3104,7 @@ impl App {
         let (format, kbps) = self.state.youtube_settings.clone();
         self.state.youtube.job = Some(crate::download_page::Job { phase: "reading", percent: None, title: None });
         if let Some(d) = &self.downloader {
-            d.fetch(url, format, kbps, crate::youtube::download_dir(), send);
+            d.fetch(url, format, kbps, crate::youtube::download_dir(self.data.settings.youtube_dir.as_deref()), send);
         }
     }
 
@@ -4338,7 +4338,7 @@ impl App {
             Action::Yt(what) => self.youtube_action(what),
             Action::YtShow(which) => {
                 let path = match which {
-                    None => Some(crate::youtube::download_dir()),
+                    None => Some(crate::youtube::download_dir(self.data.settings.youtube_dir.as_deref())),
                     Some(i) => self.state.youtube.got.get(i).cloned(),
                 };
                 if let Some(path) = path {
