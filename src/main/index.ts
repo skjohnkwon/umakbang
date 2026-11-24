@@ -691,15 +691,19 @@ function send(command: ScannerCommand): void {
 }
 
 /**
- * Stops the scanner when nothing needs it: no window to feed and no scan left to save.
+ * Stops the scanner when nothing needs it: no scan running, queued or left to save.
  *
- * Running in the background is the case this is for. The scanner holds the whole library's
- * metadata in memory, and a process left resident from Windows starting up should cost what
- * the server costs, not that as well. It comes back by itself - every path that scans calls
- * `ensureScanner` first - so stopping it loses nothing but a fork on the next scan.
+ * Window open or not. Measured on the real library with the window open and the launch scan
+ * long finished, the idle scanner held **372MB** - the parsed metadata cache and what the
+ * scan left behind - which was a third of everything umakbang was using, spent on a process
+ * with nothing to do until the next scan. Nothing else asks it anything in between: a single
+ * file's headers are read by main (`library:probeFiles`), and every path that scans calls
+ * `ensureScanner` first, so it comes back by itself. What stopping it costs is the next scan
+ * paying for the fork and the metadata cache's parse, about a second, on a pass that takes
+ * several anyway.
  */
 function releaseScannerIfIdle(): void {
-  if (!scanner || mainWindow || scannerBusy || scanning || pendingScanRoots || queuedRefresh.size > 0) {
+  if (!scanner || scannerBusy || scanning || pendingScanRoots || queuedRefresh.size > 0) {
     return
   }
   // Forgotten here rather than on its `exit`, which arrives later. In between, the next scan
@@ -777,7 +781,10 @@ function scanAdditional(added: LibraryRoot, all: LibraryRoot[]): void {
   target.webContents.send('library:roots', { roots: all })
   scanning = true
   if (scannerReady) send({ type: 'scan', roots: [added], replace: false })
-  else pendingScanRoots = { roots: all, full: false }
+  // Only the new folder. The scanner is stopped whenever it is idle, so arriving here before
+  // it is ready is the usual case rather than a launch race, and queueing every root would
+  // re-walk the whole library to add one folder to it.
+  else pendingScanRoots = { roots: [added], full: false }
 }
 
 /**
