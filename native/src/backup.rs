@@ -507,6 +507,54 @@ pub fn default_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("backups")
 }
 
+/// Where bundles go: the folder Settings names, or `default_dir` when it names none - or names
+/// one inside a Mac app bundle, which is never a place to keep anything (`in_app_bundle`).
+pub fn export_dir(setting: Option<&str>, data_dir: &Path) -> PathBuf {
+    setting.filter(|d| !d.is_empty() && !in_app_bundle(Path::new(d))).map(PathBuf::from).unwrap_or_else(|| default_dir(data_dir))
+}
+
+/// A folder inside a Mac app bundle (`.../umakbang.app/Contents/...`). The Electron app seeded
+/// `bundleExportDir` with the folder beside its executable, which on a Mac is inside the bundle,
+/// and saved it: every Mac install it ran on carries that path. A file written there breaks the
+/// app's signature, and an update replaces the bundle and the backups with it.
+pub fn in_app_bundle(dir: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let parts: Vec<_> = dir.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    parts.windows(2).any(|pair| pair[0].ends_with(".app") && pair[1] == "Contents")
+}
+
+/// Moves what an in-bundle backup folder holds to `to`, keeping the newer copy where both have
+/// a file of the same name, and removes the folder once it is empty. Returns how many files
+/// came out.
+pub fn rescue_from(from: &Path, to: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut moved = 0;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if target.exists() && modified(&target) >= modified(&source) {
+            // What is already outside is as new or newer: the copy inside goes.
+            std::fs::remove_file(&source)?;
+            continue;
+        }
+        if std::fs::rename(&source, &target).is_err() {
+            // Another volume: copied, then the original removed.
+            std::fs::copy(&source, &target)?;
+            std::fs::remove_file(&source)?;
+        }
+        moved += 1;
+    }
+    let _ = std::fs::remove_dir(from);
+    Ok(moved)
+}
+
 pub fn looks_like_bundle(file: &Path) -> bool {
     let mut head = [0u8; 2];
     std::fs::File::open(file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok() && head == [0x1f, 0x8b]
@@ -694,7 +742,7 @@ pub fn auto_backup(data_path: PathBuf, db: PathBuf) {
                     return None;
                 }
                 let parent = data_path.parent()?;
-                let dir = doc.pointer("/settings/bundleExportDir").and_then(Value::as_str).filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(|| default_dir(parent));
+                let dir = export_dir(doc.pointer("/settings/bundleExportDir").and_then(Value::as_str), parent);
                 let file = dir.join(AUTO_FILE);
                 let fresh = std::fs::metadata(&file).and_then(|m| m.modified()).ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age.as_secs() < 24 * 3600);
                 if fresh {
@@ -714,6 +762,44 @@ pub fn auto_backup(data_path: PathBuf, db: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_folder_inside_an_app_bundle_is_never_the_backup_folder() {
+        assert!(in_app_bundle(Path::new("/Applications/umakbang.app/Contents/MacOS/backups")));
+        assert!(!in_app_bundle(Path::new("/Users/me/Music/umakbang.app backups")));
+        assert!(!in_app_bundle(Path::new("/Users/me/Backups")));
+        let data = Path::new("/Users/me/Library/Application Support/umakbang");
+        assert_eq!(export_dir(Some("/Applications/umakbang.app/Contents/MacOS/backups"), data), data.join("backups"));
+        assert_eq!(export_dir(Some("/Users/me/Backups"), data), PathBuf::from("/Users/me/Backups"));
+        assert_eq!(export_dir(Some(""), data), data.join("backups"));
+    }
+
+    #[test]
+    fn rescue_keeps_the_newer_copy_and_removes_the_folder() {
+        let root = std::env::temp_dir().join(format!("umakbang-rescue-{}", std::process::id()));
+        let (from, to) = (root.join("inside"), root.join("outside"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        // Outside, an older auto backup; inside, a newer one and a manual export.
+        std::fs::write(to.join("umakbang-auto.umak"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(from.join("umakbang-auto.umak"), b"new").unwrap();
+        std::fs::write(from.join("umakbang-2026-11-24.umak"), b"export").unwrap();
+        assert_eq!(rescue_from(&from, &to).unwrap(), 2);
+        assert_eq!(std::fs::read(to.join("umakbang-auto.umak")).unwrap(), b"new");
+        assert_eq!(std::fs::read(to.join("umakbang-2026-11-24.umak")).unwrap(), b"export");
+        assert!(!from.exists());
+        // And the other way: a newer copy outside stays, the stale one inside goes.
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("umakbang-auto.umak"), b"stale").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(to.join("umakbang-auto.umak"), b"newest").unwrap();
+        assert_eq!(rescue_from(&from, &to).unwrap(), 0);
+        assert_eq!(std::fs::read(to.join("umakbang-auto.umak")).unwrap(), b"newest");
+        assert!(!from.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn anchors_walk_up_while_names_agree() {

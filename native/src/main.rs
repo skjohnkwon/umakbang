@@ -499,6 +499,7 @@ fn main() {
     // every library id is derived from, and losing it would hand a peer new ids every launch.
     app.doc = Some(docstore::DocStore::new(&PathBuf::from(&args[2])));
     app.data_path = PathBuf::from(&args[2]);
+    app.rescue_backups();
     app.start_search(PathBuf::from(&args[1]));
     app.start_analysis();
     app.downloader = Some(youtube::Downloader::new(PathBuf::from(&args[2]).parent().unwrap_or(std::path::Path::new("."))));

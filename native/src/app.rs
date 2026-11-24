@@ -1982,7 +1982,29 @@ impl App {
     /* ------------------------------------------------------------ backups */
 
     fn bundle_dir(&self) -> PathBuf {
-        self.data.settings.bundle_export_dir.clone().filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(|| crate::backup::default_dir(&self.user_data))
+        crate::backup::export_dir(self.data.settings.bundle_export_dir.as_deref(), &self.user_data)
+    }
+
+    /// A backup folder the Electron app left inside the Mac app bundle (`backup::in_app_bundle`):
+    /// what it holds moves to the default folder, and the setting is cleared so the default is
+    /// used from now on. Once, at launch.
+    pub fn rescue_backups(&mut self) {
+        let Some(dir) = self.data.settings.bundle_export_dir.clone().filter(|d| crate::backup::in_app_bundle(std::path::Path::new(d))) else { return };
+        let to = crate::backup::default_dir(&self.user_data);
+        let from = PathBuf::from(&dir);
+        if from.exists() {
+            if let Err(e) = crate::backup::rescue_from(&from, &to) {
+                // Left where it is, and the setting with it, so the next launch tries again.
+                eprintln!("umakbang: could not move backups out of {dir}: {e}");
+                return;
+            }
+        }
+        self.data.settings.bundle_export_dir = None;
+        // Not through `write_setting`: the setting is this install's alone, and stamping the
+        // settings changed would make this machine's win the next sync for no change of the user's.
+        if let Some(doc) = self.doc.as_mut() {
+            doc.set("settings", "bundleExportDir", Some(serde_json::Value::from("")));
+        }
     }
 
     /// `exportBundle`: into the backup folder under today's name, or wherever is asked.
@@ -4918,7 +4940,7 @@ impl App {
             remote_download_dir: s.remote_download_dir.clone(),
             server: self.remote.as_ref().and_then(|r| r.state.lock().ok().map(|s| s.clone())),
             server_stats: self.remote.as_ref().and_then(|r| r.stats.lock().ok().map(|s| s.clone())),
-            bundle_dir: s.bundle_export_dir.clone().filter(|d| !d.is_empty()),
+            bundle_dir: s.bundle_export_dir.clone().filter(|d| !d.is_empty() && !crate::backup::in_app_bundle(std::path::Path::new(d))),
             bundle_busy: self.bundle_busy,
             syncing: self.syncing,
             sync_note: self.sync_note.clone(),
