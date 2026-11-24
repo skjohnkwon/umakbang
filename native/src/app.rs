@@ -181,6 +181,8 @@ pub struct App {
     pub ui: Ui,
     pub state: State,
     shell: ShellIcons,
+    /// The scale the file icons in `state.file_icons` were made at.
+    icon_scale: f32,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     surface_size: (u32, u32),
@@ -464,6 +466,7 @@ impl App {
             ui: Ui::new(),
             state,
             shell: ShellIcons::default(),
+            icon_scale: 1.0,
             window: None,
             surface: None,
             surface_size: (0, 0),
@@ -730,18 +733,47 @@ impl App {
             .iter()
             .filter_map(|f| self.data.absolute(&f.path).and_then(|abs| self.data.tags.get(&abs)).map(|tags| (f.id, tags.clone())))
             .collect();
-        let system_icons = self.data.settings.system_file_icons.unwrap_or(true);
-        for file in self.state.files.iter().filter(|_| system_icons) {
+        self.load_file_icons();
+    }
+
+    /// Finder's or Explorer's icon for each file type the table holds that has none yet. Images
+    /// are drawn at their own pixel size, so each is made at the scale of the frames it is drawn
+    /// in: 28px for a 14pt box on a Retina screen.
+    fn load_file_icons(&mut self) {
+        if !self.data.settings.system_file_icons.unwrap_or(true) {
+            return;
+        }
+        let px = (14.0 * self.icon_scale.max(1.0)).round() as u32;
+        for file in &self.state.files {
             let ext = file.ext.to_lowercase();
             if self.state.file_icons.contains_key(&ext) {
                 continue;
             }
-            // Images are drawn at their own pixel size, so on a Mac's Retina screen the icon is
-            // made at the window's scale to fill its 14pt box.
-            let px = if cfg!(target_os = "macos") { (14.0 * self.window.as_ref().map_or(1.0, |w| w.scale_factor())).round() as u32 } else { 14 };
             if let Some(icon) = self.shell.get(&ext).and_then(|p| crate::shell_icon::resized(p, px)) {
                 self.state.file_icons.insert(ext, Rc::new(icon));
             }
+        }
+    }
+
+    /// Remakes the file icons when frames start being drawn at another scale: the first frame
+    /// (the folder opened on was read before the window existed, when the scale was a guess) and
+    /// a move between a Retina screen and a standard one.
+    fn match_icon_scale(&mut self, scale: f32) {
+        if scale == self.icon_scale {
+            return;
+        }
+        self.icon_scale = scale;
+        self.state.file_icons.clear();
+        self.load_file_icons();
+        // The split view's other pane, parked, is made at the same scale.
+        if let Some(mut pane) = self.parked.take() {
+            pane.file_icons.clear();
+            std::mem::swap(&mut self.state.files, &mut pane.files);
+            std::mem::swap(&mut self.state.file_icons, &mut pane.file_icons);
+            self.load_file_icons();
+            std::mem::swap(&mut self.state.files, &mut pane.files);
+            std::mem::swap(&mut self.state.file_icons, &mut pane.file_icons);
+            self.parked = Some(pane);
         }
     }
 
@@ -3530,6 +3562,7 @@ impl App {
     pub fn draw(&mut self, width: u32, height: u32, scale: f32) -> &Pixmap {
         let started = Instant::now();
         self.refresh_clock();
+        self.match_icon_scale(scale);
         let reuse = self.frame.as_ref().is_some_and(|f| f.width() == width && f.height() == height);
         if !reuse {
             self.frame = Pixmap::new(width.max(1), height.max(1));

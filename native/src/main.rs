@@ -434,32 +434,35 @@ fn main() {
             .ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
             .unwrap_or((1360u32, 860u32));
+        // `UMAKBANG_SCALE=2`: drawn as a Retina screen draws it, at twice the size in pixels.
+        let scale: f32 = std::env::var("UMAKBANG_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let (w, h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
         // Once to measure what overflows, which decides the sidebar's gutters.
-        app.draw(w, h, 1.0);
+        app.draw(w, h, scale);
         if app.state.view == screen::View::Stats && app.state.stats.scroll > 0.0 {
             // Clamped as the wheel would, by what the page lays out to.
-            app.draw(w, h, 1.0);
+            app.draw(w, h, scale);
             let (viewport, content) = app.ui.extents.get("stats").copied().unwrap_or((0.0, 0.0));
             app.state.stats.scroll = app.state.stats.scroll.min((content - viewport).max(0.0));
         }
         // `UMAKBANG_REGION=<from>,<to>`: the scissors on and that loop drawn.
         if let Some((a, b)) = std::env::var("UMAKBANG_REGION").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
-            app.draw(w, h, 1.0);
+            app.draw(w, h, scale);
             app.test_region(a, b);
         }
         // `UMAKBANG_PICK=<kind>,<index>`: that colour picker open.
         if let Some((kind, index)) = std::env::var("UMAKBANG_PICK").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))) {
-            app.draw(w, h, 1.0);
+            app.draw(w, h, scale);
             app.test_pick(kind, index);
         }
         if let Ok(hover) = std::env::var("UMAKBANG_CHART") {
             // `<id>:<index>`: that chart's tooltip, as if the pointer were over it.
             if let Some((id, index)) = hover.split_once(':').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))) {
-                app.draw(w, h, 1.0);
+                app.draw(w, h, scale);
                 app.state.stats.hover = Some((id, index));
             }
         }
-        let frame = app.draw(w, h, 1.0);
+        let frame = app.draw(w, h, scale);
         frame.save_png(out).expect("write png");
         if std::env::var("UMAKBANG_HITS").is_ok() {
             for hit in &app.hits {
