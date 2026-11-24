@@ -116,6 +116,9 @@ pub enum Wake {
     /// The tray's menu, and a second launch asking for the window.
     Tray(crate::tray::Event),
     Show,
+    /// Cmd+Q on a Mac (`tray::intercept_quit`): closing the window, not the app, in the background.
+    #[cfg(target_os = "macos")]
+    QuitKey,
     /// The machines on the tailnet, and whether umakbang answers on each.
     Peers(crate::tailscale::Status, Vec<crate::server::Peer>),
     /// A machine's plugin list, by its tailnet node id; None when it would not answer.
@@ -1268,8 +1271,8 @@ impl App {
         }
     }
 
-    /// Closing the window, by its X or the system's: in the background the app stays, serving
-    /// from the tray, and only the window goes; otherwise it quits.
+    /// Closing the window, by its X or the system's (and Cmd+Q on a Mac): in the background the
+    /// app stays, serving from the tray, and only the window goes; otherwise it quits.
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
         self.flush_doc();
         if self.data.settings.run_in_background.unwrap_or(true) && self.tray.is_some() {
@@ -1313,6 +1316,8 @@ impl App {
         if let Some(window) = &self.window {
             window.set_visible(false);
         }
+        #[cfg(target_os = "macos")]
+        crate::tray::set_in_dock(false);
         self.window_open.store(false, std::sync::atomic::Ordering::Relaxed);
         // The finished frame is the one big allocation the hidden window holds.
         self.frame = None;
@@ -1326,6 +1331,8 @@ impl App {
 
     fn show_window(&mut self) {
         let Some(window) = self.window.clone() else { return };
+        #[cfg(target_os = "macos")]
+        crate::tray::set_in_dock(true);
         window.set_visible(true);
         window.set_minimized(false);
         window.focus_window();
@@ -5767,11 +5774,28 @@ impl ApplicationHandler<Wake> for App {
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
         self.window = Some(window);
         self.sync_background(false);
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(proxy) = self.proxy.clone() {
+                let proxy = std::sync::Mutex::new(proxy);
+                crate::tray::intercept_quit(move || {
+                    if let Ok(proxy) = proxy.lock() {
+                        let _ = proxy.send_event(Wake::QuitKey);
+                    }
+                });
+            }
+            // A login launch is the menu bar item alone until the window is asked for.
+            if self.start_hidden && self.tray.is_some() {
+                crate::tray::set_in_dock(false);
+            }
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Wake) {
         match event {
             Wake::Show => self.show_window(),
+            #[cfg(target_os = "macos")]
+            Wake::QuitKey => self.close_window(event_loop),
             Wake::Tray(crate::tray::Event::Open) => self.show_window(),
             Wake::Tray(crate::tray::Event::RestartToUpdate) => self.restart_to_update(event_loop),
             Wake::Updates => {

@@ -38,7 +38,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_DataExchange", "Wi
 libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSData", "NSDictionary", "NSValue", "NSGeometry", "NSFileManager", "NSError", "NSObject"] }
-objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSApplication", "NSRunningApplication", "NSGraphics", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSApplication", "NSRunningApplication", "NSGraphics", "NSResponder", "NSView", "NSWindow", "NSMenu", "NSMenuItem"] }
 rfd = { version = "0.15", default-features = false }
 tray-icon = "0.21"
 

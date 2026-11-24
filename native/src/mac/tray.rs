@@ -264,3 +264,71 @@ fn install_reopen_handler() {
         objc2::ffi::class_addMethod(class as *const AnyClass as *mut AnyClass, sel!(applicationShouldHandleReopen:hasVisibleWindows:), imp, c"c@:@c".as_ptr());
     }
 }
+
+/* ------------------------------------------------------------------ Cmd+Q and the Dock */
+
+static QUIT_KEY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Cmd+Q, and Quit in the app menu, hand over to `on` instead of ending the process: running
+/// in the background they close the window into the menu bar and the server carries on, as the
+/// window's X does on Windows. Quitting for good is the menu bar item's Quit.
+///
+/// Only the menu item is redirected. The Dock's Quit, logging out and shutting down ask the app
+/// to terminate by Apple Event, not through the menu, and still end it.
+///
+/// winit makes the app menu as the app finishes launching, so this is called after that.
+pub fn intercept_quit(on: impl Fn() + Send + Sync + 'static) {
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::{sel, MainThreadMarker};
+    use objc2_app_kit::NSApplication;
+
+    extern "C-unwind" fn quit_key(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+        if let Some(on) = QUIT_KEY.get() {
+            on();
+        }
+    }
+
+    if QUIT_KEY.set(Box::new(on)).is_err() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(delegate) = app.delegate() else { return };
+    let object: &AnyObject = AsRef::<AnyObject>::as_ref(&*delegate);
+    let class: &AnyClass = object.class();
+    let imp: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(quit_key as extern "C-unwind" fn(&AnyObject, Sel, *mut AnyObject)) };
+    // SAFETY: the types string matches the function: void return, self, _cmd, the sender.
+    unsafe {
+        objc2::ffi::class_addMethod(class as *const AnyClass as *mut AnyClass, sel!(umakbangQuitKey:), imp, c"v@:@".as_ptr());
+    }
+    let Some(menu) = app.mainMenu() else { return };
+    for i in 0..menu.numberOfItems() {
+        let Some(submenu) = menu.itemAtIndex(i).and_then(|item| item.submenu()) else { continue };
+        for j in 0..submenu.numberOfItems() {
+            let Some(entry) = submenu.itemAtIndex(j) else { continue };
+            if entry.action() == Some(sel!(terminate:)) {
+                // SAFETY: the delegate outlives the menu (it lives as long as the app), and it
+                // answers the selector, added above.
+                unsafe {
+                    entry.setTarget(Some(object));
+                    entry.setAction(Some(sel!(umakbangQuitKey:)));
+                }
+            }
+        }
+    }
+}
+
+/// In the Dock and the app switcher, or only in the menu bar. With its window closed into the
+/// background the app is the menu bar item and nothing else, as the Electron app was; showing
+/// the window again brings the Dock icon back and the app to the front.
+pub fn set_in_dock(on: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(if on { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory });
+    if on {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
