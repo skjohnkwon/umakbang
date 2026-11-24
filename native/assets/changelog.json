@@ -1,5 +1,20 @@
 [
  {
+  "version": "0.5.0",
+  "date": "2026-11-23",
+  "changes": [
+   "umakbang is a native app now. It opens faster, scrolls a large folder without stalling, and uses a fraction of the memory the old app did, so leaving it in the tray from login costs very little. Your library, tags, ratings and settings carry straight over.",
+   "Installing is one file. Run the setup exe and umakbang installs for you, adds itself to the Start menu and the Desktop, and appears in Apps with an uninstaller. Uninstalling leaves your library, tags and ratings alone.",
+   "Updates check GitHub, download in the background and are verified against a published checksum before anything is replaced. Restart to update is in the tray menu and in Settings, Updates.",
+   "Other machines and the phone stay in step with this library without reloading it. Each folder carries a fingerprint, so a peer asks only about what changed and hears about a new bounce within seconds.",
+   "A bounce takes its tempo from the FL Studio project beside it, so a _Master render shows the BPM it was made at rather than a guess.",
+   "A file that disappears while you are looking at its folder stays in place, greyed out, so the next click still lands on the row you meant.",
+   "If umakbang ever crashes, it keeps a record beside its library and says so on the next launch.",
+   "A data folder beside the exe keeps everything in it, for running umakbang off a drive.",
+   "Videos is gone."
+  ]
+ },
+ {
   "version": "0.4.1",
   "date": "2026-11-21",
   "changes": [
