@@ -730,12 +730,16 @@ impl App {
             .iter()
             .filter_map(|f| self.data.absolute(&f.path).and_then(|abs| self.data.tags.get(&abs)).map(|tags| (f.id, tags.clone())))
             .collect();
-        for file in &self.state.files {
+        let system_icons = self.data.settings.system_file_icons.unwrap_or(true);
+        for file in self.state.files.iter().filter(|_| system_icons) {
             let ext = file.ext.to_lowercase();
             if self.state.file_icons.contains_key(&ext) {
                 continue;
             }
-            if let Some(icon) = self.shell.get(&ext).and_then(|p| crate::shell_icon::resized(p, 14)) {
+            // Images are drawn at their own pixel size, so on a Mac's Retina screen the icon is
+            // made at the window's scale to fill its 14pt box.
+            let px = if cfg!(target_os = "macos") { (14.0 * self.window.as_ref().map_or(1.0, |w| w.scale_factor())).round() as u32 } else { 14 };
+            if let Some(icon) = self.shell.get(&ext).and_then(|p| crate::shell_icon::resized(p, px)) {
                 self.state.file_icons.insert(ext, Rc::new(icon));
             }
         }
@@ -4858,6 +4862,7 @@ impl App {
             random_favour_unrated: s.random_favour_unrated,
             always_on_top: s.always_on_top,
             show_stats: s.show_stats.unwrap_or(true),
+            system_file_icons: s.system_file_icons.unwrap_or(true),
             undo_depth: s.undo_depth.unwrap_or(25).to_string(),
             bindings: crate::keys::SHORTCUTS
                 .iter()
@@ -5039,6 +5044,13 @@ impl App {
                 }
                 on
             }
+            "systemFileIcons" => {
+                let on = !s.system_file_icons.unwrap_or(true);
+                s.system_file_icons = Some(on);
+                // Every type is looked up again the next time rows are resolved.
+                self.state.file_icons.clear();
+                on
+            }
             "alwaysOnTop" => {
                 s.always_on_top = !s.always_on_top;
                 let on = s.always_on_top;
@@ -5051,6 +5063,9 @@ impl App {
         };
         self.state.play_on_select = self.data.settings.play_on_select;
         self.state.auto_advance = self.data.settings.auto_advance;
+        if key == "systemFileIcons" {
+            self.resolve_rows();
+        }
         self.write_setting(key, serde_json::Value::from(value));
         self.refresh_settings_values();
     }

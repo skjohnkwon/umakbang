@@ -77,6 +77,9 @@ pub struct Settings {
     pub bundle_export_dir: Option<String>,
     /// Whether the Stats page is in the sidebar; absent is yes.
     pub show_stats: Option<bool>,
+    /// File rows show the OS's own icon for each type (Explorer's, Finder's); off shows
+    /// umakbang's glyphs, coloured by kind. Absent is on.
+    pub system_file_icons: Option<bool>,
     /// YT2MP3: "mp3", "source" or "video", and the MP3 bitrate.
     pub youtube_format: Option<String>,
     pub youtube_bitrate: Option<u32>,

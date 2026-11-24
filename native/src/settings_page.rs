@@ -23,6 +23,7 @@ pub struct Values {
     pub random_favour_unrated: bool,
     pub always_on_top: bool,
     pub show_stats: bool,
+    pub system_file_icons: bool,
     /// Undo: how many operations are remembered, and how many are held now.
     pub undo_depth: String,
     /// Appearance: the colours as hex, and whether each is an override.
@@ -612,7 +613,13 @@ pub fn page(s: &State, t: &Theme, v: &Values) -> El<Action> {
                 .child(
                     section(t, "Theme", None)
                         .child(row(t, "Accent", Some("Buttons, selection, focus rings."), theme_row(&v.accent_hex, v.accent_set, 0)))
-                        .child(row(t, "Background", Some("Surfaces derive from this."), theme_row(&v.background_hex, v.background_set, 1))),
+                        .child(row(t, "Background", Some("Surfaces derive from this."), theme_row(&v.background_hex, v.background_set, 1)))
+                        .child(row(
+                            t,
+                            "System file icons",
+                            Some(if cfg!(target_os = "macos") { "Finder's icon for each file type. Off shows umakbang's, coloured by kind." } else { "Explorer's icon for each file type. Off shows umakbang's, coloured by kind." }),
+                            switch(t, v.system_file_icons, "systemFileIcons"),
+                        )),
                 )
                 .child(
                     section(t, "Visualizers", Some("Quiet on the left, loud on the right."))

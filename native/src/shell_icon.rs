@@ -133,7 +133,50 @@ pub fn resized(source: &Pixmap, size: u32) -> Option<Pixmap> {
     Some(out)
 }
 
-#[cfg(not(windows))]
+/// The icon Finder shows for the type: `NSWorkspace`'s icon for the extension, drawn into a
+/// 64px bitmap (large enough to shrink cleanly to a row's icon on a Retina screen).
+#[cfg(target_os = "macos")]
+fn load(ext: &str) -> Option<Pixmap> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext, NSWorkspace};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    const SIZE: isize = 64;
+    // SAFETY: AppKit calls with owned objects; the bitmap's buffer is read while `rep` lives.
+    unsafe {
+        #[allow(deprecated)]
+        let image = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(ext));
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            SIZE,
+            SIZE,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            SIZE * 4,
+            32,
+        )?;
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        image.drawInRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SIZE as f64, SIZE as f64)));
+        context.flushGraphics();
+        NSGraphicsContext::restoreGraphicsState_class();
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        // AppKit's default bitmap is RGBA with premultiplied alpha, as tiny-skia keeps it.
+        let bytes = std::slice::from_raw_parts(data, (SIZE * SIZE * 4) as usize);
+        let mut pixmap = Pixmap::new(SIZE as u32, SIZE as u32)?;
+        pixmap.data_mut().copy_from_slice(bytes);
+        Some(pixmap)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn load(_ext: &str) -> Option<Pixmap> {
     None
 }
