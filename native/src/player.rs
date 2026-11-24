@@ -171,6 +171,32 @@ impl<S: Source> Source for Tap<S> {
     }
 }
 
+/// Opens `device` with a buffer it takes. rodio asks every device for ~50ms (2048 frames at
+/// 48kHz), and a device whose range stops short of that refuses the stream: Bluetooth
+/// headphones on a Mac take 15-960 frames, so with those as the output nothing played at all,
+/// and rodio's fallbacks ask the other devices for the same. The 50ms is kept where the device
+/// takes it and cut to its largest buffer where it does not; failing that, the device's own
+/// default. A device that names no range (Windows' shared mode) is asked as rodio asks.
+fn open(device: rodio::cpal::Device) -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
+    use rodio::cpal::traits::DeviceTrait;
+    use rodio::cpal::{BufferSize, SupportedBufferSize};
+    let config = device.default_output_config().ok();
+    let builder = DeviceSinkBuilder::from_device(device.clone())?;
+    let fitted = match config.as_ref().map(|c| (c.buffer_size().clone(), c.sample_rate())) {
+        Some((SupportedBufferSize::Range { min, max }, rate)) if min <= max => builder.with_buffer_size(BufferSize::Fixed(aim_frames(rate).clamp(min, max))),
+        _ => builder,
+    };
+    fitted.open_stream().or_else(|first| DeviceSinkBuilder::from_device(device)?.with_buffer_size(BufferSize::Default).open_stream().map_err(|_| first))
+}
+
+/// rodio's aim: 50ms of audio, rounded to the nearest power of two.
+fn aim_frames(rate: u32) -> u32 {
+    let n = (rate / 20).max(1);
+    let next = n.next_power_of_two();
+    let previous = next >> 1;
+    if previous > 0 && n - previous <= next - n { previous } else { next }
+}
+
 pub struct Player {
     // The output device; playback stops if it is dropped.
     _sink: MixerDeviceSink,
@@ -190,11 +216,14 @@ impl Player {
     /// Through the named device, or the system default when it is not given or not there.
     pub fn new(device: Option<&str>) -> Result<Player, Box<dyn std::error::Error>> {
         use rodio::cpal::traits::HostTrait;
-        let chosen = device.filter(|name| !name.is_empty()).and_then(|name| rodio::cpal::default_host().output_devices().ok()?.find(|d| d.to_string() == name));
-        let mut sink = match chosen {
-            Some(device) => DeviceSinkBuilder::from_device(device).and_then(|b| b.open_stream()).or_else(|_| DeviceSinkBuilder::open_default_sink())?,
-            None => DeviceSinkBuilder::open_default_sink()?,
+        let host = rodio::cpal::default_host();
+        let chosen = device.filter(|name| !name.is_empty()).and_then(|name| host.output_devices().ok()?.find(|d| d.to_string() == name));
+        let opened = match chosen {
+            Some(device) => open(device),
+            None => host.default_output_device().map_or_else(DeviceSinkBuilder::open_default_sink, open),
         };
+        // Whatever rodio finds when the device asked for will not open.
+        let mut sink = opened.or_else(|_| DeviceSinkBuilder::open_default_sink())?;
         // rodio prints a line to stderr when the sink is dropped; there is no console to read it.
         sink.log_on_drop(false);
         let player = RodioPlayer::connect_new(sink.mixer());
@@ -293,6 +322,15 @@ mod tests {
         // Each frame drawn between bursts reads a little further on.
         let frames: Vec<u64> = (0..3).map(|i| ring.playhead(at + Duration::from_micros(16_667 * i))).collect();
         assert!(frames[0] < frames[1] && frames[1] < frames[2], "{frames:?}");
+    }
+
+    #[test]
+    fn buffer_aim_is_rodios_50ms() {
+        assert_eq!(aim_frames(48000), 2048);
+        assert_eq!(aim_frames(44100), 2048);
+        assert_eq!(aim_frames(96000), 4096);
+        // What a Bluetooth output takes on a Mac.
+        assert_eq!(aim_frames(48000).clamp(15, 960), 960);
     }
 
     #[test]

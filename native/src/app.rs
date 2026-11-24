@@ -51,6 +51,14 @@ pub fn rate_for(bpm: Option<f64>, varispeed: Option<(bool, f64)>) -> f64 {
     if raw.is_finite() { raw.clamp(0.5, 2.0) } else { 1.0 }
 }
 
+/// The shallowest part of `path` that does not exist: for a file on a network share that is not
+/// mounted, the share (`/Volumes/john`), which says what to do better than the file's name does.
+fn missing_part(path: &str) -> Option<std::path::PathBuf> {
+    let mut levels: Vec<&std::path::Path> = std::path::Path::new(path).ancestors().filter(|a| !a.as_os_str().is_empty()).collect();
+    levels.reverse();
+    levels.into_iter().find(|a| !a.exists()).map(std::path::Path::to_path_buf)
+}
+
 /// Whole steps snap to the grid first: +1 from 1.2 is 2, not 2.2 (`stepFrom`).
 fn step_from(value: f64, step: f64, up: bool) -> f64 {
     let units = value / step;
@@ -4588,11 +4596,29 @@ impl App {
     fn start(&mut self, at: usize) {
         let Some(file) = self.queue.get(at).cloned() else { return };
         if self.player.is_none() {
-            self.player = Player::new(self.output_name().as_deref()).ok();
-            self.apply_level();
+            match Player::new(self.output_name().as_deref()) {
+                Ok(player) => {
+                    self.player = Some(player);
+                    self.apply_level();
+                }
+                Err(e) => {
+                    // Said, not swallowed: a play button that does nothing reads as broken.
+                    self.notify(format!("The audio output could not be opened: {e}"));
+                    return;
+                }
+            }
         }
         let Some(player) = self.player.as_mut() else { return };
-        if player.play(&file.path).is_err() {
+        if let Err(e) = player.play(&file.path) {
+            let not_found = e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            let message = match not_found.then(|| missing_part(&file.path)).flatten() {
+                Some(gone) if gone == std::path::Path::new(&file.path) => format!("{} is no longer there.", file.name),
+                // What to fix first: the notice is one short line, and a long file name pushes
+                // the rest out of it.
+                Some(gone) => format!("{} isn't connected, so {} can't play.", gone.display(), file.name),
+                None => format!("{} could not be played: {e}", file.name),
+            };
+            self.notify(message);
             return;
         }
         self.queue_index = at;
@@ -6458,5 +6484,20 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::RedrawRequested => self.present(),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_part;
+
+    #[test]
+    fn missing_part_names_the_drive_not_the_file() {
+        let root = std::env::temp_dir();
+        let unmounted = root.join("umakbang-no-such-share").join("SECRET SAUCE").join("beat.mp3");
+        assert_eq!(missing_part(&unmounted.to_string_lossy()), Some(root.join("umakbang-no-such-share")));
+        let here = root.join(format!("umakbang-missing-{}.wav", std::process::id()));
+        assert_eq!(missing_part(&here.to_string_lossy()), Some(here.clone()));
+        assert_eq!(missing_part(&root.to_string_lossy()), None);
     }
 }
