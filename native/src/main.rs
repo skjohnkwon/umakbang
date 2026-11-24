@@ -410,19 +410,21 @@ fn main() {
 
     if let Some(at) = args.iter().position(|a| a == "--shot") {
         let out = args.get(at + 1).expect("--shot needs a path");
+        // `UMAKBANG_SCALE=2`: drawn as a Retina screen draws it, at twice the size in pixels.
+        let scale: f32 = std::env::var("UMAKBANG_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         if let Some(index) = play {
             // Two seconds of the shared loop, timed like the real one, with every live frame
             // drawn as the window would draw it.
             app.play(index);
-            app.draw(1360, 860, 1.0);
+            app.draw((1360.0 * scale) as u32, (860.0 * scale) as u32, scale);
             let mut live = Vec::new();
             for _ in 0..120 {
                 std::thread::sleep(std::time::Duration::from_millis(16));
                 app.advance(visualizers::Phase::Live);
                 let started = std::time::Instant::now();
-                if !app.draw_live(1360, 860, 1.0) {
+                if !app.draw_live((1360.0 * scale) as u32, (860.0 * scale) as u32, scale) {
                     eprintln!("live frame fell back to a full one");
-                    app.draw(1360, 860, 1.0);
+                    app.draw((1360.0 * scale) as u32, (860.0 * scale) as u32, scale);
                 }
                 live.push(started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -434,8 +436,6 @@ fn main() {
             .ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
             .unwrap_or((1360u32, 860u32));
-        // `UMAKBANG_SCALE=2`: drawn as a Retina screen draws it, at twice the size in pixels.
-        let scale: f32 = std::env::var("UMAKBANG_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let (w, h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
         // Once to measure what overflows, which decides the sidebar's gutters.
         app.draw(w, h, scale);

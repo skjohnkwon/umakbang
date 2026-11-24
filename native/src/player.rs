@@ -9,10 +9,14 @@
 use rodio::source::SeekError;
 use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Sample, SampleRate, Source};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Frames the ring holds: the fine analyser's 8192-point window with room to spare.
 pub const RING: usize = 16384;
+
+/// Writes closer together than this are one burst: one pull of the device's buffer, handed over
+/// in a few batches microseconds apart.
+const BURST_GAP: Duration = Duration::from_millis(2);
 
 /// What the visualizers read: the most recent frames as left and right, and the rate they
 /// were played at.
@@ -22,18 +26,52 @@ pub struct Ring {
     /// Frames written since the track started; the next frame lands at `written % RING`.
     pub written: u64,
     pub sample_rate: u32,
+    /// Where the newest burst began, and when it arrived.
+    burst: Option<(u64, Instant)>,
+    /// The time between the last two bursts.
+    interval: Option<Duration>,
+    /// The last write, which tells the next one whether it starts a burst.
+    last_write: Option<Instant>,
 }
 
 impl Ring {
     fn new() -> Ring {
-        Ring { left: vec![0.0; RING], right: vec![0.0; RING], written: 0, sample_rate: 44100 }
+        Ring { left: vec![0.0; RING], right: vec![0.0; RING], written: 0, sample_rate: 44100, burst: None, interval: None, last_write: None }
+    }
+
+    /// Frames arrive a device buffer at a time: on a Mac rodio asks CoreAudio for ~50ms, so
+    /// 2048 frames land at once some 23 times a second. Read straight from the end, every frame
+    /// drawn between two bursts showed the same audio and the scope ran at a third of the frame
+    /// rate. Notes where each burst starts, and how far apart they come.
+    fn wrote(&mut self, before: u64, now: Instant) {
+        if self.last_write.is_none_or(|last| now.duration_since(last) > BURST_GAP) {
+            if let Some((_, at)) = self.burst {
+                self.interval = Some(now.duration_since(at));
+            }
+            self.burst = Some((before, now));
+        }
+        self.last_write = Some(now);
+    }
+
+    /// The frame the visualizers read up to at `now`: carried from the start of the newest burst
+    /// to its end over the time bursts take to come, so the audio moves on each drawn frame as
+    /// it does on the speaker. That also keeps it about a buffer behind the end, nearer what is
+    /// being heard. Measured from the bursts rather than the sample rate, so varispeed (more
+    /// frames a burst) and any device's buffer size come out right.
+    pub fn playhead(&self, now: Instant) -> u64 {
+        let (Some((start, at)), Some(interval)) = (self.burst, self.interval) else { return self.written };
+        if interval.is_zero() || interval > Duration::from_millis(250) {
+            return self.written;
+        }
+        let progress = (now.saturating_duration_since(at).as_secs_f64() / interval.as_secs_f64()).min(1.0);
+        start + ((self.written - start) as f64 * progress) as u64
     }
 
     /// The newest `out.len()` frames of one channel (or of the two averaged, which is how an
     /// AnalyserNode downmixes), oldest first.
-    pub fn latest(&self, channel: Channel, out: &mut [f32]) {
+    pub fn latest(&self, channel: Channel, out: &mut [f32], now: Instant) {
         let n = out.len().min(RING);
-        let end = self.written as usize;
+        let end = self.playhead(now) as usize;
         for (i, value) in out.iter_mut().enumerate() {
             let back = n - i;
             if back > end {
@@ -75,12 +113,14 @@ impl<S: Source> Tap<S> {
             return;
         }
         if let Ok(mut ring) = self.ring.lock() {
+            let before = ring.written;
             for [l, r] in self.batch.drain(..) {
                 let at = (ring.written % RING as u64) as usize;
                 ring.left[at] = l;
                 ring.right[at] = r;
                 ring.written += 1;
             }
+            ring.wrote(before, Instant::now());
         } else {
             self.batch.clear();
         }
@@ -218,5 +258,49 @@ impl Player {
 
     pub fn seek(&self, seconds: f64) {
         let _ = self.player.try_seek(Duration::from_secs_f64(seconds.max(0.0)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(ring: &mut Ring, frames: u64, now: Instant) {
+        let before = ring.written;
+        ring.written += frames;
+        ring.wrote(before, now);
+    }
+
+    #[test]
+    fn playhead_moves_through_a_burst_between_bursts() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut ring = Ring::new();
+        // Before two bursts have come there is no interval to pace by: the end.
+        write(&mut ring, 2048, t0);
+        assert_eq!(ring.playhead(t0 + ms(10)), 2048);
+        // One pull, handed over in batches microseconds apart, is one burst.
+        for i in 0..8 {
+            write(&mut ring, 256, t0 + ms(40) + Duration::from_micros(i * 20));
+        }
+        assert_eq!(ring.written, 4096);
+        let at = t0 + ms(40);
+        assert_eq!(ring.playhead(at), 2048);
+        // Halfway to the next burst, halfway through this one; past it, held at the end.
+        let half = ring.playhead(at + ms(20));
+        assert!((2048 + 1000..=2048 + 1048).contains(&half), "{half}");
+        assert_eq!(ring.playhead(at + ms(80)), 4096);
+        // Each frame drawn between bursts reads a little further on.
+        let frames: Vec<u64> = (0..3).map(|i| ring.playhead(at + Duration::from_micros(16_667 * i))).collect();
+        assert!(frames[0] < frames[1] && frames[1] < frames[2], "{frames:?}");
+    }
+
+    #[test]
+    fn playhead_falls_back_to_the_end_after_a_stall() {
+        let t0 = Instant::now();
+        let mut ring = Ring::new();
+        write(&mut ring, 2048, t0);
+        write(&mut ring, 2048, t0 + Duration::from_secs(1));
+        assert_eq!(ring.playhead(t0 + Duration::from_secs(1)), 4096);
     }
 }

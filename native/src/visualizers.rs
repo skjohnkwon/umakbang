@@ -168,13 +168,15 @@ impl Analysis {
     }
 
     fn read(&mut self, ring: &Ring) {
-        ring.latest(Channel::Mono, &mut self.scratch);
+        // One moment for every read, so the channels line up.
+        let now = std::time::Instant::now();
+        ring.latest(Channel::Mono, &mut self.scratch, now);
         self.fine.analyse(&self.scratch);
         self.fine.bytes(&mut self.fine_bytes);
-        ring.latest(Channel::Mono, &mut self.mono);
+        ring.latest(Channel::Mono, &mut self.mono, now);
         time_bytes(&self.mono, &mut self.mono_bytes);
-        ring.latest(Channel::Left, &mut self.left);
-        ring.latest(Channel::Right, &mut self.right);
+        ring.latest(Channel::Left, &mut self.left, now);
+        ring.latest(Channel::Right, &mut self.right, now);
         self.rate = ring.sample_rate as f32;
     }
 
