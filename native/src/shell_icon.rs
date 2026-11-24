@@ -134,13 +134,15 @@ pub fn resized(source: &Pixmap, size: u32) -> Option<Pixmap> {
 }
 
 /// The icon Finder shows for the type: `NSWorkspace`'s icon for the extension, drawn into a
-/// 64px bitmap (large enough to shrink cleanly to a row's icon on a Retina screen).
+/// 128px bitmap and cropped to what it draws. Finder's icons sit in a canvas with wide empty
+/// margins (a document is a narrow page in the middle of it), so at a row's 14pt they came out
+/// a few points tall beside Explorer-sized glyphs.
 #[cfg(target_os = "macos")]
 fn load(ext: &str) -> Option<Pixmap> {
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext, NSWorkspace};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-    const SIZE: isize = 64;
+    const SIZE: isize = 128;
     // SAFETY: AppKit calls with owned objects; the bitmap's buffer is read while `rep` lives.
     unsafe {
         #[allow(deprecated)]
@@ -172,8 +174,46 @@ fn load(ext: &str) -> Option<Pixmap> {
         let bytes = std::slice::from_raw_parts(data, (SIZE * SIZE * 4) as usize);
         let mut pixmap = Pixmap::new(SIZE as u32, SIZE as u32)?;
         pixmap.data_mut().copy_from_slice(bytes);
-        Some(pixmap)
+        Some(cropped(&pixmap).unwrap_or(pixmap))
     }
+}
+
+/// The square around what `source` draws, centred on it: the empty margins go, the shape keeps
+/// its proportions.
+#[cfg(target_os = "macos")]
+fn cropped(source: &Pixmap) -> Option<Pixmap> {
+    let (w, h) = (source.width() as usize, source.height() as usize);
+    let data = source.data();
+    let (mut left, mut top, mut right, mut bottom) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            // Near-transparent shadow pixels don't count as drawn.
+            if data[(y * w + x) * 4 + 3] > 16 {
+                left = left.min(x);
+                right = right.max(x + 1);
+                top = top.min(y);
+                bottom = bottom.max(y + 1);
+            }
+        }
+    }
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let side = (right - left).max(bottom - top);
+    let x0 = (left + right) as isize / 2 - side as isize / 2;
+    let y0 = (top + bottom) as isize / 2 - side as isize / 2;
+    let mut out = Pixmap::new(side as u32, side as u32)?;
+    let dst = out.data_mut();
+    for y in 0..side {
+        for x in 0..side {
+            let (sx, sy) = (x0 + x as isize, y0 + y as isize);
+            if sx >= 0 && sy >= 0 && (sx as usize) < w && (sy as usize) < h {
+                let from = (sy as usize * w + sx as usize) * 4;
+                dst[(y * side + x) * 4..][..4].copy_from_slice(&data[from..from + 4]);
+            }
+        }
+    }
+    Some(out)
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
