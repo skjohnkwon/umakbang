@@ -13,3 +13,6 @@ CLAUDE.md
 context/
 # The launcher this workspace keeps pointed at release/win-unpacked. One machine's path.
 *.lnk
+# The native app's build output, and the record of one machine's cutover.
+native/target/
+native/cutover-backup/
