@@ -167,17 +167,24 @@ impl Analysis {
         }
     }
 
-    fn read(&mut self, ring: &Ring) {
-        // One moment for every read, so the channels line up.
-        let now = std::time::Instant::now();
-        ring.latest(Channel::Mono, &mut self.scratch, now);
+    fn read(&mut self, ring: &Mutex<Ring>) {
+        // Copied out under the lock, worked on after it is let go: the audio thread hands its
+        // samples over under the same lock, and the FFT is the slow part.
+        {
+            let Ok(ring) = ring.lock() else { return };
+            // One moment for every read, so the channels line up.
+            let now = std::time::Instant::now();
+            ring.latest(Channel::Mono, &mut self.scratch, now);
+            ring.latest(Channel::Left, &mut self.left, now);
+            ring.latest(Channel::Right, &mut self.right, now);
+            self.rate = ring.sample_rate as f32;
+        }
+        // The scope's window is the newest end of the analyser's.
+        let tail = self.scratch.len() - self.mono.len();
+        self.mono.copy_from_slice(&self.scratch[tail..]);
         self.fine.analyse(&self.scratch);
         self.fine.bytes(&mut self.fine_bytes);
-        ring.latest(Channel::Mono, &mut self.mono, now);
         time_bytes(&self.mono, &mut self.mono_bytes);
-        ring.latest(Channel::Left, &mut self.left, now);
-        ring.latest(Channel::Right, &mut self.right, now);
-        self.rate = ring.sample_rate as f32;
     }
 
     fn bins(&self) -> usize {
@@ -275,10 +282,9 @@ impl Visuals {
         self.time = time;
         self.playing = phase == Phase::Live;
         if phase == Phase::Live {
-            // Copied out and the lock let go before anything is drawn: the audio thread
-            // writes into this ring and must never wait on a frame.
-            if let Some(ring) = ring.and_then(|r| r.lock().ok()) {
-                self.analysis.read(&ring);
+            // Copied out and the lock let go before anything is analysed or drawn.
+            if let Some(ring) = ring {
+                self.analysis.read(ring);
             }
             self.painted = true;
         }

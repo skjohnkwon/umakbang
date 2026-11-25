@@ -8,6 +8,7 @@
 
 use rodio::source::SeekError;
 use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Sample, SampleRate, Source};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -112,17 +113,26 @@ impl<S: Source> Tap<S> {
         if self.batch.is_empty() {
             return;
         }
-        if let Ok(mut ring) = self.ring.lock() {
-            let before = ring.written;
-            for [l, r] in self.batch.drain(..) {
-                let at = (ring.written % RING as u64) as usize;
-                ring.left[at] = l;
-                ring.right[at] = r;
-                ring.written += 1;
+        // `try_lock`, never `lock`: this runs on the audio thread, and waiting there for the
+        // visualizers to let go is a gap in the sound - a pop. Busy, the batch waits for the
+        // next flush; it is the visualizers that go without, never the speaker.
+        match self.ring.try_lock() {
+            Ok(mut ring) => {
+                let before = ring.written;
+                for [l, r] in self.batch.drain(..) {
+                    let at = (ring.written % RING as u64) as usize;
+                    ring.left[at] = l;
+                    ring.right[at] = r;
+                    ring.written += 1;
+                }
+                ring.wrote(before, Instant::now());
             }
-            ring.wrote(before, Instant::now());
-        } else {
-            self.batch.clear();
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if self.batch.len() > RING {
+                    self.batch.clear();
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => self.batch.clear(),
         }
     }
 }
@@ -168,6 +178,250 @@ impl<S: Source> Source for Tap<S> {
     }
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(pos)
+    }
+}
+
+/* ------------------------------------------------------------------ decoding ahead */
+
+/// Frames per hand-over from the decoding thread.
+const CHUNK_FRAMES: usize = 1024;
+/// How far ahead the decoding thread runs: a network read that stalls for this long still
+/// plays through.
+const AHEAD_SECONDS: usize = 3;
+/// Sound coming back after a gap or a seek is faded in over this many frames (~6ms).
+const FADE_FRAMES: usize = 256;
+
+struct Chunk {
+    /// Which seek it was decoded after; anything from before the latest seek is thrown away.
+    generation: u64,
+    samples: Vec<f32>,
+    /// The track ends with this chunk.
+    end: bool,
+}
+
+enum Order {
+    Seek(Duration, u64),
+}
+
+/// The decoder, run on a thread of its own and some seconds ahead of the speaker.
+///
+/// rodio pulls samples from the source inside the audio callback, which has a few milliseconds
+/// to fill the device's buffer. Decoding there meant reading the file there: a file on another
+/// machine is fetched 512KB at a time over HTTP (`RemoteReader`), and a WAV needs a new block
+/// every three seconds, so every three seconds the callback waited on the network and the
+/// speaker got a gap - a hard pop. A network share stalls the same way. Now the callback only
+/// copies samples already decoded.
+///
+/// If decoding still falls behind, the sound dies away over a few milliseconds instead of
+/// dropping to zero, and comes back faded in: a jump to or from silence is itself the pop.
+struct Prefetch {
+    chunks: Receiver<Chunk>,
+    orders: Sender<Order>,
+    chunk: Vec<f32>,
+    at: usize,
+    generation: u64,
+    channels: ChannelCount,
+    rate: SampleRate,
+    duration: Option<Duration>,
+    /// Position within the current frame.
+    lane: usize,
+    /// Each channel's last value out, decayed while starved.
+    held: Vec<f32>,
+    /// What was playing when sound came back, still dying away under the fade-in: the new
+    /// sound is crossfaded in from it, not from zero, which would be a step if it came back
+    /// before the old had died away.
+    tail: Vec<f32>,
+    starved: bool,
+    /// Frames into the fade-in; `FADE_FRAMES` when there is none.
+    fade: usize,
+    ended: bool,
+}
+
+impl Prefetch {
+    fn new<S: Source + Send + 'static>(inner: S) -> Prefetch {
+        let (channels, rate, duration) = (inner.channels(), inner.sample_rate(), inner.total_duration());
+        let width = channels.get() as usize;
+        let capacity = (rate.get() as usize * AHEAD_SECONDS / CHUNK_FRAMES).max(4);
+        let (chunk_sender, chunks) = sync_channel(capacity);
+        let (orders, order_receiver) = channel();
+        let _ = std::thread::Builder::new().name("decode".into()).spawn(move || decode(inner, width, chunk_sender, order_receiver));
+        let mut prefetch = Prefetch {
+            chunks,
+            orders,
+            chunk: Vec::new(),
+            at: 0,
+            generation: 0,
+            channels,
+            rate,
+            duration,
+            lane: 0,
+            held: vec![0.0; width],
+            tail: vec![0.0; width],
+            starved: false,
+            fade: 0,
+            ended: false,
+        };
+        // The first chunk is waited for here, on the window's thread, so a track starts with
+        // its sound rather than with a stretch of starving.
+        if let Ok(first) = prefetch.chunks.recv_timeout(Duration::from_secs(5)) {
+            prefetch.ended = first.end;
+            prefetch.chunk = first.samples;
+        }
+        prefetch
+    }
+
+    fn advance_lane(&mut self) {
+        self.lane += 1;
+        if self.lane >= self.held.len() {
+            self.lane = 0;
+            if self.fade < FADE_FRAMES {
+                self.fade += 1;
+            }
+        }
+    }
+}
+
+/// The decoding thread: whole frames, `CHUNK_FRAMES` at a time, handed over as there is room,
+/// with seeks taken between chunks and while waiting for room.
+fn decode<S: Source>(mut inner: S, width: usize, out: SyncSender<Chunk>, orders: Receiver<Order>) {
+    use std::sync::mpsc::{RecvTimeoutError, TryRecvError, TrySendError};
+    let mut generation = 0;
+    let mut ended = false;
+    loop {
+        loop {
+            match orders.try_recv() {
+                Ok(Order::Seek(to, next)) => {
+                    let _ = inner.try_seek(to);
+                    generation = next;
+                    ended = false;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+        if ended {
+            // Nothing left to decode until a seek back into the track, or the track is dropped.
+            match orders.recv() {
+                Ok(Order::Seek(to, next)) => {
+                    let _ = inner.try_seek(to);
+                    generation = next;
+                    ended = false;
+                    continue;
+                }
+                Err(_) => return,
+            }
+        }
+        let mut samples = Vec::with_capacity(CHUNK_FRAMES * width);
+        while samples.len() < CHUNK_FRAMES * width {
+            match inner.next() {
+                Some(sample) => samples.push(sample),
+                None => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        let mut chunk = Chunk { generation, samples, end: ended };
+        loop {
+            match out.try_send(chunk) {
+                Ok(()) => break,
+                Err(TrySendError::Disconnected(_)) => return,
+                Err(TrySendError::Full(back)) => {
+                    chunk = back;
+                    match orders.recv_timeout(Duration::from_millis(10)) {
+                        Ok(Order::Seek(to, next)) => {
+                            // What was decoded ahead is from before the seek: dropped.
+                            let _ = inner.try_seek(to);
+                            generation = next;
+                            ended = false;
+                            break;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for Prefetch {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            if self.at < self.chunk.len() {
+                let mut sample = self.chunk[self.at];
+                self.at += 1;
+                if self.fade < FADE_FRAMES {
+                    let gain = self.fade as f32 / FADE_FRAMES as f32;
+                    self.tail[self.lane] *= 0.99;
+                    sample = sample * gain + self.tail[self.lane] * (1.0 - gain);
+                }
+                self.held[self.lane] = sample;
+                self.advance_lane();
+                return Some(sample);
+            }
+            if self.ended {
+                return None;
+            }
+            // Only at a frame boundary, so a chunk after a gap starts on the left channel.
+            if self.lane == 0 {
+                match self.chunks.try_recv() {
+                    Ok(chunk) => {
+                        if chunk.generation != self.generation {
+                            continue;
+                        }
+                        self.ended = chunk.end;
+                        self.chunk = chunk.samples;
+                        self.at = 0;
+                        if self.starved {
+                            self.starved = false;
+                            self.fade = 0;
+                            self.tail.copy_from_slice(&self.held);
+                        }
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return None,
+                }
+            }
+            // Starved: each channel's last value dies away (to under 1% in ~10ms) rather than
+            // stopping dead.
+            self.starved = true;
+            let sample = self.held[self.lane] * 0.99;
+            self.held[self.lane] = sample;
+            self.advance_lane();
+            return Some(sample);
+        }
+    }
+}
+
+impl Source for Prefetch {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> ChannelCount {
+        self.channels
+    }
+    fn sample_rate(&self) -> SampleRate {
+        self.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.duration
+    }
+    /// Handed to the decoding thread, not done here: a seek reads the file, and this is the
+    /// audio thread. Until the new position's sound arrives the old one dies away, then the new
+    /// one fades in.
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.generation += 1;
+        let _ = self.orders.send(Order::Seek(pos, self.generation));
+        self.chunk.clear();
+        self.at = 0;
+        self.ended = false;
+        self.starved = true;
+        Ok(())
     }
 }
 
@@ -242,7 +496,8 @@ impl Player {
             ring.sample_rate = source.sample_rate().get();
         }
         let channels = source.channels().get() as usize;
-        let tap = Tap { inner: source, ring: self.ring.clone(), channels, lane: 0, frame: [0.0; 2], batch: Vec::with_capacity(256) };
+        let source = Prefetch::new(source);
+        let tap = Tap { inner: source, ring: self.ring.clone(), channels, lane: 0, frame: [0.0; 2], batch: Vec::with_capacity(4096) };
         self.player.clear();
         self.player.append(tap);
         self.player.play();
@@ -293,6 +548,129 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZero;
+
+    /// A stereo test signal: frame `i` holds `value(i)` in both channels, with an optional stall
+    /// before one frame, as a network read stalls.
+    struct Signal {
+        frames: usize,
+        at: usize,
+        stall_at: Option<usize>,
+        ramp: bool,
+    }
+
+    impl Signal {
+        fn value(&self, frame: usize) -> f32 {
+            if self.ramp { frame as f32 / self.frames as f32 } else { 0.5 }
+        }
+    }
+
+    impl Iterator for Signal {
+        type Item = Sample;
+        fn next(&mut self) -> Option<Sample> {
+            let frame = self.at / 2;
+            if frame >= self.frames {
+                return None;
+            }
+            if self.stall_at == Some(frame) && self.at % 2 == 0 {
+                self.stall_at = None;
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            self.at += 1;
+            Some(self.value(frame))
+        }
+    }
+
+    impl Source for Signal {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> ChannelCount {
+            NonZero::new(2).unwrap()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            NonZero::new(44100).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+            self.at = (pos.as_secs_f64() * 44100.0) as usize * 2;
+            Ok(())
+        }
+    }
+
+    /// Pulls `source` to its end (or `limit` samples), as the audio callback does, and returns
+    /// how many samples came out and the largest step between consecutive samples of one channel.
+    fn pull(source: &mut Prefetch, limit: usize, previous: &mut [f32; 2]) -> (usize, f32) {
+        let (mut count, mut worst) = (0, 0.0f32);
+        while count < limit {
+            let Some(sample) = source.next() else { break };
+            let lane = count % 2;
+            worst = worst.max((sample - previous[lane]).abs());
+            previous[lane] = sample;
+            count += 1;
+        }
+        (count, worst)
+    }
+
+    /// A real file through the real output, silently: `UMAKBANG_TEST_AUDIO=<file> cargo test
+    /// --release real_playback -- --ignored`. Three seconds should hand three seconds of frames
+    /// to the visualizers, and the position move with them.
+    #[test]
+    #[ignore]
+    fn real_playback_keeps_up() {
+        let Ok(path) = std::env::var("UMAKBANG_TEST_AUDIO") else { return };
+        let mut player = Player::new(None).expect("output");
+        player.set_volume(0.0);
+        player.play(&path).expect("play");
+        std::thread::sleep(Duration::from_secs(3));
+        let (written, rate) = player.ring.lock().map(|r| (r.written, r.sample_rate)).unwrap();
+        let seconds = written as f64 / rate as f64;
+        eprintln!("{seconds:.2}s of frames in 3s, position {:.2}s", player.position());
+        assert!((2.7..3.4).contains(&seconds), "{seconds}");
+        assert!((2.7..3.4).contains(&player.position()), "{}", player.position());
+        // A seek lands, and playback carries on from there.
+        player.seek(30.0);
+        std::thread::sleep(Duration::from_secs(1));
+        eprintln!("after seek: position {:.2}s", player.position());
+        assert!((30.5..31.5).contains(&player.position()), "{}", player.position());
+    }
+
+    #[test]
+    fn prefetch_passes_the_track_through_whole() {
+        let mut source = Prefetch::new(Signal { frames: 5000, at: 0, stall_at: None, ramp: false });
+        let mut out = Vec::new();
+        while let Some(sample) = source.next() {
+            out.push(sample);
+        }
+        assert_eq!(out.len(), 10000);
+        // Faded in from silence over the first few milliseconds, then the signal as it is.
+        assert_eq!(out[0], 0.0);
+        assert!(out[2 * FADE_FRAMES..].iter().all(|&s| s == 0.5));
+    }
+
+    #[test]
+    fn a_stalled_decoder_dies_away_and_fades_back_instead_of_popping() {
+        // The decoder stalls for 150ms after a second of audio; the callback keeps pulling.
+        let mut source = Prefetch::new(Signal { frames: 88200, at: 0, stall_at: Some(44100), ramp: false });
+        let (count, worst) = pull(&mut source, 400_000_000, &mut [0.0; 2]);
+        // Every frame still came out (plus however much was filled in while starved)...
+        assert!(count >= 176400, "{count}");
+        // ...and nowhere did a channel jump: a cut to zero would be a step of 0.5.
+        assert!(worst < 0.01, "largest step {worst}");
+    }
+
+    #[test]
+    fn a_seek_crossfades_through_silence() {
+        let mut source = Prefetch::new(Signal { frames: 44100, at: 0, stall_at: None, ramp: true });
+        let mut previous = [0.0; 2];
+        let (_, before) = pull(&mut source, 20000, &mut previous);
+        source.try_seek(Duration::from_millis(800)).unwrap();
+        let (_, after) = pull(&mut source, 400_000_000, &mut previous);
+        // The ramp is at ~0.23 when the seek lands at 0.8: a jump of 0.57 if not faded.
+        assert!(before < 0.01 && after < 0.01, "{before} {after}");
+    }
 
     fn write(ring: &mut Ring, frames: u64, now: Instant) {
         let before = ring.written;
