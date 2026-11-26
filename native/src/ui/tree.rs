@@ -646,6 +646,33 @@ fn seek_live<A: Clone + PartialEq>(
     }
 }
 
+/// How tall a scrolling box's content is: the lowest edge anything inside reaches, down
+/// through every box that lets its content spill out. Its children alone are not enough - a
+/// child stretched to the box's own height, as a row's are, holds content taller than itself.
+fn scroll_extent(tree: &TaffyTree<usize>, node: NodeId) -> f32 {
+    let padding = tree.layout(node).map_or(0.0, |l| l.padding.bottom);
+    tree.children(node).unwrap_or_default().into_iter().filter_map(|child| reach(tree, child)).fold(0.0, f32::max) + padding
+}
+
+/// The bottom of `node` and whatever spills out of it, from its parent's top; `None` for a box
+/// positioned out of the flow, which a scroll does not follow.
+fn reach(tree: &TaffyTree<usize>, node: NodeId) -> Option<f32> {
+    let style = tree.style(node).ok()?;
+    if style.position == Position::Absolute {
+        return None;
+    }
+    let layout = tree.layout(node).ok()?;
+    let mut bottom = layout.size.height;
+    if style.overflow.y == taffy::Overflow::Visible {
+        for child in tree.children(node).unwrap_or_default() {
+            if let Some(inner) = reach(tree, child) {
+                bottom = bottom.max(inner);
+            }
+        }
+    }
+    Some(layout.location.y + bottom)
+}
+
 fn build<A>(tree: &mut TaffyTree<usize>, el: &El<A>, leaves: &mut Vec<*const El<A>>) -> NodeId {
     if let Kind::Text { .. } | Kind::Wrapped { .. } = el.kind {
         leaves.push(el as *const El<A>);
@@ -818,18 +845,13 @@ fn paint_node<A: Clone + PartialEq>(
     let child_origin = (x, y - el.scroll_y);
     let ids = tree.children(node).expect("children");
     if let Some(key) = el.scroll_key {
-        let extent = ids.iter().filter_map(|id| tree.layout(*id).ok()).map(|l| l.location.y + l.size.height).fold(0.0, f32::max) + layout.padding.bottom;
+        let extent = scroll_extent(tree, node);
         let viewport = content[3] - content[1] + layout.padding.top + layout.padding.bottom;
         ui.extents.insert(key, (viewport, extent));
         ui.scroll_rects.insert(key, visible);
     }
     if let Some(color) = el.scrollbar {
-        let extent = ids
-            .iter()
-            .filter_map(|id| tree.layout(*id).ok())
-            .map(|l| l.location.y + l.size.height)
-            .fold(0.0, f32::max)
-            + layout.padding.bottom;
+        let extent = scroll_extent(tree, node);
         let viewport = content[3] - content[1] + layout.padding.top + layout.padding.bottom;
         if extent > viewport + 0.5 {
             let track = [x, y, x + w, y + h].map(|v| v * scale);
