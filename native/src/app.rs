@@ -1,4 +1,4 @@
-//! The window: winit for the OS window and input, softbuffer to put CPU-drawn pixels on screen.
+//! The window: winit for the OS window and input; `present` puts the CPU-drawn pixels on screen.
 //!
 //! Frames are drawn only when something changed - input, a resize, a folder opening - plus the
 //! animation frames while a track plays. Those are the shared loop of `audio-tap.ts`: 60 a
@@ -26,7 +26,6 @@ pub mod ops;
 use resvg::tiny_skia::Pixmap;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -195,8 +194,7 @@ pub struct App {
     /// The scale the file icons in `state.file_icons` were made at.
     icon_scale: f32,
     window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    surface_size: (u32, u32),
+    screen: Option<crate::present::Screen>,
     frame: Option<Pixmap>,
     pub hits: Vec<Hit<Action>>,
     hovered: Option<Action>,
@@ -479,8 +477,7 @@ impl App {
             shell: ShellIcons::default(),
             icon_scale: 1.0,
             window: None,
-            surface: None,
-            surface_size: (0, 0),
+            screen: None,
             frame: None,
             hits: Vec::new(),
             hovered: None,
@@ -5666,54 +5663,13 @@ impl App {
             self.advance(phase);
         }
         let advanced = started.elapsed();
-        let resized = self.surface_size != (w, h);
-        let live = !self.full && !resized && self.draw_live(w, h, scale);
+        let live = !self.full && self.draw_live(w, h, scale);
         if !live {
             self.draw(w, h, scale);
         }
         self.full = false;
-        let Some(surface) = self.surface.as_mut() else { return };
-        if resized {
-            if surface.resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap()).is_err() {
-                return;
-            }
-            self.surface_size = (w, h);
-        }
-        let Ok(mut buffer) = surface.buffer_mut() else { return };
-        let frame = self.frame.as_ref().expect("drawn");
-        let pixels = frame.data();
-        // The window's background is opaque, so premultiplied is the colour itself.
-        let copy = |buffer: &mut [u32], rect: [u32; 4]| {
-            for y in rect[1]..rect[3] {
-                let (from, to) = ((y * w + rect[0]) as usize, (y * w + rect[2]) as usize);
-                for (dst, px) in buffer[from..to].iter_mut().zip(pixels[from * 4..to * 4].chunks_exact(4)) {
-                    *dst = (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32;
-                }
-            }
-        };
-        if live && buffer.age() == 1 {
-            let damage: Vec<softbuffer::Rect> = self
-                .ui
-                .damage
-                .iter()
-                .filter(|r| r[2] > r[0] && r[3] > r[1])
-                .map(|&r| {
-                    copy(&mut buffer, r);
-                    softbuffer::Rect {
-                        x: r[0],
-                        y: r[1],
-                        width: NonZeroU32::new(r[2] - r[0]).unwrap(),
-                        height: NonZeroU32::new(r[3] - r[1]).unwrap(),
-                    }
-                })
-                .collect();
-            if !damage.is_empty() {
-                let _ = buffer.present_with_damage(&damage);
-            }
-        } else {
-            copy(&mut buffer, [0, 0, w, h]);
-            let _ = buffer.present();
-        }
+        let (Some(screen), Some(frame)) = (self.screen.as_mut(), self.frame.as_ref()) else { return };
+        screen.present(frame, live.then_some(&self.ui.damage[..]));
         if self.timing {
             eprintln!("present: advance {:.2}ms, total {:.2}ms", advanced.as_secs_f64() * 1000.0, started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -5796,8 +5752,7 @@ impl ApplicationHandler<Wake> for App {
         if self.data.settings.always_on_top {
             window.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
         }
-        let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
+        self.screen = Some(crate::present::Screen::new(window.clone()));
         self.window = Some(window);
         self.sync_background(false);
         #[cfg(target_os = "macos")]
