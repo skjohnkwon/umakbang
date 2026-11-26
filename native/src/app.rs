@@ -4412,11 +4412,24 @@ impl App {
             Action::Yt(what) => self.youtube_action(what),
             Action::YtShow(which) => {
                 let path = match which {
-                    None => Some(crate::youtube::download_dir(self.data.settings.youtube_dir.as_deref())),
+                    None => {
+                        // The first download makes the folder; before it, there is nothing for
+                        // Finder or Explorer to show, and they say nothing. It is made here.
+                        let dir = crate::youtube::download_dir(self.data.settings.youtube_dir.as_deref());
+                        if let Err(e) = std::fs::create_dir_all(&dir) {
+                            self.notify(format!("{} can't be made: {e}", dir.display()));
+                            return;
+                        }
+                        Some(dir)
+                    }
                     Some(i) => self.state.youtube.got.get(i).cloned(),
                 };
                 if let Some(path) = path {
-                    ops::reveal(&path, true);
+                    if !path.exists() {
+                        self.notify(format!("{} is no longer there.", path.display()));
+                    } else {
+                        ops::reveal(&path, true);
+                    }
                 }
             }
             Action::StatsRange(index) => {
