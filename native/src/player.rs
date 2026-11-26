@@ -190,6 +190,9 @@ const CHUNK_FRAMES: usize = 1024;
 const AHEAD_SECONDS: usize = 3;
 /// Sound coming back after a gap or a seek is faded in over this many frames (~6ms).
 const FADE_FRAMES: usize = 256;
+/// Frames between the points where rodio looks at the rate again: how soon a varispeed change
+/// is heard (about 23ms at 44.1kHz).
+const SPAN_FRAMES: usize = 1024;
 
 struct Chunk {
     /// Which seek it was decoded after; anything from before the latest seek is thrown away.
@@ -225,6 +228,8 @@ struct Prefetch {
     duration: Option<Duration>,
     /// Position within the current frame.
     lane: usize,
+    /// Samples out in the current span.
+    spun: usize,
     /// Each channel's last value out, decayed while starved.
     held: Vec<f32>,
     /// What was playing when sound came back, still dying away under the fade-in: the new
@@ -255,6 +260,7 @@ impl Prefetch {
             rate,
             duration,
             lane: 0,
+            spun: 0,
             held: vec![0.0; width],
             tail: vec![0.0; width],
             starved: false,
@@ -271,6 +277,10 @@ impl Prefetch {
     }
 
     fn advance_lane(&mut self) {
+        self.spun += 1;
+        if self.spun >= SPAN_FRAMES * self.held.len() {
+            self.spun = 0;
+        }
         self.lane += 1;
         if self.lane >= self.held.len() {
             self.lane = 0;
@@ -399,8 +409,11 @@ impl Iterator for Prefetch {
 }
 
 impl Source for Prefetch {
+    /// Fixed spans, though nothing in the track changes between them: rodio reads the rate
+    /// again only where a span ends, and varispeed works by changing the rate - with no ends,
+    /// a new speed was never heard.
     fn current_span_len(&self) -> Option<usize> {
-        None
+        Some(SPAN_FRAMES * self.held.len() - self.spun)
     }
     fn channels(&self) -> ChannelCount {
         self.channels
@@ -635,6 +648,34 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
         eprintln!("after seek: position {:.2}s", player.position());
         assert!((30.5..31.5).contains(&player.position()), "{}", player.position());
+    }
+
+    #[test]
+    fn a_speed_change_is_heard_mid_track() {
+        use rodio::source::UniformSourceIterator;
+        // Two seconds at 44.1kHz, resampled to 44.1kHz the way the output does it; after the
+        // first half second the speed doubles, so the rest takes half as long.
+        // The speed is set as rodio's own player sets it: from a flag, read every few ms.
+        let faster = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = faster.clone();
+        let source = Prefetch::new(Signal { frames: 88200, at: 0, stall_at: None, ramp: false })
+            .speed(1.0)
+            .periodic_access(Duration::from_millis(5), move |s| {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    s.set_factor(2.0);
+                }
+            });
+        let mut out = UniformSourceIterator::new(source, NonZero::new(2).unwrap(), NonZero::new(44100).unwrap());
+        let mut frames = 0;
+        while out.next().is_some() {
+            frames += 1;
+            if frames == 2 * 22050 {
+                faster.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let frames = frames / 2;
+        // 22050 at the old speed, then 66150 more at double: about 55125 in all, not 88200.
+        assert!((54000..56500).contains(&frames), "{frames}");
     }
 
     #[test]
