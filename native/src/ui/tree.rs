@@ -71,6 +71,8 @@ pub struct El<A> {
     pub shadow: Option<(f32, f32, f32)>,
     /// A name for a scrolling box, under which its heights are reported (`Ui::extents`).
     pub scroll_key: Option<&'static str>,
+    /// Scrollbars an `overlay` paints, recorded so they can be dragged (see `bars`).
+    pub bars: Vec<BarSpec>,
     /// Wrapped text set centred, line by line (`text-center`).
     pub text_center: bool,
 }
@@ -95,6 +97,7 @@ pub fn div<A>() -> El<A> {
         live: false,
         shadow: None,
         scroll_key: None,
+        bars: Vec::new(),
         text_center: false,
     }
 }
@@ -419,6 +422,13 @@ impl<A> El<A> {
         self.scroll_key = Some(key);
         self.scroll(offset)
     }
+    /// Records a scrollbar this element's `overlay` paints itself, so it can be dragged: along
+    /// the right edge (or the bottom, `horizontal`), `inset` logical pixels short of the far
+    /// end, scrolling `key` through `content` with `viewport` of it in view.
+    pub fn bar(mut self, key: &'static str, horizontal: bool, content: f32, viewport: f32, inset: f32) -> Self {
+        self.bars.push(BarSpec { key, horizontal, content, viewport, inset });
+        self
+    }
     /// Scrolls, with Chromium's thin scrollbar drawn when the content is taller than the box.
     pub fn scrollbar(mut self, color: Rgba) -> Self {
         self.scrollbar = Some(color);
@@ -478,6 +488,18 @@ pub struct Backdrop {
     /// Device pixels: left, top, right, bottom.
     pub rect: [u32; 4],
     pixels: Pixmap,
+    /// What was drawn over it after it - a dialog's dim, a menu, the tour's card, a pane's
+    /// grip - as one box, device pixels, and that box as the full frame finished it. An
+    /// animation frame puts it back over the element, so what is on top stays on top.
+    cover: Option<[u32; 4]>,
+    patch: Option<Pixmap>,
+}
+
+impl Backdrop {
+    /// Whether anything was drawn over it.
+    pub fn covered(&self) -> bool {
+        self.cover.is_some()
+    }
 }
 
 /// Lays out and paints `root` into `target`, returning where every action can be clicked.
@@ -485,11 +507,21 @@ pub fn render<A: Clone + PartialEq>(ui: &mut Ui, root: &El<A>, target: &mut Pixm
     let (width, height) = (target.width() as f32 / scale, target.height() as f32 / scale);
     let (tree, root_id) = layout(ui, root, width, height);
     ui.backdrops.clear();
+    ui.bars.clear();
     ui.spinning = false;
     let mut hits = Vec::new();
     let mut pm = target.as_mut();
     let clip = [0.0, 0.0, width, height];
     paint_node(ui, &tree, root_id, root, (0.0, 0.0), clip, scale, 1.0, false, hovered, &mut pm, &mut hits, true);
+    let width = pm.width();
+    for b in ui.backdrops.iter_mut() {
+        let Some(c) = b.cover else { continue };
+        let (w, h) = (c[2] - c[0], c[3] - c[1]);
+        if let Some(mut patch) = Pixmap::new(w, h) {
+            copy_rows(pm.data_mut(), width, (c[0], c[1]), patch.data_mut(), w, (0, 0), (w, h));
+            b.patch = Some(patch);
+        }
+    }
     hits
 }
 
@@ -588,7 +620,7 @@ fn snapshot(ui: &mut Ui, pm: &mut PixmapMut, rect: [u32; 4]) {
         let width = pm.width();
         copy_rows(pm.data_mut(), width, (rect[0], rect[1]), pixels.data_mut(), w, (0, 0), (w, h));
     }
-    ui.backdrops.push(Backdrop { rect, pixels });
+    ui.backdrops.push(Backdrop { rect, pixels, cover: None, patch: None });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -620,6 +652,10 @@ fn seek_live<A: Clone + PartialEq>(
             return;
         };
         *index += 1;
+        // Under a dim or a dialog entirely: it stays as the last full frame left it.
+        if backdrop.cover == Some(rect) {
+            return;
+        }
         let (bw, bh) = (rect[2] - rect[0], rect[3] - rect[1]);
         if bw > 0 && bh > 0 {
             let width = pm.width();
@@ -629,6 +665,12 @@ fn seek_live<A: Clone + PartialEq>(
         let bounds = [rect[0] as f32 / scale, rect[1] as f32 / scale, rect[2] as f32 / scale, rect[3] as f32 / scale];
         let mut hits = Vec::new();
         paint_node(ui, tree, node, el, origin, intersect(clip, bounds), scale, inherited, false, hovered, pm, &mut hits, false);
+        // And what is drawn over it goes back on top.
+        let backdrop = &ui.backdrops[*index - 1];
+        if let (Some(c), Some(patch)) = (backdrop.cover, backdrop.patch.as_ref()) {
+            let width = pm.width();
+            copy_rows(patch.data(), c[2] - c[0], (0, 0), pm.data_mut(), width, (c[0], c[1]), (c[2] - c[0], c[3] - c[1]));
+        }
         ui.damage.push(rect);
         return;
     }
@@ -683,7 +725,32 @@ fn build<A>(tree: &mut TaffyTree<usize>, el: &El<A>, leaves: &mut Vec<*const El<
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Paints `el` and everything in it. What a live element holds is part of it, so it doesn't
+/// count as drawn over it (`Backdrop::covered`).
+#[allow(clippy::too_many_arguments)]
 fn paint_node<A: Clone + PartialEq>(
+    ui: &mut Ui,
+    tree: &TaffyTree<usize>,
+    node: NodeId,
+    el: &El<A>,
+    origin: (f32, f32),
+    clip: [f32; 4],
+    scale: f32,
+    inherited: f32,
+    flatten: bool,
+    hovered: Option<&A>,
+    pm: &mut PixmapMut,
+    hits: &mut Vec<Hit<A>>,
+    record: bool,
+) {
+    let was = ui.in_live;
+    ui.in_live |= el.live;
+    paint_one(ui, tree, node, el, origin, clip, scale, inherited, flatten, hovered, pm, hits, record);
+    ui.in_live = was;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_one<A: Clone + PartialEq>(
     ui: &mut Ui,
     tree: &TaffyTree<usize>,
     node: NodeId,
@@ -708,6 +775,16 @@ fn paint_node<A: Clone + PartialEq>(
     let visible = intersect(rect, clip);
     if visible[2] <= visible[0] || visible[3] <= visible[1] {
         return;
+    }
+    // Drawn over a live element recorded earlier: that one is covered.
+    if record && !ui.in_live && !ui.backdrops.is_empty() && draws(el) {
+        let r = device_rect(visible, scale, pm);
+        for b in ui.backdrops.iter_mut() {
+            let o = [r[0].max(b.rect[0]), r[1].max(b.rect[1]), r[2].min(b.rect[2]), r[3].min(b.rect[3])];
+            if o[0] < o[2] && o[1] < o[3] {
+                b.cover = Some(b.cover.map_or(o, |c| [c[0].min(o[0]), c[1].min(o[1]), c[2].max(o[2]), c[3].max(o[3])]));
+            }
+        }
     }
     if el.live && record {
         let rect = device_rect(visible, scale, pm);
@@ -850,12 +927,16 @@ fn paint_node<A: Clone + PartialEq>(
         ui.extents.insert(key, (viewport, extent));
         ui.scroll_rects.insert(key, visible);
     }
+    let mut bar = None;
     if let Some(color) = el.scrollbar {
         let extent = scroll_extent(tree, node);
         let viewport = content[3] - content[1] + layout.padding.top + layout.padding.bottom;
         if extent > viewport + 0.5 {
             let track = [x, y, x + w, y + h].map(|v| v * scale);
             scrollbar_v(pm, track, extent, viewport, el.scroll_y, color, scale);
+            if let Some(key) = el.scroll_key {
+                bar = Some(Bar { key, horizontal: false, track, visible: visible.map(|v| v * scale), content: extent, viewport, z: 0 });
+            }
         }
     }
     for (child, child_el) in ids.iter().copied().zip(el.children.iter()) {
@@ -864,6 +945,27 @@ fn paint_node<A: Clone + PartialEq>(
     if let Some(painter) = &el.overlay {
         painter(pm, content.map(|v| v * scale), scale);
     }
+    // After the children, so that a press on a bar beats what it is drawn over, and loses
+    // to anything drawn later over both (a dialog's backdrop).
+    if record {
+        if let Some(bar) = bar {
+            ui.bars.push(Bar { z: hits.len(), ..bar });
+        }
+        for spec in &el.bars {
+            let r = content.map(|v| v * scale);
+            let inset = spec.inset * scale;
+            let track = if spec.horizontal { [r[0], r[1], r[2] - inset, r[3]] } else { [r[0], r[1], r[2], r[3] - inset] };
+            if spec.content > spec.viewport {
+                let visible = intersect(track, visible.map(|v| v * scale));
+                ui.bars.push(Bar { key: spec.key, horizontal: spec.horizontal, track, visible, content: spec.content, viewport: spec.viewport, z: hits.len() });
+            }
+        }
+    }
+}
+
+/// Whether an element puts anything on screen of its own, rather than only holding others.
+fn draws<A>(el: &El<A>) -> bool {
+    !matches!(el.kind, Kind::Box) || el.bg.is_some_and(|c| c.a > 0.0) || el.border_color.is_some() || el.overlay.is_some() || el.shadow.is_some() || el.scrollbar.is_some()
 }
 
 fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
@@ -913,7 +1015,7 @@ pub fn fill_rect(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, c
     }
     // A rounded one keeps its corners where they are in view: the whole shape, trimmed.
     let Some(path) = rounded_path(snap(r, scale), radius * scale) else { return };
-    cut(pm, clip, scale, |target, shift| target.fill_path(&path, &paint, FillRule::Winding, shift, None));
+    cut(pm, r, clip, scale, |target, shift| target.fill_path(&path, &paint, FillRule::Winding, shift, None));
 }
 
 fn stroke_rounded(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, width: f32, color: Rgba, scale: f32) {
@@ -934,19 +1036,21 @@ fn stroke_rounded(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, 
         pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     } else {
         // Half scrolled out of view, the part still in view keeps its border.
-        cut(pm, clip, scale, |target, shift| target.stroke_path(&path, &paint, &stroke, shift, None));
+        cut(pm, r, clip, scale, |target, shift| target.stroke_path(&path, &paint, &stroke, shift, None));
     }
 }
 
 /// Draws into a pixmap the size of the visible part of `clip` and copies that in: whatever
 /// `draw` puts outside the clip falls off the pixmap's edges. `draw` is handed the offset to
-/// draw at.
-fn cut(pm: &mut PixmapMut, clip: [f32; 4], scale: f32, draw: impl FnOnce(&mut PixmapMut, Transform)) {
-    let c = clip.map(|v| v * scale);
-    let left = c[0].ceil().max(0.0);
-    let top = c[1].ceil().max(0.0);
-    let right = c[2].floor().min(pm.width() as f32);
-    let bottom = c[3].floor().min(pm.height() as f32);
+/// draw at. The pixmap is only as big as `shape` (logical, the box drawn in) where it is in
+/// the clip: it is cleared and composited pixel by pixel, and one the size of a whole scroll
+/// box, at Retina, cost more than the rest of the frame.
+fn cut(pm: &mut PixmapMut, shape: [f32; 4], clip: [f32; 4], scale: f32, draw: impl FnOnce(&mut PixmapMut, Transform)) {
+    let (c, r) = (clip.map(|v| v * scale), shape.map(|v| v * scale));
+    let left = c[0].ceil().max((r[0] - 1.0).floor()).max(0.0);
+    let top = c[1].ceil().max((r[1] - 1.0).floor()).max(0.0);
+    let right = c[2].floor().min((r[2] + 1.0).ceil()).min(pm.width() as f32);
+    let bottom = c[3].floor().min((r[3] + 1.0).ceil()).min(pm.height() as f32);
     if right <= left || bottom <= top {
         return;
     }
@@ -1006,19 +1110,84 @@ pub fn measure(text: &mut Text, s: &str, style: &TextStyle) -> f32 {
     text.width(s, style)
 }
 
+/// A scrollbar's arrow buttons, each end, in logical pixels.
+const ARROW: f32 = 12.0;
+/// How wide a scrollbar is to the pointer: a little more than it is drawn.
+pub const BAR_GRIP: f32 = 12.0;
+
+/// Where a scrollbar's thumb is between the arrows of a track running `start` to `end` (device
+/// pixels): its start and length. None when there is nothing to scroll or no room for it.
+pub fn thumb(start: f32, end: f32, content: f32, viewport: f32, offset: f32, scale: f32) -> Option<(f32, f32)> {
+    let arrow = ARROW * scale;
+    let (top, bottom) = (start + arrow, end - arrow);
+    if bottom <= top || content <= viewport {
+        return None;
+    }
+    let length = ((bottom - top) * viewport / content).max(16.0 * scale).min(bottom - top);
+    Some((top + (bottom - top - length) * (offset / (content - viewport)).clamp(0.0, 1.0), length))
+}
+
+/// A scrollbar as last drawn, for the pointer to take hold of.
+#[derive(Clone, Copy, Debug)]
+pub struct Bar {
+    /// The scrolling box's name: which offset it moves.
+    pub key: &'static str,
+    pub horizontal: bool,
+    /// The whole track, arrows included, in device pixels; the bar runs along its right (or
+    /// bottom) edge.
+    pub track: [f32; 4],
+    /// The part of it on screen.
+    pub visible: [f32; 4],
+    pub content: f32,
+    pub viewport: f32,
+    /// How many hits were recorded before it: anything recorded after is drawn over it.
+    pub z: usize,
+}
+
+impl Bar {
+    /// The grip's strip, in device pixels.
+    pub fn strip(&self, scale: f32) -> [f32; 4] {
+        let t = self.visible;
+        if self.horizontal { [t[0], t[3] - BAR_GRIP * scale, t[2], t[3]] } else { [t[2] - BAR_GRIP * scale, t[1], t[2], t[3]] }
+    }
+    /// The track's ends along the bar.
+    pub fn ends(&self) -> (f32, f32) {
+        if self.horizontal { (self.track[0], self.track[2]) } else { (self.track[1], self.track[3]) }
+    }
+    /// The offset that puts the thumb's start at `at` (device pixels along the bar).
+    pub fn offset_at(&self, at: f32, scale: f32) -> f32 {
+        let (start, end) = self.ends();
+        let Some((_, length)) = thumb(start, end, self.content, self.viewport, 0.0, scale) else { return 0.0 };
+        let room = end - start - 2.0 * ARROW * scale - length;
+        if room <= 0.0 {
+            return 0.0;
+        }
+        ((at - start - ARROW * scale) / room).clamp(0.0, 1.0) * (self.content - self.viewport)
+    }
+    /// The arrows' length, device pixels.
+    pub fn arrow(scale: f32) -> f32 {
+        ARROW * scale
+    }
+}
+
+/// A scrollbar an element's overlay paints (`El::bar`).
+#[derive(Clone, Copy)]
+pub struct BarSpec {
+    key: &'static str,
+    horizontal: bool,
+    content: f32,
+    viewport: f32,
+    inset: f32,
+}
+
 /// Chromium's thin native scrollbar, vertical, along the right edge of `track` (device pixels):
 /// a small arrow at each end and a rounded thumb between them, sized by how much of the content
 /// is in view.
 pub fn scrollbar_v(pm: &mut PixmapMut, track: [f32; 4], content: f32, viewport: f32, offset: f32, color: Rgba, scale: f32) {
     let x = track[2] - 9.0 * scale;
     let width = 7.0 * scale;
-    let arrow = 12.0 * scale;
-    let (top, bottom) = (track[1] + arrow, track[3] - arrow);
-    if bottom <= top || content <= viewport {
-        return;
-    }
-    let length = ((bottom - top) * viewport / content).max(16.0 * scale);
-    let at = top + (bottom - top - length) * (offset / (content - viewport)).clamp(0.0, 1.0);
+    let arrow = ARROW * scale;
+    let Some((at, length)) = thumb(track[1], track[3], content, viewport, offset, scale) else { return };
     fill_device(pm, [x, at, x + width, at + length], 3.5 * scale, color);
     arrow_mark(pm, x + width / 2.0, track[1] + arrow / 2.0, 0, color, scale);
     arrow_mark(pm, x + width / 2.0, track[3] - arrow / 2.0, 1, color, scale);
@@ -1028,13 +1197,8 @@ pub fn scrollbar_v(pm: &mut PixmapMut, track: [f32; 4], content: f32, viewport: 
 pub fn scrollbar_h(pm: &mut PixmapMut, track: [f32; 4], content: f32, viewport: f32, offset: f32, color: Rgba, scale: f32) {
     let y = track[3] - 9.0 * scale;
     let height = 7.0 * scale;
-    let arrow = 12.0 * scale;
-    let (left, right) = (track[0] + arrow, track[2] - arrow);
-    if right <= left || content <= viewport {
-        return;
-    }
-    let length = ((right - left) * viewport / content).max(16.0 * scale);
-    let at = left + (right - left - length) * (offset / (content - viewport)).clamp(0.0, 1.0);
+    let arrow = ARROW * scale;
+    let Some((at, length)) = thumb(track[0], track[2], content, viewport, offset, scale) else { return };
     fill_device(pm, [at, y, at + length, y + height], 3.5 * scale, color);
     arrow_mark(pm, track[0] + arrow / 2.0, y + height / 2.0, 2, color, scale);
     arrow_mark(pm, track[2] - arrow / 2.0, y + height / 2.0, 3, color, scale);
@@ -1144,5 +1308,24 @@ fn paint_input(ui: &mut Ui, pm: &mut PixmapMut, field: &Field, content: [f32; 4]
     if field.focused {
         let x = left.round() / scale;
         fill_rect(pm, [x, top / scale, x + 1.0 / scale, (top + style.line_height) / scale], clip, 0.0, field.style.color.alpha(opacity), scale);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Holding the thumb and moving it puts the content where the thumb is drawn.
+    #[test]
+    fn a_held_thumb_follows_the_pointer() {
+        let scale = 2.0;
+        let bar = Bar { key: "k", horizontal: false, track: [0.0, 100.0, 20.0, 700.0], visible: [0.0, 100.0, 20.0, 700.0], content: 2000.0, viewport: 300.0, z: 0 };
+        for offset in [0.0, 1.0, 400.0, 1699.0, 1700.0] {
+            let (at, _) = thumb(100.0, 700.0, 2000.0, 300.0, offset, scale).unwrap();
+            assert!((bar.offset_at(at, scale) - offset).abs() < 0.01, "{offset}");
+        }
+        // Dragged past either end, it stops there.
+        assert_eq!(bar.offset_at(0.0, scale), 0.0);
+        assert_eq!(bar.offset_at(10_000.0, scale), 1700.0);
     }
 }

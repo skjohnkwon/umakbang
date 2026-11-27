@@ -470,10 +470,28 @@ fn main() {
         }
         let frame = app.draw(w, h, scale);
         frame.save_png(out).expect("write png");
+        // `UMAKBANG_LIVE_SHOT=<png>`: half a second of animation frames over that one, as the
+        // window would show them - what is drawn over a visualizer has to stay over it.
+        if let Ok(live) = std::env::var("UMAKBANG_LIVE_SHOT") {
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                app.advance(visualizers::Phase::Live);
+                if !app.draw_live(w, h, scale) {
+                    eprintln!("live frame fell back to a full one");
+                }
+            }
+            app.frame.as_ref().expect("frame").save_png(live).expect("write png");
+        }
         if std::env::var("UMAKBANG_HITS").is_ok() {
             for hit in &app.hits {
                 let [x0, y0, x1, y1] = hit.rect;
                 println!("{:?} @{x0:.1},{y0:.1} {:.1}x{:.1}", hit.action, x1 - x0, y1 - y0);
+            }
+            for b in &app.ui.backdrops {
+                println!("live {:?} covered={}", b.rect, b.covered());
+            }
+            for bar in &app.ui.bars {
+                println!("bar {} h={} track={:?} content={:.1} viewport={:.1} z={}/{}", bar.key, bar.horizontal, bar.track, bar.content, bar.viewport, bar.z, app.hits.len());
             }
         }
         return;

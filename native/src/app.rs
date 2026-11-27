@@ -195,7 +195,7 @@ pub struct App {
     icon_scale: f32,
     window: Option<Rc<Window>>,
     screen: Option<crate::present::Screen>,
-    frame: Option<Pixmap>,
+    pub frame: Option<Pixmap>,
     pub hits: Vec<Hit<Action>>,
     hovered: Option<Action>,
     cursor: PhysicalPosition<f64>,
@@ -218,6 +218,8 @@ pub struct App {
     /// The pointer went down on the waveform and has not come up.
     scrubbing: bool,
     timing: bool,
+    /// With `timing`: who last asked for a full frame, printed with it.
+    full_by: Option<&'static std::panic::Location<'static>>,
     /// The pane sizes, where they are saved, and the drag in progress: which handle, the
     /// pointer's logical coordinate along its axis when it went down, and the size then.
     pub layout: Layout,
@@ -343,6 +345,8 @@ enum Drag {
     PaneSplit,
     /// The volume slider, by the pointer's height on it.
     Volume,
+    /// A scrollbar's thumb, held this many device pixels from its start.
+    Bar(crate::ui::tree::Bar, f32),
 }
 
 impl App {
@@ -497,6 +501,7 @@ impl App {
             full: true,
             scrubbing: false,
             timing: std::env::var("UMAKBANG_TIMING").is_ok(),
+            full_by: None,
             layout,
             layout_path: None,
             resizing: None,
@@ -3708,6 +3713,83 @@ impl App {
         self.state.now.as_ref().is_some_and(|n| n.playing)
     }
 
+    /// A press on a scrollbar, as Chromium takes one: the thumb is held and follows the
+    /// pointer, an arrow steps 40px, and the track either side of the thumb pages. False when
+    /// the pointer isn't on one, or something drawn over it is under the pointer instead.
+    fn press_bar(&mut self) -> bool {
+        let scale = self.scale() as f32;
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        let inside = |r: [f32; 4]| x >= r[0] && x < r[2] && y >= r[1] && y < r[3];
+        let Some(bar) = self.ui.bars.iter().rev().find(|b| inside(b.strip(scale))).copied() else { return false };
+        // A hit recorded after the bar - a dialog over it - takes the press.
+        if self.hits.iter().enumerate().rev().find(|(_, h)| inside(h.rect)).is_some_and(|(i, _)| i >= bar.z) {
+            return false;
+        }
+        let Some(offset) = self.scroll_of(bar.key) else { return false };
+        let (start, end) = bar.ends();
+        let along = if bar.horizontal { x } else { y };
+        let arrow = crate::ui::tree::Bar::arrow(scale);
+        let Some((at, length)) = crate::ui::tree::thumb(start, end, bar.content, bar.viewport, offset, scale) else { return false };
+        if along < start + arrow {
+            self.scroll_to(bar.key, offset - 40.0);
+        } else if along >= end - arrow {
+            self.scroll_to(bar.key, offset + 40.0);
+        } else if along < at {
+            self.scroll_to(bar.key, offset - bar.viewport * 0.875);
+        } else if along >= at + length {
+            self.scroll_to(bar.key, offset + bar.viewport * 0.875);
+        } else {
+            self.resizing = Some(Drag::Bar(bar, along - at));
+        }
+        true
+    }
+
+    /// The scroll offset a named scrolling box is at.
+    fn scroll_of(&mut self, key: &str) -> Option<f32> {
+        self.scroll_slot(key).map(|v| *v)
+    }
+
+    /// Where each named scrolling box keeps its offset.
+    fn scroll_slot(&mut self, key: &str) -> Option<&mut f32> {
+        let s = &mut self.state;
+        Some(match key {
+            "table" => &mut s.scroll,
+            "table_x" => &mut s.scroll_x,
+            "settings" => &mut s.settings_scroll,
+            "nav" => &mut s.nav_scroll,
+            "tags" => &mut s.tags_scroll,
+            "tree" => &mut s.tree_scroll,
+            "contracts" => &mut s.contracts.scroll,
+            "youtube" => &mut s.youtube.scroll,
+            "stats" => &mut s.stats.scroll,
+            "import" => &mut s.importing.as_mut()?.scroll,
+            "fl0" => &mut s.fl_dialog.as_mut()?.scroll[0],
+            "fl1" => &mut s.fl_dialog.as_mut()?.scroll[1],
+            _ => return None,
+        })
+    }
+
+    /// Scrolls a named box to `offset`, kept inside what it last laid out at.
+    fn scroll_to(&mut self, key: &'static str, offset: f32) {
+        let max = match key {
+            "table_x" => table::max_scroll_x(&self.state.columns, self.pane_width()),
+            "table" => {
+                let height = self.logical_size().1;
+                (table::row_count(&self.state) as f32 * table::ROW - table::body_height(height, self.state.sizes.player)).max(0.0)
+            }
+            _ => self.ui.bars.iter().find(|b| b.key == key).map_or(0.0, |b| (b.content - b.viewport).max(0.0)),
+        };
+        let Some(slot) = self.scroll_slot(key) else { return };
+        let next = offset.clamp(0.0, max);
+        if next != *slot {
+            *slot = next;
+            if key == "stats" {
+                self.state.stats.hover = None;
+            }
+            self.redraw();
+        }
+    }
+
     fn hit(&self) -> Option<Action> {
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
         self.hits
@@ -5594,7 +5676,7 @@ impl App {
         let handle = match self.resizing {
             Some(Drag::Pane(h, ..)) => Some(h),
             Some(Drag::Column(..)) => Some(Handle::Sidebar),
-            Some(Drag::Volume) | Some(Drag::Setting(_)) | Some(Drag::Picker(_)) | Some(Drag::PaneSplit) => None,
+            Some(Drag::Volume) | Some(Drag::Setting(_)) | Some(Drag::Picker(_)) | Some(Drag::PaneSplit) | Some(Drag::Bar(..)) => None,
             None => self.state.hot.or(self.state.column_hot.map(|_| Handle::Sidebar)),
         };
         let icon = match (self.resizing.is_none().then(|| self.edge()).flatten(), handle) {
@@ -5671,7 +5753,11 @@ impl App {
             .join(" · ")
     }
 
+    #[track_caller]
     fn redraw(&mut self) {
+        if self.timing && !self.full {
+            self.full_by = Some(std::panic::Location::caller());
+        }
         self.full = true;
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -5690,6 +5776,13 @@ impl App {
         let advanced = started.elapsed();
         let live = !self.full && self.draw_live(w, h, scale);
         if !live {
+            if self.timing {
+                match self.full_by.take() {
+                    Some(at) if self.full => eprintln!("full frame: redraw at {}:{}", at.file(), at.line()),
+                    _ if self.full => eprintln!("full frame: asked for without redraw()"),
+                    _ => eprintln!("full frame: a live element moved"),
+                }
+            }
             self.draw(w, h, scale);
         }
         self.full = false;
@@ -6037,9 +6130,11 @@ impl ApplicationHandler<Wake> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // The folder on screen follows the disk: watched, re-read once its changes settle.
+        // Borrowed, not cloned: on a Mac every proxy is a run loop source of its own, and adding
+        // one wakes the loop - a clone here, on every turn of it, kept a core busy doing nothing.
         let here = self.here();
-        if let Some(proxy) = self.proxy.clone() {
-            self.watch.watch(here.as_deref(), &proxy);
+        if let Some(proxy) = &self.proxy {
+            self.watch.watch(here.as_deref(), proxy);
         }
         if self.preview_at.is_some_and(|at| Instant::now() >= at) {
             self.preview_at = None;
@@ -6178,6 +6273,12 @@ impl ApplicationHandler<Wake> for App {
                         }
                         return;
                     }
+                    Some(Drag::Bar(bar, grab)) => {
+                        let scale = self.scale() as f32;
+                        let along = if bar.horizontal { self.cursor.x } else { self.cursor.y } as f32;
+                        self.scroll_to(bar.key, bar.offset_at(along - grab, scale));
+                        return;
+                    }
                     Some(Drag::Volume) => {
                         self.volume_from_cursor();
                         self.redraw();
@@ -6257,6 +6358,9 @@ impl ApplicationHandler<Wake> for App {
                 // A press in the other half brings it forward before anything in it acts.
                 if self.over_inactive() {
                     self.activate_other();
+                }
+                if self.press_bar() {
+                    return;
                 }
                 let action = self.hit();
                 if self.state.note_edit.is_some() && !matches!(action, Some(Action::Note(_))) {
@@ -6361,7 +6465,7 @@ impl ApplicationHandler<Wake> for App {
                             self.state.column_hot = None;
                             self.save_columns();
                         }
-                        Drag::Setting(_) | Drag::Picker(_) | Drag::PaneSplit => {}
+                        Drag::Setting(_) | Drag::Picker(_) | Drag::PaneSplit | Drag::Bar(..) => {}
                         Drag::Volume => {
                             let volume = self.state.transport.volume;
                             self.data.settings.volume = Some(volume);

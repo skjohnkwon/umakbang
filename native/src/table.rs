@@ -117,7 +117,13 @@ pub fn table(s: &State, t: &Theme, window_height: f32, pane: f32) -> El<Action> 
         .child(div().h(HEADER).shrink0().clip().child(header(s, t, row_width).absolute(-s.scroll_x, 0.0)))
         .child(body);
     let content_width = row_width;
-    col().grow().min_h0().child(inner).overlay(scrollbars(t, s.scroll, s.scroll_x, total as f32 * ROW, body_height, content_width))
+    col()
+        .grow()
+        .min_h0()
+        .child(inner)
+        .overlay(scrollbars(t, s.scroll, s.scroll_x, total as f32 * ROW, body_height, content_width))
+        .bar("table", false, total as f32 * ROW + HEADER, body_height + HEADER, SCROLLBAR)
+        .bar("table_x", true, content_width, pane - SCROLLBAR, SCROLLBAR)
 }
 
 /* ------------------------------------------------------------------ header */

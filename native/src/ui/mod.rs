@@ -21,14 +21,18 @@ pub struct Ui {
     pub extents: std::collections::HashMap<&'static str, (f32, f32)>,
     /// And where each of them is on screen, in logical pixels: what the wheel is over.
     pub scroll_rects: std::collections::HashMap<&'static str, [f32; 4]>,
+    /// The scrollbars the last full frame drew, in paint order.
+    pub bars: Vec<tree::Bar>,
     /// The spinners' angle in degrees (`animate-spin`: one turn a second), and whether the
     /// last full frame drew one - which is what keeps frames coming while it does.
     pub spin: f32,
     pub spinning: bool,
+    /// Painting inside a live element, whose own pieces don't cover it.
+    pub in_live: bool,
 }
 
 impl Ui {
     pub fn new() -> Ui {
-        Ui { text: text::Text::new(), icons: icons::Icons::default(), backdrops: Vec::new(), damage: Vec::new(), extents: std::collections::HashMap::new(), scroll_rects: std::collections::HashMap::new(), spin: 0.0, spinning: false }
+        Ui { text: text::Text::new(), icons: icons::Icons::default(), backdrops: Vec::new(), damage: Vec::new(), extents: std::collections::HashMap::new(), scroll_rects: std::collections::HashMap::new(), bars: Vec::new(), spin: 0.0, spinning: false, in_live: false }
     }
 }
