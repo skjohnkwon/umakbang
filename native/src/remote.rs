@@ -275,8 +275,11 @@ pub fn fetch_index(root: &RemoteRoot) -> Result<Vec<Row>, String> {
     let gzipped = response.headers().get("content-encoding").and_then(|v| v.to_str().ok()) == Some("gzip");
     let body = response.into_body().into_reader();
     let reader: Box<dyn Read> = if gzipped { Box::new(flate2::read::GzDecoder::new(body)) } else { Box::new(body) };
-    let mut rows: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+    // Each line becomes a row as it arrives. Held as parsed JSON until the end, a big library's
+    // index took over a gigabyte for a moment and left half of it behind: hundreds of thousands
+    // of small maps, which a Mac's allocator does not hand back.
+    let base = slashed_base(&root.path);
+    let mut index = Rows::default();
     for line in std::io::BufReader::with_capacity(1 << 20, reader).lines() {
         let line = line.map_err(|e| format!("{}: {e}", root.device_name))?;
         if line.is_empty() {
@@ -286,41 +289,64 @@ pub fn fetch_index(root: &RemoteRoot) -> Result<Vec<Row>, String> {
         // A journal line: what changed since the index was written.
         if parsed.get("added").is_some() || parsed.get("removed").is_some() {
             for path in parsed.get("removed").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                rows.remove(path);
+                index.remove(path);
             }
             for track in parsed.get("added").and_then(Value::as_array).into_iter().flatten() {
-                if let Some(path) = track.get("path").and_then(Value::as_str) {
-                    if !rows.contains_key(path) {
-                        order.push(path.to_string());
-                    }
-                    rows.insert(path.to_string(), track.clone());
-                }
+                index.put(row_from_track(track, &base, &root.label));
             }
             continue;
         }
-        if let Some(path) = parsed.get("path").and_then(Value::as_str).map(str::to_string) {
-            if !rows.contains_key(&path) {
-                order.push(path.clone());
+        index.put(row_from_track(&parsed, &base, &root.label));
+    }
+    Ok(index.rows.into_iter().flatten().collect())
+}
+
+/// The rows of an index being read, in the order they first appeared, a later line for the
+/// same path replacing an earlier one in place.
+#[derive(Default)]
+struct Rows {
+    rows: Vec<Option<Row>>,
+    at: std::collections::HashMap<String, usize>,
+}
+
+impl Rows {
+    fn put(&mut self, row: Option<Row>) {
+        let Some(row) = row else { return };
+        match self.at.get(&row.file.path) {
+            Some(&i) => self.rows[i] = Some(row),
+            None => {
+                self.at.insert(row.file.path.clone(), self.rows.len());
+                self.rows.push(Some(row));
             }
-            rows.insert(path, parsed);
         }
     }
-    let tracks: Vec<Value> = order.into_iter().filter_map(|p| rows.remove(&p)).collect();
-    Ok(rows_from_tracks(tracks, &root.path, &root.label))
+    fn remove(&mut self, path: &str) {
+        if let Some(i) = self.at.remove(path) {
+            self.rows[i] = None;
+        }
+    }
 }
 
 /// `Track` lines from another index, filed under `label`: each path's place below `base` (the
 /// library's path where it was indexed) becomes its folder here. Shared by mounted libraries and
 /// bundle restores.
 pub fn rows_from_tracks(tracks: Vec<Value>, base: &str, label: &str) -> Vec<Row> {
-    let base = base.replace('\\', "/");
-    let base = base.trim_end_matches('/');
-    let mut out = Vec::with_capacity(tracks.len());
-    for track in tracks {
-        let Some(path) = track.get("path").and_then(Value::as_str).map(str::to_string) else { continue };
+    let base = slashed_base(base);
+    tracks.iter().filter_map(|track| row_from_track(track, &base, label)).collect()
+}
+
+/// A library's path as `row_from_track` compares it: forward slashes, no trailing one.
+fn slashed_base(base: &str) -> String {
+    base.replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+/// One `Track` line as a row here; None when it has no path or lies outside `base`.
+fn row_from_track(track: &Value, base: &str, label: &str) -> Option<Row> {
+    {
+        let path = track.get("path").and_then(Value::as_str).map(str::to_string)?;
         let slashed = path.replace('\\', "/");
         // Case-blind on Windows paths, where the drive letter's case is anybody's guess.
-        let Some(rest) = slashed.get(..base.len()).filter(|head| head.eq_ignore_ascii_case(base)).map(|_| slashed[base.len()..].trim_start_matches('/')) else { continue };
+        let rest = slashed.get(..base.len()).filter(|head| head.eq_ignore_ascii_case(base)).map(|_| slashed[base.len()..].trim_start_matches('/'))?;
         let (dir, name) = rest.rsplit_once('/').unwrap_or(("", rest));
         let rel_dir = if dir.is_empty() { label.to_string() } else { format!("{label}/{dir}") };
         let num = |k: &str| track.get(k).and_then(Value::as_f64);
@@ -345,9 +371,8 @@ pub fn rows_from_tracks(tracks: Vec<Value>, base: &str, label: &str) -> Vec<Row>
             probed: track.get("probed").and_then(Value::as_bool).unwrap_or(false),
             dir: rel_dir.clone(),
         };
-        out.push(Row { rel_dir, file, project_created: num("projectCreatedMs") });
+        Some(Row { rel_dir, file, project_created: num("projectCreatedMs") })
     }
-    out
 }
 
 /* ------------------------------------------------------------------ copying here */

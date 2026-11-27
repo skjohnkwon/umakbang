@@ -508,6 +508,9 @@ fn main() {
     }) {
         return;
     }
+    // The copy that stays empties the write log, before the search thread and the server open
+    // the database and it would have to wait for them.
+    app.library.shrink_log();
     // A login launch (`--background`) opens no window; the tray is enough.
     app.start_hidden = args.iter().any(|a| a == "--background");
     app.launch_args = vec![args[1].clone(), args[2].clone()];

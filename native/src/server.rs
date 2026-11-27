@@ -875,7 +875,7 @@ fn tree_hash(ctx: &Ctx, folder: i64) -> Option<String> {
 fn hash_at(db: &Path, hashing: &Mutex<()>, folder: i64) -> Option<String> {
     let _one = hashing.lock().unwrap_or_else(|e| e.into_inner());
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-    conn.execute_batch("PRAGMA busy_timeout = 10000; BEGIN IMMEDIATE").ok()?;
+    conn.execute_batch("PRAGMA busy_timeout = 10000; PRAGMA journal_size_limit = 67108864; BEGIN IMMEDIATE").ok()?;
     let out = hash_of(&conn, folder);
     let _ = conn.execute_batch(if out.is_some() { "COMMIT" } else { "ROLLBACK" });
     out

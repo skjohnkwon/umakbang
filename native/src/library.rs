@@ -134,10 +134,18 @@ impl Library {
         }
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE)?;
         // A fixed page cache, so memory does not grow with the size of the library: 16MB.
-        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -16000; PRAGMA mmap_size = 0; PRAGMA recursive_triggers = ON;")?;
+        // The write log is cut back to 64MB whenever it empties: left alone, it stays as big as
+        // the largest write it ever held - a first index of a big library left one at 1.2GB.
+        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -16000; PRAGMA mmap_size = 0; PRAGMA recursive_triggers = ON;")?;
         db.execute_batch(SCHEMA)?;
         migrate(&db);
         Ok(Library { db })
+    }
+
+    /// Folds the write log into the database and empties it. Best at launch, before anything
+    /// else has the database open: it waits for readers, and gives up if they take too long.
+    pub fn shrink_log(&self) {
+        let _ = self.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     /// The folders directly inside `parent` (the library folders for `None`), newest first -
