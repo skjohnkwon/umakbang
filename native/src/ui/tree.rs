@@ -895,27 +895,32 @@ fn rounded_path(r: [f32; 4], radius: f32) -> Option<Path> {
     pb.finish()
 }
 
-/// Fills a (possibly rounded) rectangle given in logical pixels, cut to `clip`. A shape cut by
-/// the clip is drawn square at the cut, which only shows on a rounded row scrolled half out of
-/// view - not worth a mask per element.
+/// Fills a (possibly rounded) rectangle given in logical pixels, cut to `clip`.
 pub fn fill_rect(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, color: Rgba, scale: f32) {
     if color.a <= 0.0 {
         return;
     }
     let inside = r[0] >= clip[0] && r[1] >= clip[1] && r[2] <= clip[2] && r[3] <= clip[3];
-    let shape = if inside { r } else { intersect(r, clip) };
-    let Some(path) = rounded_path(snap(shape, scale), if inside { radius * scale } else { 0.0 }) else { return };
     let mut paint = Paint::default();
     paint.set_color(color.skia());
     paint.anti_alias = radius > 0.0;
-    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    if inside || radius <= 0.0 {
+        // A square box cut by the clip is still a square box: the cut is the shape.
+        let shape = if inside { r } else { intersect(r, clip) };
+        let Some(path) = rounded_path(snap(shape, scale), if inside { radius * scale } else { 0.0 }) else { return };
+        pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        return;
+    }
+    // A rounded one keeps its corners where they are in view: the whole shape, trimmed.
+    let Some(path) = rounded_path(snap(r, scale), radius * scale) else { return };
+    cut(pm, clip, scale, |target, shift| target.fill_path(&path, &paint, FillRule::Winding, shift, None));
 }
 
 fn stroke_rounded(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, width: f32, color: Rgba, scale: f32) {
-    let inside = r[0] >= clip[0] && r[1] >= clip[1] && r[2] <= clip[2] && r[3] <= clip[3];
-    if !inside {
+    if r[2] <= clip[0] || r[0] >= clip[2] || r[3] <= clip[1] || r[1] >= clip[3] {
         return;
     }
+    let inside = r[0] >= clip[0] && r[1] >= clip[1] && r[2] <= clip[2] && r[3] <= clip[3];
     // The border sits inside the box, as `box-sizing: border-box` draws it.
     let half = width * scale / 2.0;
     let [x0, y0, x1, y1] = snap(r, scale);
@@ -925,7 +930,29 @@ fn stroke_rounded(pm: &mut PixmapMut, r: [f32; 4], clip: [f32; 4], radius: f32, 
     paint.set_color(color.skia());
     paint.anti_alias = true;
     let stroke = Stroke { width: width * scale, ..Stroke::default() };
-    pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    if inside {
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    } else {
+        // Half scrolled out of view, the part still in view keeps its border.
+        cut(pm, clip, scale, |target, shift| target.stroke_path(&path, &paint, &stroke, shift, None));
+    }
+}
+
+/// Draws into a pixmap the size of the visible part of `clip` and copies that in: whatever
+/// `draw` puts outside the clip falls off the pixmap's edges. `draw` is handed the offset to
+/// draw at.
+fn cut(pm: &mut PixmapMut, clip: [f32; 4], scale: f32, draw: impl FnOnce(&mut PixmapMut, Transform)) {
+    let c = clip.map(|v| v * scale);
+    let left = c[0].ceil().max(0.0);
+    let top = c[1].ceil().max(0.0);
+    let right = c[2].floor().min(pm.width() as f32);
+    let bottom = c[3].floor().min(pm.height() as f32);
+    if right <= left || bottom <= top {
+        return;
+    }
+    let Some(mut own) = Pixmap::new((right - left) as u32, (bottom - top) as u32) else { return };
+    draw(&mut own.as_mut(), Transform::from_translate(-left, -top));
+    pm.draw_pixmap(left as i32, top as i32, own.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
 }
 
 /// Runs a painter inside the clip. Painters draw wherever their rectangle says, so one that a
