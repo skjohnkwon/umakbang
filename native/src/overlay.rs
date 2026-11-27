@@ -259,6 +259,10 @@ pub fn layers(s: &State, t: &Theme, viewport: (f32, f32)) -> Vec<El<Action>> {
         out.push(div().absolute(0.0, 0.0).w(viewport.0).h(viewport.1).bg(Rgba::rgb8(0, 0, 0).alpha(0.5)).on(Action::Dismiss));
         out.push(dialog_el(t, dialog, viewport));
     }
+    if let Some(at) = s.about {
+        out.push(div().absolute(0.0, 0.0).w(viewport.0).h(viewport.1).bg(Rgba::rgb8(0, 0, 0).alpha(0.5)).on(Action::Dismiss));
+        out.push(about_el(s, t, at, viewport));
+    }
     out.extend(transport_popovers(s, t, viewport));
     if let Some(notice) = &s.notice {
         out.push(
@@ -526,6 +530,59 @@ fn tag_editor_el(t: &Theme, editor: &TagEditor) -> El<Action> {
         body = body.child(list);
     }
     body
+}
+
+/// Where the source lives, for About's GitHub button.
+pub const REPOSITORY: &str = "https://github.com/skjohnkwon/umakbang";
+/// A letter of About's name every 70ms: slow enough to read as typing, quick enough not to
+/// be a wait.
+const LETTER_MS: u64 = 70;
+const NAME: &str = "umakbang";
+/// How long the name takes to type, after which nothing on About moves.
+pub const ABOUT_TYPED: std::time::Duration = std::time::Duration::from_millis(LETTER_MS * NAME.len() as u64 + LETTER_MS);
+
+/// `AboutDialog`: the mark, the name typed out, the version and licence, one line, and the way
+/// to the source.
+fn about_el(s: &State, t: &Theme, at: std::time::Instant, viewport: (f32, f32)) -> El<Action> {
+    let (width, height) = (280.0f32.min(viewport.0 - 32.0), 136.0);
+    let shown = ((at.elapsed().as_millis() as u64 / LETTER_MS) as usize).min(NAME.len());
+    // The cursor blinks (`animate-pulse`) while the name types, and goes once it is written.
+    let typing = shown < NAME.len();
+    let blink = (at.elapsed().as_millis() / 500) % 2 == 0;
+    let name = div()
+        .items_center()
+        .child(text(NAME[..shown].to_string(), TextStyle { tracking: -0.025, ..style(15.0, 500, t.popover_foreground) }))
+        .child(div().ml(2.0).size(2.0, 15.0).bg(t.primary).opacity(if typing && blink { 1.0 } else { 0.0 }));
+    let version = if s.version.is_empty() { "Version unknown · AGPL-3.0".to_string() } else { format!("Version {} · AGPL-3.0", s.version) };
+    col()
+        .absolute(((viewport.0 - width) / 2.0).round(), ((viewport.1 - height) / 2.0).round())
+        .w(width)
+        .p(16.0)
+        .rounded(8.0)
+        .bg(t.popover)
+        .border(t.border, 1.0)
+        .shadow(16.0, 40.0, 0.35)
+        .child(
+            div()
+                .items_center()
+                .gap(10.0)
+                .child(icon("logo", 28.0, t.primary))
+                .child(col().min_w(0.0).child(div().h(22.0).items_center().child(name)).child(text(version, crate::screen::tnum(11.0, 400, t.muted_foreground.alpha(0.7))))),
+        )
+        .child(text("Make listening to your music enjoyable.", style(12.0, 400, t.popover_foreground)).mt(12.0).min_w(0.0))
+        .child(
+            div().mt(16.0).justify_end().child(
+                div()
+                    .size(32.0, 32.0)
+                    .items_center()
+                    .justify_center()
+                    .rounded(6.0)
+                    .border(t.border, 1.0)
+                    .hover_bg(t.accent)
+                    .on(Action::AboutSource)
+                    .child(icon("github", 16.0, t.foreground)),
+            ),
+        )
 }
 
 fn dialog_el(t: &Theme, dialog: &Dialog, viewport: (f32, f32)) -> El<Action> {

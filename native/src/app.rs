@@ -452,6 +452,7 @@ impl App {
             tag_editor: None,
             note_edit: None,
             dialog: None,
+            about: None,
             notice: None,
             tags: data.tag_counts(),
             tag_filter: Vec::new(),
@@ -461,7 +462,7 @@ impl App {
             maximized: false,
             can_back: false,
             can_forward: false,
-            version: "0.4.1".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
             sizes: layout.sizes(1360.0),
             hot: None,
             resizing: None,
@@ -3626,7 +3627,7 @@ impl App {
         self.ui.spin = (self.started.elapsed().as_millis() % 1000) as f32 * 0.36;
         self.hits = render(&mut self.ui, &tree, frame, scale, self.hovered.as_ref());
         // A spinner on screen asks for its next frame; 30 a second is smooth for one icon.
-        self.spin_at = (self.ui.spinning || self.state.tour.is_some()).then(|| Instant::now() + Duration::from_millis(33));
+        self.spin_at = (self.ui.spinning || self.state.tour.is_some() || self.state.about.is_some_and(|at| at.elapsed() < crate::overlay::ABOUT_TYPED)).then(|| Instant::now() + Duration::from_millis(33));
         // The sidebar's gutters follow what this frame found overflowing; a change is one
         // more frame.
         let overflows = |key: &str| self.ui.extents.get(key).is_none_or(|(viewport, content)| *content > *viewport + 0.5);
@@ -3823,6 +3824,11 @@ impl App {
             }
             Action::PromptConfirm => self.submit_prompt(),
             Action::DialogConfirm => self.confirm_dialog(),
+            Action::About => {
+                self.close_overlays();
+                self.state.about = Some(Instant::now());
+            }
+            Action::AboutSource => ops::open_externally(std::path::Path::new(crate::overlay::REPOSITORY)),
             Action::PromptField => {}
             Action::Volume => {
                 let t = &mut self.state.transport;
@@ -4857,6 +4863,12 @@ impl App {
                 ops::Edit::Enter => self.submit_prompt(),
                 ops::Edit::Done => prompt.error = None,
                 ops::Edit::Ignored => {}
+            }
+            return true;
+        }
+        if self.state.about.is_some() {
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape | NamedKey::Enter)) {
+                self.state.about = None;
             }
             return true;
         }
@@ -6375,7 +6387,7 @@ impl ApplicationHandler<Wake> for App {
                 self.redraw();
             }
             WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && (self.state.menu.is_some() || self.state.prompt.is_some() || self.state.dialog.is_some()) =>
+                if event.state == ElementState::Pressed && (self.state.menu.is_some() || self.state.prompt.is_some() || self.state.dialog.is_some() || self.state.about.is_some()) =>
             {
                 if self.overlay_key(&event) {
                     self.redraw();

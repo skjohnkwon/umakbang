@@ -143,6 +143,10 @@ pub enum Action {
     Stars(u8),
     /// A press outside a menu, prompt or dialog, or on its Cancel: closes it.
     Dismiss,
+    /// The mark in the title bar: About.
+    About,
+    /// About's GitHub button.
+    AboutSource,
     /// An item of the open menu, and of its submenu.
     MenuItem(usize),
     SubItem(usize),
@@ -374,6 +378,8 @@ pub struct State {
     /// The Notes cell being typed in: which file, and the field.
     pub note_edit: Option<(String, SearchBox)>,
     pub dialog: Option<crate::overlay::Dialog>,
+    /// About, open since then (`AboutDialog.tsx`); the name types itself out from it.
+    pub about: Option<std::time::Instant>,
     pub notice: Option<String>,
     pub search: SearchBox,
     pub searching: bool,
@@ -679,8 +685,19 @@ fn title_bar(s: &State, t: &Theme) -> El<Action> {
                 .pr(2.0)
                 .gap(6.0)
                 .on(Action::Drag)
-                .child(icon("logo", 16.0, t.primary))
-                .child(text(s.version.clone(), TextStyle { line_height: 10.0, ..tnum(10.0, 400, t.muted_foreground.alpha(0.7)) })),
+                // A button into About, the drag handle around it.
+                .child(
+                    div()
+                        .items_center()
+                        .gap(6.0)
+                        .px(2.0)
+                        .py(2.0)
+                        .rounded(4.0)
+                        .hover_bg(t.accent.alpha(0.6))
+                        .on(Action::About)
+                        .child(icon("logo", 16.0, t.primary))
+                        .child(text(s.version.clone(), TextStyle { line_height: 10.0, ..tnum(10.0, 400, t.muted_foreground.alpha(0.7)) })),
+                ),
         )
         .child(div().grow().min_w(8.0).h_full().on(Action::Drag))
         .child(search_box(s, t))

@@ -383,6 +383,10 @@ fn main() {
     if let Some(x) = std::env::var("UMAKBANG_SCROLL_X").ok().and_then(|v| v.parse().ok()) {
         app.state.scroll_x = x;
     }
+    // `UMAKBANG_ABOUT=1`: About open, its name typed out.
+    if std::env::var("UMAKBANG_ABOUT").is_ok() {
+        app.state.about = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    }
     let play: Option<usize> = std::env::var("UMAKBANG_PLAY").ok().and_then(|v| v.parse().ok());
 
     // `--bench <frames>`: scrolls the open folder a few rows per frame and times each full

@@ -498,6 +498,7 @@ impl App {
         self.state.sub_hover = None;
         self.state.prompt = None;
         self.state.dialog = None;
+        self.state.about = None;
         self.state.tag_editor = None;
         self.state.color_picker = None;
         self.state.fl_dialog = None;
