@@ -67,6 +67,10 @@ fn failed(state: State, reason: &str) -> Status {
 pub fn read() -> Status {
     let child = crate::process::quiet(&mut Command::new(binary()))
         .args(["status", "--json"])
+        // The Mac app's binary is the GUI as well as the CLI, and picks by whether it was
+        // started from a terminal: started from an app, it tries to open its own window and
+        // prints that it could not. This is Tailscale's switch for the CLI.
+        .env("TAILSCALE_BE_CLI", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

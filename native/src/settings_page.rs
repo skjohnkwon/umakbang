@@ -157,7 +157,7 @@ fn remote(t: &Theme, v: &Values) -> El<Action> {
         .child(row(
             t,
             "Run in the background",
-            Some(if v.run_in_background { "Starts with Windows and keeps serving with the window closed, from the tray." } else { "Off. Closing the window quits, and other machines lose this library with it." }),
+            Some(if v.run_in_background { if cfg!(target_os = "macos") { "Starts at login and keeps serving with the window closed, from the menu bar." } else { "Starts with Windows and keeps serving with the window closed, from the tray." } } else { "Off. Closing the window quits, and other machines lose this library with it." }),
             switch(t, v.run_in_background, "runInBackground"),
         ));
     let copying = section(t, "Copying here", Some("Another machine's library is read-only, so this is always a copy."))
