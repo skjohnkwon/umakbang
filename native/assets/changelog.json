@@ -1,5 +1,19 @@
 [
  {
+  "version": "0.5.1",
+  "date": "2026-11-27",
+  "changes": [
+   "umakbang runs natively on a Mac, for Apple silicon and Intel. Open the disk image and drag umakbang to Applications; it reads the Electron app's profile, so your library, tags and ratings come straight over. It lives in the menu bar, and Cmd+Q closes the window there while the library is still being shared.",
+   "Playback no longer pops when a file is slow to read. The audio is decoded a few seconds ahead, so a file on another machine, a busy network drive or a heavy visualizer can't leave the speakers waiting, and changing the speed mid-track works again.",
+   "A track that won't play says why, naming the drive that isn't connected when the file is on one. Headphones that only take small audio buffers, which refused to play at all, now work.",
+   "Scrollbars can be dragged, and clicking the track either side pages. The Settings page and the tag strip scroll with the wheel again.",
+   "Clicking the logo in the title bar opens About, and the title bar shows the version you are running.",
+   "Menus, About and the tour stay on top of the visualizers instead of being painted over by them, and the scope moves every frame.",
+   "YT2MP3's Show opens the download folder even before the first download, and says when a downloaded file has gone.",
+   "Browsing a big library on another machine uses about half the memory, and the library's write log no longer grows to the size of the biggest change it ever saw."
+  ]
+ },
+ {
   "version": "0.5.0",
   "date": "2026-11-23",
   "changes": [
