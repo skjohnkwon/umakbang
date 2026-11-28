@@ -104,7 +104,11 @@ pub fn table(s: &State, t: &Theme, window_height: f32, pane: f32) -> El<Action> 
     for index in first..(first + shown).min(total) {
         content = content.child(row(s, t, &wave, index, row_width).absolute(0.0, index as f32 * ROW));
     }
-    let body = div().grow().min_h0().scroll(s.scroll).child(content);
+    // A folder on another machine says why it has no rows yet: being listed, or not answering.
+    let body = match s.folder_status.as_ref().filter(|_| total == 0 && s.view == crate::screen::View::Folder) {
+        Some(status) => div().grow().min_h0().child(div().w(pane - SCROLLBAR).pt(32.0).justify_center().child(text(status.clone(), style(12.0, 400, t.muted_foreground)))),
+        None => div().grow().min_h0().scroll(s.scroll).child(content),
+    };
 
     // Header and rows scroll together in one box with 10px scrollbars that take their own
     // gutters: rows stop 10px short of the pane's right edge and of the transport.

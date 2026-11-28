@@ -55,6 +55,7 @@ mod tailscale;
 mod tray;
 mod fl_plugins;
 mod remote;
+mod devices;
 mod backup;
 mod import_wizard;
 mod tour;
@@ -246,8 +247,32 @@ fn main() {
     // `remotecheck <host:port> <library id> <rel> <out dir> [<flp rel>]`: copies a file from a
     // server the way "Copy to" does, decodes a second of it the way the player streams it, and
     // packs a project - against a test server, never a real machine's.
+    // `devicecheck <host[:port]> <library id> <library path> [dir] [query]`: one folder of another
+    // machine's library as the Devices section lists it, or a search at or below it.
+    if args.get(1).map(String::as_str) == Some("devicecheck") && args.len() >= 5 {
+        let root = remote::RemoteRoot { label: "test".into(), path: args[4].clone(), host: args[2].clone(), library_id: args[3].clone(), device_id: "test".into(), device_name: "test".into() };
+        let dir = args.get(5).cloned().unwrap_or_default();
+        let started = std::time::Instant::now();
+        let outcome = match args.get(6) {
+            Some(query) => remote::search(&root, &dir, query),
+            None => remote::list(&root, &dir),
+        };
+        match outcome {
+            Ok(listing) => {
+                println!("{} folders, {} files ({} matched), {} rated, {} tagged, in {:.0}ms", listing.folders.len(), listing.files.len(), listing.matched, listing.ratings.len(), listing.tags.len(), started.elapsed().as_secs_f64() * 1000.0);
+                for (name, files) in listing.folders.iter().take(5) {
+                    println!("  folder {name} ({files})");
+                }
+                for file in listing.files.iter().take(5) {
+                    println!("  file {} | {} | in {}", file.name, file.path, file.dir);
+                }
+            }
+            Err(e) => println!("failed: {e}"),
+        }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("remotecheck") && args.len() >= 6 {
-        let root = remote::RemoteRoot { label: "test".into(), path: "/".into(), host: args[2].clone(), library_id: args[3].clone(), device_name: "test".into() };
+        let root = remote::RemoteRoot { label: "test".into(), path: "/".into(), host: args[2].clone(), library_id: args[3].clone(), device_id: "test".into(), device_name: "test".into() };
         let out = PathBuf::from(&args[5]);
         let _ = std::fs::create_dir_all(&out);
         let name = args[4].rsplit('/').next().unwrap_or("file").to_string();
@@ -279,11 +304,12 @@ fn main() {
             Err(e) => println!("open failed: {e}"),
         }
         // A project, by its absolute path on the serving machine, packed into the out folder.
-        if let Some(flp) = args.get(6) {
-            let mount = userdata::Root { path: args.get(7).cloned().unwrap_or_default(), label: "test".into(), remote: Some(serde_json::json!({ "host": args[2], "libraryId": args[3], "deviceName": "test" })) };
-            remote::set_roots(&[mount]);
-            println!("preview: {:?}", remote::preview(flp, &[]));
-            match remote::pack(flp, &out, &|_| {}) {
+        // The project is given within the library, as `rel` is above.
+        if let Some(within) = args.get(6) {
+            remote::register(root.clone());
+            let flp = root.path_of(within);
+            println!("preview: {:?}", remote::preview(&flp, &[]));
+            match remote::pack(&flp, &out, &|_| {}) {
                 Ok(zip) => println!("packed into {} ({} bytes)", zip.display(), std::fs::metadata(&zip).map(|m| m.len()).unwrap_or(0)),
                 Err(e) => println!("pack failed: {e}"),
             }
@@ -302,6 +328,11 @@ fn main() {
         if let Some(folder) = app.library.folder_at(&path) {
             app.open(folder.id, true);
         }
+    }
+    // `UMAKBANG_DEVICE=<host:port>`: the server there in the Devices section as another machine,
+    // unfolded; `UMAKBANG_DEVICE_OPEN=<dir>` opens that folder of it (empty for its library).
+    if let Ok(host) = std::env::var("UMAKBANG_DEVICE") {
+        app.test_device(&host, std::env::var("UMAKBANG_DEVICE_OPEN").ok().as_deref());
     }
     // `UMAKBANG_SPLIT=<folder>`: the explorer split, that folder in the second half.
     if let Some(folder) = std::env::var("UMAKBANG_SPLIT").ok().and_then(|rel| app.library.folder_at(&rel)) {
@@ -527,6 +558,7 @@ fn main() {
     app.doc = Some(docstore::DocStore::new(&PathBuf::from(&args[2])));
     app.data_path = PathBuf::from(&args[2]);
     app.rescue_backups();
+    app.drop_mounts();
     app.start_search(PathBuf::from(&args[1]));
     app.start_analysis();
     app.downloader = Some(youtube::Downloader::new(PathBuf::from(&args[2]).parent().unwrap_or(std::path::Path::new("."))));

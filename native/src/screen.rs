@@ -91,8 +91,8 @@ pub enum Action {
     FlFormatsClear,
     FlRecheck,
     PluginsCompare(usize),
-    /// Remote: mount a peer's library (the serving peer, then the library).
-    MountLibrary(usize, usize),
+    /// Remote: open a peer's library in the explorer (the serving peer, then the library).
+    BrowseLibrary(usize, usize),
     /// Backup: write a bundle (true asks where), import a bundle or settings file. The import
     /// wizard: locate a folder, skip it, find them all in one folder, import, cancel. A peer's
     /// tags and ratings into the wizard; another machine's newer settings.
@@ -245,6 +245,19 @@ pub struct TreeRow {
     pub files: i64,
     pub has_children: bool,
     pub open: bool,
+    pub kind: TreeKind,
+}
+
+/// What a tree row stands for, which decides its glyph.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TreeKind {
+    Folder,
+    /// This machine: its library, under its name.
+    This { mac: bool },
+    /// Another machine; faded while it is not answering.
+    Device { mac: bool, online: bool },
+    /// A folder on another machine being listed.
+    Loading,
 }
 
 /// The track in the transport.
@@ -291,6 +304,11 @@ pub fn pane_widths(middle: f32, ratio: f32) -> (f32, f32) {
 
 pub struct State {
     pub folder: FolderRow,
+    /// Said in place of an empty table: a folder on another machine still being listed, or why
+    /// it could not be.
+    pub folder_status: Option<String>,
+    /// This machine's name, which the library's own root goes by in the Devices section.
+    pub this_device: String,
     pub crumbs: Vec<FolderRow>,
     pub folders: Vec<FolderRow>,
     pub files: Vec<FileRow>,
@@ -1054,8 +1072,9 @@ fn sidebar(s: &State, t: &Theme, height: f32) -> El<Action> {
         .child(div().absolute(width - 3.0, ((height - 28.0) / 2.0).max(0.0)).w(3.0).h(28.0).rounded(1.5).bg(lit(s, t, Handle::Sidebar)))
 }
 
-/// `SectionLabel` "Folders" with its two buttons, then `FolderRows`: indented 11px a level
-/// (capped at six), a chevron slot, the folder glyph, the name and the recursive count. Rows are
+/// `SectionLabel` "Devices" with its buttons, then the rows: this machine's library first, then
+/// every other machine on the tailnet running umakbang, each a tree of its own. Indented 11px a
+/// level (capped at six), a chevron slot, the glyph, the name and the recursive count. Rows are
 /// laid out only where they can be seen - an expanded sample pack is thousands of them.
 fn folder_tree(s: &State, t: &Theme, width: f32) -> El<Action> {
     let small = |name: &'static str, action: Action, enabled: bool| {
@@ -1076,8 +1095,16 @@ fn folder_tree(s: &State, t: &Theme, width: f32) -> El<Action> {
         .px(12.0)
         .pt(4.0)
         .pb(4.0)
-        .child(text("Folders", style(10.0, 600, t.muted_foreground.alpha(0.7))))
-        .child(div().ml_auto().gap(2.0).items_center().child(small("locate-fixed", Action::Locate, s.now.is_some())).child(small("plus", Action::AddFolder, true)));
+        .child(text("Devices", style(10.0, 600, t.muted_foreground.alpha(0.7))))
+        .child(
+            div()
+                .ml_auto()
+                .gap(2.0)
+                .items_center()
+                .child(small("refresh-cw", Action::PeersRefresh, true))
+                .child(small("locate-fixed", Action::Locate, s.now.is_some()))
+                .child(small("plus", Action::AddFolder, true)),
+        );
     const ROW: f32 = 24.0;
     let first = (s.tree_scroll / ROW).floor().max(0.0) as usize;
     let mut rows = div().w(width).h(s.tree.len() as f32 * ROW).shrink0();
@@ -1091,8 +1118,14 @@ fn folder_tree(s: &State, t: &Theme, width: f32) -> El<Action> {
             .items_center()
             .justify_center()
             .maybe(node.has_children, |el| el.on(Action::TreeChevron(index)).child(icon(if node.open { "chevron-down" } else { "chevron-right" }, 12.0, t.muted_foreground.alpha(0.7))));
-        let glyph = icon(if node.open { "folder-open" } else { "folder" }, 14.0, if active { t.primary } else { t.muted_foreground.alpha(0.8) });
-        let label = if node.id == crate::library::LIBRARY { "Library".to_string() } else { node.name.clone() };
+        let tint = if active { t.primary } else { t.muted_foreground.alpha(0.8) };
+        let (glyph, faded) = match node.kind {
+            TreeKind::This { mac } => (icon(if mac { "laptop" } else { "monitor" }, 14.0, tint), false),
+            TreeKind::Device { mac, online } => (icon(if mac { "laptop" } else { "monitor" }, 14.0, tint), !online),
+            TreeKind::Loading => (icon("loader2", 14.0, tint), false),
+            TreeKind::Folder => (icon(if node.open { "folder-open" } else { "folder" }, 14.0, tint), false),
+        };
+        let label = if node.id == crate::library::LIBRARY { s.this_device.clone() } else { node.name.clone() };
         rows = rows.child(
             div()
                 .absolute(0.0, index as f32 * ROW)
@@ -1103,6 +1136,7 @@ fn folder_tree(s: &State, t: &Theme, width: f32) -> El<Action> {
                 .pr(8.0)
                 .gap(4.0)
                 .maybe(active, |el| el.bg(t.primary.alpha(0.12)))
+                .maybe(faded, |el| el.opacity(0.45))
                 .hover_bg(if active { t.primary.alpha(0.12) } else { t.accent.alpha(0.6) })
                 .on(Action::TreeRow(index))
                 .pipe(|el| drop_lit(el, s, t, Action::TreeRow(index)))
@@ -1159,7 +1193,12 @@ fn pane_bar(s: &State, t: &Theme, active: bool) -> El<Action> {
     // As `Breadcrumbs` builds it: the virtual "Library" alone, then each folder grouped with the
     // chevron before it. The grouping is what decides how the trail shrinks - flex shares the
     // shortfall by each item's own width, and a group's width includes its chevron.
-    let mut crumbs = div().min_w(0.0).items_center().gap(2.0).clip().child(crumb("Library", Some(crate::library::LIBRARY), s.crumbs.is_empty()));
+    // On another machine the trail starts at the device, which is the first of the crumbs.
+    let mut crumbs = div().min_w(0.0).items_center().gap(2.0).clip();
+    let remote = crate::devices::is_device(s.folder.id);
+    if !remote {
+        crumbs = crumbs.child(crumb(&s.this_device, Some(crate::library::LIBRARY), s.crumbs.is_empty()));
+    }
     let last = s.crumbs.len().saturating_sub(1);
     for (i, folder) in s.crumbs.iter().enumerate() {
         crumbs = crumbs.child(
@@ -1167,7 +1206,7 @@ fn pane_bar(s: &State, t: &Theme, active: bool) -> El<Action> {
                 .min_w(0.0)
                 .items_center()
                 .gap(2.0)
-                .child(icon("chevron-right", 12.0, t.muted_foreground.alpha(0.5)))
+                .maybe(!(remote && i == 0), |el| el.child(icon("chevron-right", 12.0, t.muted_foreground.alpha(0.5))))
                 .child(crumb(&folder.name, Some(folder.id), i == last)),
         );
     }
@@ -1189,10 +1228,12 @@ fn pane_bar(s: &State, t: &Theme, active: bool) -> El<Action> {
         .border_b(t.border)
         .child(button("arrow-left", Action::Back, t.foreground, s.can_back))
         .child(button("arrow-right", Action::Forward, t.foreground, s.can_forward))
-        .child(button("corner-left-up", Action::Up, t.foreground, s.view == View::Folder && s.folder.id != crate::library::LIBRARY).ml(8.0))
-        // Both act on the folder you are standing in, so a saved view has neither.
+        // A device's own top has nowhere further up to go.
+        .child(button("corner-left-up", Action::Up, t.foreground, s.view == View::Folder && s.folder.id != crate::library::LIBRARY && !(remote && s.folder.parent.is_none())).ml(8.0))
+        // Both act on the folder you are standing in, so a saved view has neither; and another
+        // machine's library is read-only.
         .child(button("refresh-cw", Action::Refresh, t.foreground, s.view == View::Folder).ml(8.0))
-        .child(button("folder-plus", Action::NewFolder, t.foreground, s.view == View::Folder).ml(8.0))
+        .child(button("folder-plus", Action::NewFolder, t.foreground, s.view == View::Folder && !remote).ml(8.0))
         .child(div().grow().min_w(0.0).ml(8.0).items_center().child(match s.view {
             View::Folder => crumbs,
             // `StaticCrumb`: the view's glyph in the accent, and its name.

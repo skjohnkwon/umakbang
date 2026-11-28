@@ -45,10 +45,6 @@ pub struct Values {
     pub remote_download_dir: Option<String>,
     pub server: Option<crate::server::ServerState>,
     pub server_stats: Option<crate::server::Stats>,
-    /// Libraries mounted from other machines: label, machine, path.
-    pub mounted: Vec<(String, String, String)>,
-    /// Which of them is which: the machine's id and the library's path there.
-    pub mounted_ids: Vec<(String, String)>,
     pub peers: Option<(crate::tailscale::Status, Vec<crate::server::Peer>)>,
     pub peers_busy: bool,
     pub bundle_dir: Option<String>,
@@ -176,13 +172,6 @@ fn remote(t: &Theme, v: &Values) -> El<Action> {
             .maybe(!v.syncing, |el| el.hover_bg(t.secondary.alpha(0.8)).on(Action::SyncSettings))
             .child(text(if v.syncing { "Checking…" } else { "Sync now" }, style(12.0, 500, t.secondary_foreground))),
     ));
-    let mut others = section(t, "Libraries from other machines", None);
-    if v.mounted.is_empty() {
-        others = others.child(hint_muted("None yet. Tailnet below lists what is serving.".into()).mt(8.0));
-    }
-    for (label, device, path) in &v.mounted {
-        others = others.child(row(t, label, Some(&format!("{device} · {path}")), text("Read-only", style(11.0, 400, t.muted_foreground.alpha(0.6)))));
-    }
 
     let refresh = div()
         .h(24.0)
@@ -257,10 +246,7 @@ fn remote(t: &Theme, v: &Values) -> El<Action> {
                 let label = library.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let scanned = library.get("generation").is_some_and(|g| !g.is_null());
                 let id = if scanned { library.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string() } else { "never scanned".into() };
-                let path = library.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let device = peer.hello.as_ref().and_then(|h| h.pointer("/device/id")).and_then(|v| v.as_str()).unwrap_or("");
-                let mounted = v.mounted_ids.iter().any(|(d, p)| d == device && p == path);
-                let enabled = !mounted && peer.node.ipv4.is_some() && scanned && serving_index.is_some();
+                let enabled = peer.node.ipv4.is_some() && scanned && serving_index.is_some();
                 let add = div()
                     .h(24.0)
                     .px(8.0)
@@ -268,8 +254,8 @@ fn remote(t: &Theme, v: &Values) -> El<Action> {
                     .rounded(6.0)
                     .bg(t.secondary)
                     .opacity(if enabled { 1.0 } else { 0.5 })
-                    .maybe(enabled, |el| el.hover_bg(t.secondary.alpha(0.8)).on(Action::MountLibrary(serving_index.unwrap_or(0), li)))
-                    .child(text(if mounted { "Added" } else { "Add as root" }, style(12.0, 500, t.secondary_foreground)));
+                    .maybe(enabled, |el| el.hover_bg(t.secondary.alpha(0.8)).on(Action::BrowseLibrary(serving_index.unwrap_or(0), li)))
+                    .child(text("Browse", style(12.0, 500, t.secondary_foreground)));
                 card = card.child(div().ml(14.0).mt(4.0).items_center().gap(8.0).child(text(label, style(11.0, 400, t.foreground.alpha(0.8)))).child(text(id, tnum(10.5, 400, t.muted_foreground.alpha(0.5)))).child(div().grow()).child(add));
             }
             // Under the libraries, because it is about the same files: the stars and notes put on
@@ -292,7 +278,7 @@ fn remote(t: &Theme, v: &Values) -> El<Action> {
             tailnet = tailnet.child(card);
         }
     }
-    col().child(sharing).child(copying).child(sync).child(others).child(tailnet)
+    col().child(sharing).child(copying).child(sync).child(tailnet)
 }
 
 /// `PluginsSection`: what FL has found here, the favourites, and how that compares with the

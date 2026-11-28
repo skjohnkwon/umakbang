@@ -3,6 +3,8 @@ pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "alert-triangle" => include_str!("../../assets/icons/alert-triangle.svg"),
         "github" => include_str!("../../assets/icons/github.svg"),
+        "laptop" => include_str!("../../assets/icons/laptop.svg"),
+        "monitor" => include_str!("../../assets/icons/monitor.svg"),
         "arrow-down" => include_str!("../../assets/icons/arrow-down.svg"),
         "arrow-left" => include_str!("../../assets/icons/arrow-left.svg"),
         "arrow-right" => include_str!("../../assets/icons/arrow-right.svg"),

@@ -210,6 +210,36 @@ fixed before the next starts.
    wizard, Velopack installer and updates, settings page, first-run tour.
 6. ~~**Videos.**~~ Dropped: not part of umakbang.
 
+## Other machines are devices, not roots
+
+The sidebar's Folders section is **Devices** (`native/src/devices.rs`): this machine's library
+under its tailnet name, then every other machine on the tailnet running umakbang, each unfolded
+on demand. A peer's folder is listed with `/list` when it is opened or unfolded, a page of
+2,000 files at a time, kept for the session and asked again on Refresh. A search typed while
+standing in one goes to that machine's `/search`. Nothing of its index is copied here. Mounting a
+peer as a root, which downloaded its whole `/index` (330k rows for this library) to look at one
+folder, is gone: `drop_mounts` takes any mounted root out at launch, and Settings' Tailnet card
+says Browse instead of Add as root.
+
+- **Peer folders get negative ids** (`-(index + 1)`): the library's own start at 1 and its root
+  is 0, so the explorer, the tree, history and both panes hold them like local ones. A refresh
+  lists into the same nodes, so an id stays with its folder for the session.
+- **A peer's files are named `umakbang-device://<device id>/<library id>/<path>`**, never by their
+  path over there (`remote.rs`). Two machines can keep a library at the same path, and a bare
+  path made a file here look like one over there. `remote::is_remote` is a prefix check, so every
+  read-only guard holds even for a device not yet registered; `root_of` resolves the device's
+  current address from what the last `/hello` said.
+- **A peer's folder path resolves to nothing here** (`UserData::absolute` returns None for it),
+  which is what keeps Paste, New folder and every other file operation out of it.
+- **That machine's stars, tags and detected tempo and key** come with each listing and search
+  and are shown under whatever this machine has put on the same file. Its files are never
+  analysed here: that would download the whole file to guess at something its owner already knows.
+- The tailnet is asked every 60s and on the Devices refresh button. A machine that stops
+  answering keeps its row, faded, and is listed again when it comes back.
+- Test hooks: `devicecheck <host:port> <library id> <library path> [dir] [query]`, and
+  `UMAKBANG_DEVICE=<host:port>` with `UMAKBANG_DEVICE_OPEN=<dir>` to show a test server as a
+  device in a shot.
+
 ## Risks
 
 - **The interface is the bulk of the work**, more so now it is our own library: every Radix

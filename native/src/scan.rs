@@ -102,27 +102,6 @@ pub fn spawn(db: PathBuf, roots: Vec<(PathBuf, String)>, full: bool, proxy: Even
     });
 }
 
-/// A mounted library's index, downloaded and filed (`scanRemote`). Its machine has already
-/// probed every file, so nothing here reads a byte of audio.
-pub fn spawn_remote(db: PathBuf, root: crate::remote::RemoteRoot, proxy: EventLoopProxy<Wake>) {
-    let _ = std::thread::Builder::new().name("remote-index".into()).spawn(move || {
-        let started = Instant::now();
-        let fetched = crate::remote::fetch_index(&root);
-        let outcome = match fetched {
-            Ok(rows) => match Library::open(&db) {
-                Ok(library) => {
-                    library.replace_remote(&root.label, &rows);
-                    Ok(rows.len())
-                }
-                Err(e) => Err(e.to_string()),
-            },
-            Err(e) => Err(e),
-        };
-        let changed = outcome.is_ok();
-        let _ = proxy.send_event(Wake::RemoteIndexed(root.label.clone(), outcome));
-        let _ = proxy.send_event(Wake::Scan(Event::Done { changed, folders: 0, read: 0, probed: 0, seconds: started.elapsed().as_secs_f64() }));
-    });
-}
 
 #[allow(clippy::too_many_arguments)]
 fn walk(library: &Library, plan: &Plan, abs: &Path, rel: &str, parent: Option<i64>, full: bool, stats: &mut Stats, proxy: &EventLoopProxy<Wake>) {

@@ -1,13 +1,15 @@
-//! Libraries mounted from other machines (`remote-index.ts`, `remote-download.ts`, the remote half
-//! of `protocol.ts`): another machine's library as a root of this one, read-only.
+//! Other machines' libraries, read in place (`remote-download.ts`, the remote half of
+//! `protocol.ts`, and the client of `remote-browse.ts`): a folder is listed when it is opened,
+//! bytes are fetched by range as they are played, and anything that would change a file is
+//! refused - another machine's library is only ever copied from.
 //!
-//! It is an ordinary root from the window's point of view - the sidebar lists it, the explorer
-//! walks into it, the player plays out of it. What knows it is remote is here: the index is
-//! downloaded rather than walked, bytes are fetched by range rather than read, and anything that
-//! would change a file is refused - another machine's library is only ever copied from.
+//! A file over there is named `umakbang-device://<device id>/<library id>/<path within it>`,
+//! never by its path on that machine. Two machines can keep their library at the same path (two
+//! PCs with `Z:\SECRET SAUCE`), and a bare path would make a file here look like one over there:
+//! played over the network, refused a delete.
 
 use serde_json::Value;
-use std::io::{BufRead, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Duration;
@@ -21,14 +23,18 @@ pub struct RemoteRoot {
     pub path: String,
     pub host: String,
     pub library_id: String,
+    pub device_id: String,
     pub device_name: String,
 }
 
+/// What every file and folder on another machine is named by.
+pub const SCHEME: &str = "umakbang-device://";
+
 impl RemoteRoot {
-    pub fn from_root(root: &crate::userdata::Root) -> Option<RemoteRoot> {
-        let remote = root.remote.as_ref().filter(|r| !r.is_null())?;
-        let text = |k: &str| remote.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        Some(RemoteRoot { label: root.label.clone(), path: root.path.clone(), host: text("host"), library_id: text("libraryId"), device_name: text("deviceName") })
+    /// The name of `within` (forward slashes, `""` for the library folder) in this library.
+    pub fn path_of(&self, within: &str) -> String {
+        let within = within.trim_matches('/');
+        if within.is_empty() { format!("{SCHEME}{}/{}", self.device_id, self.library_id) } else { format!("{SCHEME}{}/{}/{within}", self.device_id, self.library_id) }
     }
 
     /// `host:port` for the server; a host that names its own port keeps it (tests on one
@@ -58,34 +64,34 @@ pub fn encode(s: &str) -> String {
     out
 }
 
-/// Every mounted library, for the threads that open files to look up.
+/// Every library on another machine seen this session, for the threads that open files to look
+/// up: a file's name says which device and library, this says where they answer now.
 static ROOTS: RwLock<Vec<RemoteRoot>> = RwLock::new(Vec::new());
 
-pub fn set_roots(roots: &[crate::userdata::Root]) {
+/// `root` as where its device and library answer, replacing what was known of them.
+pub fn register(root: RemoteRoot) {
     if let Ok(mut held) = ROOTS.write() {
-        *held = roots.iter().filter_map(RemoteRoot::from_root).collect();
-    }
-}
-
-/// The mounted library a path is in, and the path within it, forward slashes.
-pub fn root_of(path: &str) -> Option<(RemoteRoot, String)> {
-    let held = ROOTS.read().ok()?;
-    let norm = |s: &str| s.replace('\\', "/");
-    let path = norm(path);
-    for root in held.iter() {
-        let base = norm(&root.path);
-        let base = base.trim_end_matches('/');
-        if let Some(rest) = path.strip_prefix(base) {
-            if rest.is_empty() || rest.starts_with('/') {
-                return Some((root.clone(), rest.trim_start_matches('/').to_string()));
-            }
+        match held.iter_mut().find(|r| r.device_id == root.device_id && r.library_id == root.library_id) {
+            Some(known) => *known = root,
+            None => held.push(root),
         }
     }
-    None
 }
 
+/// The library a file or folder on another machine is in, and the path within it.
+pub fn root_of(path: &str) -> Option<(RemoteRoot, String)> {
+    let rest = path.strip_prefix(SCHEME)?;
+    let (device, rest) = rest.split_once('/')?;
+    let (library, within) = rest.split_once('/').unwrap_or((rest, ""));
+    let held = ROOTS.read().ok()?;
+    let root = held.iter().find(|r| r.device_id == device && r.library_id == library)?;
+    Some((root.clone(), within.to_string()))
+}
+
+/// Whether a path names something on another machine. Known or not: a name in this scheme is
+/// never a file here, so nothing may treat it as one.
 pub fn is_remote(path: &str) -> bool {
-    root_of(path).is_some()
+    path.starts_with(SCHEME)
 }
 
 fn agent(timeout: Duration) -> ureq::Agent {
@@ -251,80 +257,121 @@ fn base64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/* ------------------------------------------------------------------ the index */
+/* ------------------------------------------------------------------ one folder at a time */
 
-/// One row of another machine's index, as this library files it: under the mount's label.
+/// One `Track` line from another index, as a row here: the struct a restored bundle's rows and a
+/// listed folder's files are both read into.
 pub struct Row {
     pub rel_dir: String,
     pub file: crate::library::FileRow,
     pub project_created: Option<f64>,
 }
 
-/// `/index`, gunzipped as it arrives, with the journal lines folded in: the library as that
-/// machine sees it now, relabelled under this mount's name.
-pub fn fetch_index(root: &RemoteRoot) -> Result<Vec<Row>, String> {
-    let url = format!("{}/index?library={}", root.base(), encode(&root.library_id));
-    let response = agent(Duration::from_secs(600)).get(&url).call().map_err(|e| format!("{} is not reachable ({e}).", root.device_name))?;
-    let status = response.status().as_u16();
-    if status == 204 {
-        return Ok(Vec::new());
-    }
-    if status != 200 {
-        return Err(format!("{} answered {status}.", root.device_name));
-    }
-    let gzipped = response.headers().get("content-encoding").and_then(|v| v.to_str().ok()) == Some("gzip");
-    let body = response.into_body().into_reader();
-    let reader: Box<dyn Read> = if gzipped { Box::new(flate2::read::GzDecoder::new(body)) } else { Box::new(body) };
-    // Each line becomes a row as it arrives. Held as parsed JSON until the end, a big library's
-    // index took over a gigabyte for a moment and left half of it behind: hundreds of thousands
-    // of small maps, which a Mac's allocator does not hand back.
-    let base = slashed_base(&root.path);
-    let mut index = Rows::default();
-    for line in std::io::BufReader::with_capacity(1 << 20, reader).lines() {
-        let line = line.map_err(|e| format!("{}: {e}", root.device_name))?;
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(parsed) = serde_json::from_str::<Value>(&line) else { continue };
-        // A journal line: what changed since the index was written.
-        if parsed.get("added").is_some() || parsed.get("removed").is_some() {
-            for path in parsed.get("removed").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                index.remove(path);
-            }
-            for track in parsed.get("added").and_then(Value::as_array).into_iter().flatten() {
-                index.put(row_from_track(track, &base, &root.label));
-            }
-            continue;
-        }
-        index.put(row_from_track(&parsed, &base, &root.label));
-    }
-    Ok(index.rows.into_iter().flatten().collect())
+/// One folder of another machine's library, as `/list` answers it. Only ever the one folder:
+/// the library is asked about where you are standing, never fetched whole.
+#[derive(Clone, Debug, Default)]
+pub struct Listing {
+    /// The subfolders by name, with how many files are at or below each.
+    pub folders: Vec<(String, i64)>,
+    /// Named in this library's scheme for them, never by their path over there.
+    pub files: Vec<crate::library::FileRow>,
+    /// That machine's stars and tags on these files.
+    pub ratings: std::collections::HashMap<String, u8>,
+    pub tags: std::collections::HashMap<String, Vec<String>>,
+    /// Every match, for a search; the files are the best of them.
+    pub matched: usize,
 }
 
-/// The rows of an index being read, in the order they first appeared, a later line for the
-/// same path replacing an earlier one in place.
-#[derive(Default)]
-struct Rows {
-    rows: Vec<Option<Row>>,
-    at: std::collections::HashMap<String, usize>,
+impl Listing {
+    /// `files` and their `meta` (keyed by the path over there), as rows here.
+    fn absorb(&mut self, root: &RemoteRoot, files: &[Value], meta: &Value) {
+        let base = slashed_base(&root.path);
+        for track in files {
+            let Some(row) = row_from_track(track, &base, &root.label) else { continue };
+            let theirs = row.file.path.clone();
+            let dir = row.rel_dir.strip_prefix(root.label.as_str()).unwrap_or("").trim_start_matches('/').to_string();
+            let within = if dir.is_empty() { row.file.name.clone() } else { format!("{dir}/{}", row.file.name) };
+            let mut file = row.file;
+            file.path = root.path_of(&within);
+            file.dir = root.path_of(&dir);
+            if let Some(entry) = meta.get(&theirs) {
+                if let Some(stars) = entry.get("rating").and_then(Value::as_f64).filter(|s| *s >= 1.0) {
+                    self.ratings.insert(file.path.clone(), stars.min(5.0) as u8);
+                }
+                let tags: Vec<String> = entry.get("tags").and_then(Value::as_array).map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                if !tags.is_empty() {
+                    self.tags.insert(file.path.clone(), tags);
+                }
+                // A tempo or key that machine worked out, where the file names none.
+                if file.bpm.is_none() {
+                    file.bpm = entry.get("detectedBpm").and_then(Value::as_f64);
+                }
+                if file.musical_key.is_none() {
+                    file.musical_key = entry.get("detectedKey").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+            self.files.push(file);
+        }
+    }
 }
 
-impl Rows {
-    fn put(&mut self, row: Option<Row>) {
-        let Some(row) = row else { return };
-        match self.at.get(&row.file.path) {
-            Some(&i) => self.rows[i] = Some(row),
-            None => {
-                self.at.insert(row.file.path.clone(), self.rows.len());
-                self.rows.push(Some(row));
-            }
+fn read_json(response: &mut ureq::http::Response<ureq::Body>) -> Result<Value, String> {
+    let text = response.body_mut().with_config().limit(256 * 1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// The files a page of `/list` asks for at once: the server's own ceiling.
+const PAGE: usize = 2000;
+
+/// `dir` (within the library, `""` for its folder) on that machine: its subfolders, and every
+/// file in it, a page at a time.
+pub fn list(root: &RemoteRoot, dir: &str) -> Result<Listing, String> {
+    let agent = agent(Duration::from_secs(30));
+    let mut listing = Listing::default();
+    let mut offset = 0;
+    loop {
+        let url = format!("{}/list?library={}&dir={}&offset={offset}&limit={PAGE}", root.base(), encode(&root.library_id), encode(dir));
+        let mut response = agent.get(&url).call().map_err(|_| format!("{} is not answering.", root.device_name))?;
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Err(format!("That folder is no longer on {}.", root.device_name)),
+            status => return Err(format!("{} answered {status}.", root.device_name)),
+        }
+        let body = read_json(&mut response)?;
+        if offset == 0 {
+            listing.folders = body
+                .get("folders")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|f| Some((f.get("name")?.as_str()?.to_string(), f.get("files").and_then(Value::as_i64).unwrap_or(0)))).collect())
+                .unwrap_or_default();
+        }
+        let files = body.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+        listing.absorb(root, &files, body.get("meta").unwrap_or(&Value::Null));
+        offset += files.len();
+        let total = body.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if files.is_empty() || offset >= total {
+            listing.matched = total;
+            return Ok(listing);
         }
     }
-    fn remove(&mut self, path: &str) {
-        if let Some(i) = self.at.remove(path) {
-            self.rows[i] = None;
-        }
+}
+
+/// `/search` at or below `dir` on that machine, by the same query language as here.
+pub fn search(root: &RemoteRoot, dir: &str, query: &str) -> Result<Listing, String> {
+    let url = format!("{}/search?library={}&within={}&q={}&limit=1000", root.base(), encode(&root.library_id), encode(dir), encode(query));
+    let mut response = agent(Duration::from_secs(30)).get(&url).call().map_err(|_| format!("{} is not answering.", root.device_name))?;
+    match response.status().as_u16() {
+        200 => {}
+        // A query the server cannot use (nothing but punctuation) finds nothing.
+        400 => return Ok(Listing::default()),
+        status => return Err(format!("{} answered {status}.", root.device_name)),
     }
+    let body = read_json(&mut response)?;
+    let mut listing = Listing::default();
+    let files = body.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+    listing.absorb(root, &files, body.get("meta").unwrap_or(&Value::Null));
+    listing.matched = body.get("matched").and_then(Value::as_u64).map_or(listing.files.len(), |n| n as usize);
+    Ok(listing)
 }
 
 /// `Track` lines from another index, filed under `label`: each path's place below `base` (the

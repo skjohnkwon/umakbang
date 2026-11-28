@@ -131,7 +131,8 @@ pub enum Wake {
     /// A machine's plugin list, by its tailnet node id; None when it would not answer.
     PluginsCompared(String, Option<serde_json::Value>),
     /// A mounted library's index arrived (how many rows) or could not be fetched.
-    RemoteIndexed(String, Result<usize, String>),
+    /// A folder on another machine listed, for the Devices section and the explorer.
+    DeviceListed(i64, Result<crate::remote::Listing, String>),
     /// A copy from another machine moved on, or finished (what was written, what failed).
     Copying(crate::remote::Progress),
     Copied(Vec<PathBuf>, Vec<String>),
@@ -161,6 +162,7 @@ pub enum Wake {
 #[derive(Default)]
 struct Pane {
     folder: Option<crate::library::FolderRow>,
+    folder_status: Option<String>,
     crumbs: Vec<crate::library::FolderRow>,
     folders: Vec<crate::library::FolderRow>,
     files: Vec<FileRow>,
@@ -256,6 +258,9 @@ pub struct App {
     remote: Option<crate::server::Supervisor>,
     peers: Option<(crate::tailscale::Status, Vec<crate::server::Peer>)>,
     peers_busy: bool,
+    /// The other machines in the Devices section, and when to ask the tailnet about them again.
+    pub(crate) devices: crate::devices::Devices,
+    peers_at: Option<Instant>,
     /// Running in the background: the tray, what it says, whether the window is up, whether the
     /// first close has been explained, and whether this launch began windowless.
     tray: Option<crate::tray::Tray>,
@@ -366,6 +371,8 @@ impl App {
             now: None,
             pulse: 1.0,
             crumbs: Vec::new(),
+            folder_status: None,
+            this_device: this_device_name(),
             folders: Vec::new(),
             files: Vec::new(),
             selection: BTreeSet::new(),
@@ -524,6 +531,9 @@ impl App {
             remote: None,
             peers: None,
             peers_busy: false,
+            devices: crate::devices::Devices::default(),
+            // Soon after launch, once the server has had its own look at the tailnet.
+            peers_at: Some(Instant::now() + Duration::from_secs(2)),
             tray: None,
             tray_status: std::sync::Arc::new(std::sync::Mutex::new("Not serving".into())),
             window_open: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -577,7 +587,11 @@ impl App {
     }
 
     pub fn open(&mut self, id: i64, record: bool) {
+        if crate::devices::is_device(id) {
+            return self.open_device(id, record);
+        }
         let Some(folder) = self.library.folder(id) else { return };
+        self.state.folder_status = None;
         if record && self.state.folder.id != id {
             self.history.push(self.state.folder.id);
             self.future.clear();
@@ -629,6 +643,156 @@ impl App {
         // and folders off lists it flat.
         if !self.state.search.value.trim().is_empty() || self.state.recursive {
             self.send_search();
+        }
+    }
+
+    /// The server at `host` as another machine, for shots: what the tailnet would have found.
+    pub fn test_device(&mut self, host: &str, open: Option<&str>) {
+        let hello = ureq::get(format!("http://{host}/hello")).call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let Some(hello) = hello else {
+            eprintln!("no umakbang at {host}");
+            return;
+        };
+        let name = hello.pointer("/device/name").and_then(|v| v.as_str()).unwrap_or("test").to_string();
+        let node = crate::tailscale::Node { id: name.clone(), name: name.clone(), host_name: name, os: hello.pointer("/device/os").and_then(|v| v.as_str()).unwrap_or("").to_string(), online: true, ipv4: Some(host.to_string()) };
+        self.devices.update(&[crate::server::Peer { node, serving: true, hello: Some(hello), reason: None }]);
+        let Some(top) = self.devices.devices.first().map(|d| d.top) else { return };
+        self.tree_open.insert(top);
+        self.list_device(top, false);
+        if let Some(dir) = open {
+            let mut at = top;
+            for segment in dir.split('/').filter(|s| !s.is_empty()) {
+                self.list_device(at, false);
+                match self.devices.children(at).into_iter().find(|c| c.name == segment) {
+                    Some(child) => {
+                        self.tree_open.insert(child.id);
+                        at = child.id;
+                    }
+                    None => break,
+                }
+            }
+            self.open(at, true);
+        }
+        self.rebuild_tree();
+    }
+
+    /// A folder on another machine, as the explorer shows one: listed when first opened, shown
+    /// from that listing after it, and read-only throughout - its path is in the device scheme,
+    /// which no file operation here will act on.
+    fn open_device(&mut self, id: i64, record: bool) {
+        let Some(folder) = self.devices.folder_row(id) else { return };
+        if record && self.state.folder.id != id {
+            self.history.push(self.state.folder.id);
+            self.future.clear();
+        }
+        self.list_device(id, false);
+        let again = self.state.view == View::Folder && self.state.folder.id == id;
+        self.state.crumbs = self.devices.ancestry(id);
+        self.state.folders = self.devices.children(id);
+        self.state.files = self.devices.node(id).map(|n| n.files.clone()).unwrap_or_default();
+        self.state.gone.clear();
+        // The global sort, since per-folder sorts are kept by a path in this library; the folder
+        // read again keeps whatever was clicked while in it.
+        if !again {
+            self.state.sort = Sort { key: self.data.settings.sort_key.clone().unwrap_or_else(|| "name".into()), dir: self.data.settings.sort_dir.clone().unwrap_or_else(|| "asc".into()) };
+        }
+        // That machine's stars, under whatever this one has put on the same files.
+        if let Some(node) = self.devices.node(id) {
+            for (path, stars) in &node.ratings {
+                if !self.data.ratings.contains_key(path) {
+                    self.state.ratings.insert(path.clone(), *stars);
+                }
+            }
+        }
+        self.sort_rows();
+        self.state.selection.clear();
+        self.state.focus = None;
+        self.state.scroll = 0.0;
+        self.state.searching = false;
+        self.state.view = View::Folder;
+        self.state.folder = folder;
+        self.state.can_back = !self.history.is_empty();
+        self.state.can_forward = !self.future.is_empty();
+        self.resolve_rows();
+        if let Some(node) = self.devices.node(id) {
+            for (path, tags) in &node.tags {
+                self.state.file_tags.entry(path.clone()).or_insert_with(|| tags.clone());
+            }
+        }
+        self.show_device_status();
+        if !self.state.search.value.trim().is_empty() {
+            self.send_search();
+        }
+    }
+
+    /// Asks the machine `id` is on for that folder, off the window's thread, unless it is listed
+    /// or being listed already (`again` asks regardless: a refresh).
+    fn list_device(&mut self, id: i64, again: bool) {
+        let Some((root, dir)) = self.devices.request(id, again) else { return };
+        let Some(proxy) = self.proxy.clone() else {
+            // No event loop (a shot): listed in place.
+            let outcome = crate::remote::list(&root, &dir);
+            self.devices.fill(id, outcome);
+            return;
+        };
+        std::thread::spawn(move || {
+            let outcome = crate::remote::list(&root, &dir);
+            let _ = proxy.send_event(Wake::DeviceListed(id, outcome));
+        });
+    }
+
+    /// What the table says while it has no rows to show for a folder on another machine.
+    fn show_device_status(&mut self) {
+        let id = self.state.folder.id;
+        if !crate::devices::is_device(id) {
+            self.state.folder_status = None;
+            return;
+        }
+        let device = self.devices.device_name(id);
+        let online = self.devices.online(id);
+        self.state.folder_status = self.devices.node(id).map(|node| {
+            if !online {
+                format!("{device} is not answering. Its folders come back when it does.")
+            } else if node.loading {
+                format!("Loading from {device}…")
+            } else if let Some(error) = &node.error {
+                error.clone()
+            } else if node.place.is_none() {
+                format!("{device} is serving, but no library is open there.")
+            } else {
+                "Nothing in this folder.".into()
+            }
+        });
+    }
+
+    /// A search typed while standing in another machine's folder, answered by that machine at
+    /// and below the folder: the same query language, its own index.
+    fn search_device(&mut self, raw: String) {
+        let id = self.state.folder.id;
+        if raw.trim().is_empty() || crate::search::parse(&raw).is_empty() {
+            if self.state.searching {
+                self.open(id, false);
+            }
+            return;
+        }
+        let Some((root, dir)) = self.devices.node(id).and_then(|n| n.place.clone()) else { return };
+        let generation = self.search_generation;
+        self.state.folder_status = Some(format!("Searching {}…", self.devices.device_name(id)));
+        let run = move || {
+            // A failure finds nothing, which the table then says.
+            let found = crate::remote::search(&root, &dir, &raw).unwrap_or_default();
+            crate::search::Results { generation, folders: Vec::new(), total: found.matched, files: found.files, ranked: true, ratings: found.ratings, tags: found.tags }
+        };
+        match self.proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(Wake::Search(run()));
+                });
+            }
+            None => {
+                let results = run();
+                self.show_results(results);
+            }
         }
     }
 
@@ -796,22 +960,11 @@ impl App {
     pub fn start_scan(&mut self, full: bool) {
         let Some(proxy) = self.proxy.clone() else { return };
         let roots: Vec<(PathBuf, String)> = self.data.settings.roots.iter().filter(|r| r.is_local()).map(|r| (PathBuf::from(&r.path), r.label.clone())).collect();
-        // Mounted libraries are fetched whether or not there is anything local to walk.
-        self.fetch_remote_indexes();
         if roots.is_empty() {
             return;
         }
         self.state.scan_status = Some("checking for changes".into());
         crate::scan::spawn(self.db_path.clone(), roots, full, proxy);
-    }
-
-    /// Every mounted library's index, fetched again.
-    pub(crate) fn fetch_remote_indexes(&mut self) {
-        let Some(proxy) = self.proxy.clone() else { return };
-        crate::remote::set_roots(&self.data.settings.roots);
-        for root in self.data.settings.roots.iter().filter_map(crate::remote::RemoteRoot::from_root) {
-            crate::scan::spawn_remote(self.db_path.clone(), root, proxy.clone());
-        }
     }
 
     /* ------------------------------------------------------------ contracts */
@@ -1388,6 +1541,7 @@ impl App {
             std::mem::swap(&mut s.folder, folder);
         }
         std::mem::swap(&mut s.crumbs, &mut p.crumbs);
+        std::mem::swap(&mut s.folder_status, &mut p.folder_status);
         std::mem::swap(&mut s.folders, &mut p.folders);
         std::mem::swap(&mut s.files, &mut p.files);
         std::mem::swap(&mut s.file_meta, &mut p.file_meta);
@@ -1436,6 +1590,7 @@ impl App {
             let s = &self.state;
             self.parked = Some(Pane {
                 folder: Some(s.folder.clone()),
+                folder_status: s.folder_status.clone(),
                 crumbs: s.crumbs.clone(),
                 folders: s.folders.clone(),
                 files: s.files.clone(),
@@ -2167,7 +2322,6 @@ impl App {
             shared.key = self.data.detected_key.clone();
         }
         self.rebuild_palette();
-        crate::remote::set_roots(&self.data.settings.roots);
         self.rebuild_tree();
         self.configure_server();
         let view = self.state.view;
@@ -2213,37 +2367,45 @@ impl App {
 
     /* ------------------------------------------------------------ other machines' libraries */
 
-    /// `remote:mountLibrary`: a peer's library as a root of this one. Labelled after the folder,
-    /// with the machine's name added when this library already has a folder of that name.
-    fn mount_library(&mut self, peer_index: usize, library_index: usize) {
-        let Some(peer) = self.peers.as_ref().and_then(|(_, peers)| peers.iter().filter(|p| p.serving).nth(peer_index).cloned()) else { return };
-        let (Some(hello), Some(host)) = (peer.hello.clone(), peer.node.ipv4.clone()) else { return };
-        let Some(library) = hello.get("libraries").and_then(|l| l.as_array()).and_then(|l| l.get(library_index)).cloned() else { return };
-        let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let (path, base, id) = (text(&library, "path"), text(&library, "label"), text(&library, "id"));
-        let device_id = hello.pointer("/device/id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let device_name = if peer.node.host_name.is_empty() { peer.node.name.clone() } else { peer.node.host_name.clone() };
-        let already = self.data.settings.roots.iter().any(|r| r.remote.as_ref().and_then(|v| v.get("deviceId")).and_then(|v| v.as_str()) == Some(device_id.as_str()) && r.path == path);
-        if already {
+    /// Settings' Browse on a peer's library: that library opened in the explorer, its device
+    /// unfolded in the Devices section.
+    fn browse_library(&mut self, peer_index: usize, library_index: usize) {
+        let Some(peers) = self.peers.as_ref().map(|(_, peers)| peers.clone()) else { return };
+        let Some(hello) = peers.iter().filter(|p| p.serving).nth(peer_index).and_then(|p| p.hello.clone()) else { return };
+        let device = hello.pointer("/device/id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let library = hello.get("libraries").and_then(|l| l.as_array()).and_then(|l| l.get(library_index)).and_then(|l| l.get("id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        self.devices.update(&peers);
+        let Some(top) = self.devices.device(&device).map(|d| d.top) else { return };
+        // A device with one library is that library; with several, each is a node under it.
+        let target = if self.devices.node(top).is_some_and(|n| n.place.is_some()) {
+            top
+        } else {
+            match self.devices.children(top).into_iter().find(|c| self.devices.node(c.id).and_then(|n| n.place.as_ref()).is_some_and(|(r, _)| r.library_id == library)) {
+                Some(child) => child.id,
+                None => return,
+            }
+        };
+        self.tree_open.insert(top);
+        self.open(target, true);
+        self.rebuild_tree();
+    }
+
+    /// Libraries mounted from other machines by earlier versions, taken out of the library: other
+    /// machines are browsed in place under Devices now, and the copy of a peer's index this one
+    /// kept is what that replaced. Nothing over there is touched.
+    pub fn drop_mounts(&mut self) {
+        let mounted: Vec<crate::userdata::Root> = self.data.settings.roots.iter().filter(|r| !r.is_local()).cloned().collect();
+        if mounted.is_empty() {
             return;
         }
-        let taken: std::collections::HashSet<String> = self.data.settings.roots.iter().map(|r| r.label.to_lowercase()).collect();
-        let mut label = base.clone();
-        if taken.contains(&label.to_lowercase()) {
-            label = format!("{base} ({device_name})");
-            let mut n = 2;
-            while taken.contains(&label.to_lowercase()) {
-                label = format!("{base} ({device_name} {n})");
-                n += 1;
-            }
+        for root in &mounted {
+            self.library.remove(&root.path, Some(&root.label), true);
         }
-        let remote = serde_json::json!({ "deviceId": device_id, "deviceName": device_name, "host": host, "libraryId": id });
-        self.data.settings.roots.push(crate::userdata::Root { path, label: label.clone(), remote: Some(remote) });
-        self.write_roots();
+        self.data.settings.roots.retain(|r| r.is_local());
+        let value = serde_json::Value::Array(self.data.settings.roots.iter().map(|r| serde_json::json!({ "path": r.path, "label": r.label })).collect());
+        self.write_setting("roots", value);
+        self.state.total_files = self.library.total_files();
         self.rebuild_tree();
-        self.notify(format!("Fetching {label} from {device_name}…"));
-        self.fetch_remote_indexes();
-        self.refresh_settings_values();
     }
 
     /// What this machine calls itself: the tailnet's name for it, or the computer's.
@@ -2815,8 +2977,8 @@ impl App {
         if self.library_watch.is_some() || !roots.is_empty() {
             self.watch_library();
         }
-        // A mounted library keeps its `remote`: written without it, it would become a local
-        // folder at a path that is on another machine.
+        // `remote` is kept on anything that still carries it, so it is never written back as a
+        // local folder at a path on another machine; `drop_mounts` takes those out at launch.
         let value = serde_json::Value::Array(
             self.data
                 .settings
@@ -2829,7 +2991,6 @@ impl App {
                 .collect(),
         );
         self.write_setting("roots", value);
-        crate::remote::set_roots(&self.data.settings.roots);
     }
 
     /// A right-click on a library folder's own row in the tree: the one thing only those
@@ -3364,7 +3525,9 @@ impl App {
             }
             let at = index - folders;
             let (Some(file), Some(meta)) = (self.state.files.get(at), self.state.file_meta.get(at)) else { continue };
-            if !file.playable || self.analysed.contains(&file.path) || file.size > 300 * 1024 * 1024 {
+            // Another machine's file is analysed by that machine, whose findings come with the
+            // listing: here it would mean downloading the whole file to guess at it.
+            if !file.playable || self.analysed.contains(&file.path) || file.size > 300 * 1024 * 1024 || crate::remote::is_remote(&file.path) {
                 continue;
             }
             let needs_bpm = meta.bpm.is_none();
@@ -3460,6 +3623,9 @@ impl App {
             return;
         }
         let raw = self.state.search.value.clone();
+        if crate::devices::is_device(self.state.folder.id) {
+            return self.search_device(raw);
+        }
         let recursive = self.state.recursive;
         if !recursive && (raw.trim().is_empty() || crate::search::parse(&raw).is_empty()) {
             if self.state.searching {
@@ -3582,6 +3748,12 @@ impl App {
         if results.generation != self.search_generation {
             return;
         }
+        // Another machine's stars under whatever this one has put on the same files.
+        for (path, stars) in &results.ratings {
+            if !self.data.ratings.contains_key(path) {
+                self.state.ratings.insert(path.clone(), *stars);
+            }
+        }
         self.state.folders = results.folders;
         self.state.files = results.files;
         self.state.search_total = results.total;
@@ -3596,6 +3768,12 @@ impl App {
         self.state.focus = None;
         self.state.scroll = 0.0;
         self.resolve_rows();
+        for (path, tags) in results.tags {
+            self.state.file_tags.entry(path).or_insert(tags);
+        }
+        if crate::devices::is_device(self.state.folder.id) && self.state.view == View::Folder {
+            self.state.folder_status = Some(format!("Nothing on {} matches.", self.devices.device_name(self.state.folder.id)));
+        }
     }
 
     /// One full frame into `frame`, at the given device size and scale.
@@ -3872,6 +4050,12 @@ impl App {
                     self.history.push(self.state.folder.id);
                     self.open(next, false);
                 }
+            }
+            Action::Refresh if crate::devices::is_device(self.state.folder.id) => {
+                // Another machine's folder, asked again.
+                let id = self.state.folder.id;
+                self.list_device(id, true);
+                self.show_device_status();
             }
             Action::Refresh => {
                 // The toolbar's re-read: the folder on screen from the disk, for a change the
@@ -4368,7 +4552,7 @@ impl App {
                     }
                 }
             }
-            Action::MountLibrary(peer_index, library_index) => self.mount_library(peer_index, library_index),
+            Action::BrowseLibrary(peer_index, library_index) => self.browse_library(peer_index, library_index),
             Action::BackupExport(pick) => self.export_bundle(pick),
             Action::BackupImport => self.import_backup(),
             Action::ImportCancel => self.state.importing = None,
@@ -5081,8 +5265,6 @@ impl App {
             bundle_busy: self.bundle_busy,
             syncing: self.syncing,
             sync_note: self.sync_note.clone(),
-            mounted_ids: s.roots.iter().filter_map(|r| Some((r.remote.as_ref()?.get("deviceId")?.as_str()?.to_string(), r.path.clone()))).collect(),
-            mounted: s.roots.iter().filter(|r| !r.is_local()).map(|r| (r.label.clone(), r.remote.as_ref().and_then(|v| v.get("deviceName")).and_then(|v| v.as_str()).unwrap_or("").to_string(), r.path.clone())).collect(),
             peers: self.peers.clone(),
             peers_busy: self.peers_busy,
             plugins: self.plugin_summary.clone(),
@@ -5281,7 +5463,7 @@ impl App {
         }
         match self.state.folder.parent {
             Some(parent) => self.open(parent, true),
-            None if self.state.folder.id != crate::library::LIBRARY => self.open(crate::library::LIBRARY, true),
+            None if self.state.folder.id != crate::library::LIBRARY && !crate::devices::is_device(self.state.folder.id) => self.open(crate::library::LIBRARY, true),
             None => {}
         }
     }
@@ -5289,6 +5471,7 @@ impl App {
     fn toggle_tree(&mut self, id: i64) {
         if !self.tree_open.remove(&id) {
             self.tree_open.insert(id);
+            self.list_device(id, false);
         }
         self.rebuild_tree();
     }
@@ -5302,7 +5485,7 @@ impl App {
             children.sort_by(|a, b| columns::collate(&a.name, &b.name));
             for child in children {
                 let open = app.tree_open.contains(&child.id);
-                out.push(screen::TreeRow { id: child.id, name: child.name.clone(), depth, files: child.files, has_children: child.has_children, open });
+                out.push(screen::TreeRow { id: child.id, name: child.name.clone(), depth, files: child.files, has_children: child.has_children, open, kind: screen::TreeKind::Folder });
                 if open && child.has_children {
                     walk(app, child.id, depth + 1, out);
                 }
@@ -5310,9 +5493,32 @@ impl App {
         }
         let root = self.library.library_root();
         let open = self.tree_open.contains(&root.id);
-        let mut rows = vec![screen::TreeRow { id: root.id, name: String::new(), depth: 0, files: root.files, has_children: true, open }];
+        let mut rows = vec![screen::TreeRow { id: root.id, name: String::new(), depth: 0, files: root.files, has_children: true, open, kind: screen::TreeKind::This { mac: cfg!(target_os = "macos") } }];
         if open {
             walk(self, root.id, 1, &mut rows);
+        }
+        // Then every other machine, each folded until it is opened: unfolding one is what asks it
+        // anything.
+        fn walk_device(app: &App, id: i64, depth: usize, out: &mut Vec<screen::TreeRow>) {
+            for child in app.devices.children(id) {
+                let open = app.tree_open.contains(&child.id);
+                let loading = app.devices.node(child.id).is_some_and(|n| n.loading);
+                let kind = if loading { screen::TreeKind::Loading } else { screen::TreeKind::Folder };
+                out.push(screen::TreeRow { id: child.id, name: child.name.clone(), depth, files: child.files, has_children: child.has_children, open, kind });
+                if open {
+                    walk_device(app, child.id, depth + 1, out);
+                }
+            }
+        }
+        for device in &self.devices.devices {
+            let Some(top) = self.devices.folder_row(device.top) else { continue };
+            let open = self.tree_open.contains(&top.id) && device.online;
+            let mac = device.os.to_lowercase().contains("mac");
+            let kind = if self.devices.node(top.id).is_some_and(|n| n.loading) { screen::TreeKind::Loading } else { screen::TreeKind::Device { mac, online: device.online } };
+            rows.push(screen::TreeRow { id: top.id, name: top.name.clone(), depth: 0, files: top.files, has_children: device.online && top.has_children, open, kind });
+            if open {
+                walk_device(self, top.id, 1, &mut rows);
+            }
         }
         self.state.tree = rows;
     }
@@ -5320,6 +5526,19 @@ impl App {
     /// `revealPlayingFolder`: opens the tree down to the playing track's folder, browses it,
     /// and selects the track.
     fn locate(&mut self, path: &str) {
+        if crate::remote::is_remote(path) {
+            let Some(folder) = self.devices.folder_of(path) else { return };
+            for ancestor in self.devices.ancestry(folder) {
+                self.tree_open.insert(ancestor.id);
+            }
+            self.open(folder, true);
+            self.rebuild_tree();
+            if let Some(at) = self.state.files.iter().position(|f| f.path == path).map(|at| at + self.state.folders.len()) {
+                self.state.selection = BTreeSet::from([at]);
+                self.state.focus = Some(at);
+            }
+            return;
+        }
         let Some(folder) = self.library.folder_of(path) else { return };
         for ancestor in self.library.ancestry(folder) {
             self.tree_open.insert(ancestor.id);
@@ -5477,7 +5696,10 @@ impl App {
     /// that folder's alone; the saved views share the global one.
     pub(super) fn act_sort(&mut self, key: &str) {
         let sort = self.state.sort.clicked(key);
-        if self.state.view == View::Folder {
+        if self.state.view == View::Folder && crate::devices::is_device(self.state.folder.id) {
+            // Kept for the folder on screen only: its path names another machine, and the
+            // per-folder sorts travel with the settings.
+        } else if self.state.view == View::Folder {
             let path = self.state.folder.path.clone();
             self.data.settings.folder_sort.insert(path, sort.clone());
             if let Ok(value) = serde_json::to_value(&self.data.settings.folder_sort) {
@@ -5515,7 +5737,7 @@ impl App {
     /// Waiting with nothing animating: until the next document write or the notice's end, or
     /// for input.
     fn idle_wait(&self) -> ControlFlow {
-        match self.doc.as_ref().and_then(DocStore::due).into_iter().chain(self.notice_until).chain(self.reread_at).chain(self.annotation_check_at).chain(self.volume_close_at).chain(self.probe_at).chain(self.spin_at).chain(self.preview_at).min() {
+        match self.doc.as_ref().and_then(DocStore::due).into_iter().chain(self.notice_until).chain(self.reread_at).chain(self.annotation_check_at).chain(self.volume_close_at).chain(self.probe_at).chain(self.spin_at).chain(self.preview_at).chain(self.peers_at).min() {
             Some(due) => ControlFlow::WaitUntil(due),
             None => ControlFlow::Wait,
         }
@@ -5794,6 +6016,14 @@ impl App {
     }
 }
 
+/// How often the Devices section asks the tailnet who is there.
+const PEERS_EVERY: Duration = Duration::from_secs(60);
+
+/// This machine's name until the tailnet says what it calls it.
+fn this_device_name() -> String {
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "This computer".into())
+}
+
 /// CSS `cubic-bezier(x1, y1, x2, y2)` at progress `x`: the curve's y where its x is `x`.
 fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
     let at = |a: f32, b: f32, t: f32| 3.0 * a * t * (1.0 - t).powi(2) + 3.0 * b * t * t * (1.0 - t) + t.powi(3);
@@ -6001,17 +6231,33 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             Wake::Peers(status, peers) => {
+                if let Some(name) = status.this.as_ref().map(|n| if n.host_name.is_empty() { n.name.clone() } else { n.host_name.clone() }).filter(|n| !n.is_empty()) {
+                    self.state.this_device = name;
+                }
+                self.devices.update(&peers);
                 self.peers = Some((status, peers));
                 self.peers_busy = false;
+                self.peers_at = Some(Instant::now() + PEERS_EVERY);
+                self.rebuild_tree();
+                // A folder on a machine that has just come back is listed now.
+                if crate::devices::is_device(self.state.folder.id) && self.state.view == View::Folder {
+                    self.list_device(self.state.folder.id, false);
+                    self.show_device_status();
+                }
                 self.refresh_settings_values();
                 self.redraw();
             }
-            Wake::RemoteIndexed(label, outcome) => {
-                if let Err(reason) = outcome {
-                    self.notify(format!("{label}: {reason}"));
-                }
-                self.state.total_files = self.library.total_files();
+            Wake::DeviceListed(id, outcome) => {
+                self.devices.fill(id, outcome);
                 self.rebuild_tree();
+                if self.state.view == View::Folder && self.state.folder.id == id && !self.state.searching {
+                    let (scroll, selection, focus) = (self.state.scroll, self.state.selection.clone(), self.state.focus);
+                    self.open(id, false);
+                    self.state.scroll = scroll;
+                    self.state.selection = selection;
+                    self.state.focus = focus;
+                }
+                self.redraw();
             }
             Wake::Copying(progress) => {
                 let percent = if progress.total > 0 { (progress.received as f64 / progress.total as f64 * 100.0).round() } else { 0.0 };
@@ -6135,6 +6381,11 @@ impl ApplicationHandler<Wake> for App {
         let here = self.here();
         if let Some(proxy) = &self.proxy {
             self.watch.watch(here.as_deref(), proxy);
+        }
+        if self.peers_at.is_some_and(|at| Instant::now() >= at) {
+            // Asked again on a reply, or here once more if the ask is still out.
+            self.peers_at = Some(Instant::now() + PEERS_EVERY);
+            self.refresh_peers();
         }
         if self.preview_at.is_some_and(|at| Instant::now() >= at) {
             self.preview_at = None;

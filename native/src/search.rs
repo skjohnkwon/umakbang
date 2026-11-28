@@ -266,6 +266,10 @@ pub struct Results {
     /// Whether the files are in relevance order (a text search) rather than wanting the
     /// column sort.
     pub ranked: bool,
+    /// Another machine's stars and tags on what it found; empty for a search here, whose
+    /// annotations are this machine's own.
+    pub ratings: HashMap<String, u8>,
+    pub tags: HashMap<String, Vec<String>>,
 }
 
 pub fn spawn(db: PathBuf, shared: Arc<RwLock<Shared>>, proxy: EventLoopProxy<Wake>) -> Option<Sender<Request>> {
@@ -346,7 +350,7 @@ pub fn run(conn: &Connection, request: &Request) -> Results {
     let q = parse(&request.raw);
     // Nothing typed lists nothing, unless folders are off and the subtree is the list.
     if q.is_empty() && !request.recursive {
-        return Results { generation: request.generation, folders: Vec::new(), files: Vec::new(), total: 0, ranked: false };
+        return Results { generation: request.generation, folders: Vec::new(), files: Vec::new(), total: 0, ranked: false, ratings: HashMap::new(), tags: HashMap::new() };
     }
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -481,7 +485,7 @@ pub fn run(conn: &Connection, request: &Request) -> Results {
         folders.sort_by(|a, b| folder_score(b, &q.terms).partial_cmp(&folder_score(a, &q.terms)).unwrap_or(std::cmp::Ordering::Equal));
         folders.truncate(FOLDER_LIMIT);
     }
-    Results { generation: request.generation, folders, files, total, ranked }
+    Results { generation: request.generation, folders, files, total, ranked, ratings: HashMap::new(), tags: HashMap::new() }
 }
 
 /// `matchesQuery` over a row already in hand - for the lists that are not a folder of the
