@@ -340,7 +340,11 @@ fn main() {
     }
     // `UMAKBANG_IMPORT=<backup file>`: the import wizard open on that backup.
     if let Some(backup) = std::env::var("UMAKBANG_IMPORT").ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|raw| serde_json::from_str(&raw).ok()) {
+        let started = std::time::Instant::now();
         app.state.importing = Some(import_wizard::Wizard::new(backup));
+        if std::env::var("UMAKBANG_TIMING").is_ok() {
+            eprintln!("import wizard opened in {:.0}ms", started.elapsed().as_secs_f64() * 1000.0);
+        }
     }
     // `UMAKBANG_VIEW=rated|downloads|<n>`: a saved view instead of the folder.
     match std::env::var("UMAKBANG_VIEW").as_deref() {
@@ -499,7 +503,11 @@ fn main() {
                 app.state.stats.hover = Some((id, index));
             }
         }
+        let started = std::time::Instant::now();
         let frame = app.draw(w, h, scale);
+        if std::env::var("UMAKBANG_TIMING").is_ok() {
+            eprintln!("frame drawn in {:.1}ms", started.elapsed().as_secs_f64() * 1000.0);
+        }
         frame.save_png(out).expect("write png");
         // `UMAKBANG_LIVE_SHOT=<png>`: half a second of animation frames over that one, as the
         // window would show them - what is drawn over a visualizer has to stay over it.

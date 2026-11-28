@@ -101,6 +101,8 @@ pub enum Action {
     ImportLocate(usize),
     ImportSkip(usize),
     ImportFindAll,
+    /// The folders already placed, shown or hidden again.
+    ImportShowPlaced,
     ImportApply,
     ImportCancel,
     RemoteImport(usize),

@@ -132,7 +132,11 @@ pub fn propose(folders: &[String], confirmed: &Mapping) -> Vec<(String, Vec<Stri
     if pairs.is_empty() {
         return Vec::new();
     }
-    let mut anchors: Vec<(String, String)> = pairs.iter().flat_map(|(s, t)| anchors_for(s, t)).collect();
+    // Each anchor's source in `is_under`'s form once, rather than for every folder it is tried on.
+    let mut anchors: Vec<(String, String, String)> = pairs.iter().flat_map(|(s, t)| anchors_for(s, t)).map(|(s, t)| {
+        let key = comparable(&s);
+        (s, t, key)
+    }).collect();
     anchors.sort_by(|a, b| trim(&b.0).len().cmp(&trim(&a.0).len()));
     let chosen: Vec<&String> = pairs.iter().map(|(_, t)| *t).collect();
     let mut out = Vec::new();
@@ -141,13 +145,17 @@ pub fn propose(folders: &[String], confirmed: &Mapping) -> Vec<(String, Vec<Stri
             continue;
         }
         let mut candidates: Vec<String> = Vec::new();
+        // What is already proposed, by `normalise`: checked by lowercasing every earlier guess
+        // again, hundreds of containers' guesses made this quadratic.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut add = |path: String| {
-            if !path.is_empty() && !candidates.iter().any(|c| normalise(c) == normalise(&path)) {
+            if !path.is_empty() && seen.insert(normalise(&path)) {
                 candidates.push(path);
             }
         };
-        for (source, target) in &anchors {
-            if !is_under(folder, source) {
+        let key = comparable(folder);
+        for (source, target, source_key) in &anchors {
+            if !under_key(&key, source_key) {
                 continue;
             }
             let rest = relative_under(folder, source);
@@ -185,16 +193,31 @@ pub fn covered_by(folder: &str, mapping: &Mapping) -> Option<String> {
     best.cloned()
 }
 
-fn ordered(mapping: &Mapping) -> Vec<(&String, &String)> {
-    let mut pairs: Vec<(&String, &String)> = mapping.iter().filter(|(_, t)| !t.is_empty()).collect();
+/// The mapping's pairs, longest source first, each with the source as `is_under` compares it -
+/// worked out once here rather than per path: a backup is tens of thousands of paths against
+/// hundreds of folders, and building both sides' strings on every comparison took the import
+/// wizard most of a second per change.
+fn ordered(mapping: &Mapping) -> Vec<(&String, &String, String)> {
+    let mut pairs: Vec<(&String, &String, String)> = mapping.iter().filter(|(_, t)| !t.is_empty()).map(|(s, t)| (s, t, comparable(s))).collect();
     // Longest source first, so a subfolder mapped on its own wins over its parent.
     pairs.sort_by(|a, b| trim(b.0).len().cmp(&trim(a.0).len()));
     pairs
 }
 
-fn rewrite(path: &str, ordered: &[(&String, &String)]) -> Option<String> {
-    for (source, target) in ordered {
-        if !is_under(path, source) {
+/// A path as `is_under` compares it: no trailing separator, lowercase, forward slashes.
+fn comparable(path: &str) -> String {
+    normalise(path).replace('\\', "/")
+}
+
+/// `is_under`, with both sides already `comparable`.
+fn under_key(path: &str, folder: &str) -> bool {
+    path == folder || (path.starts_with(folder) && path.as_bytes().get(folder.len()) == Some(&b'/'))
+}
+
+fn rewrite(path: &str, ordered: &[(&String, &String, String)]) -> Option<String> {
+    let p = comparable(path);
+    for (source, target, f) in ordered {
+        if !under_key(&p, f) {
             continue;
         }
         let rest = path.get(trim(source).len()..).unwrap_or("").trim_start_matches(['\\', '/']);

@@ -19,7 +19,33 @@ pub struct Wizard {
     pub guessed: HashSet<String>,
     pub refused: HashSet<String>,
     pub scroll: f32,
+    /// The folders already placed are listed too. Off, the list is only what still needs an
+    /// answer - with hundreds found, the two that were not are otherwise a long scroll away.
+    pub show_placed: bool,
+    /// What the dialog shows, worked out when the mapping changes.
+    preview: Preview,
 }
+
+/// The dialog's figures and each folder's destination. Worked out once per change of mapping,
+/// never per frame: `remap` copies the whole backup and walks every entry in it (15,741 entries
+/// over 349 folders for a library here took the dialog to seconds a frame), and the dialog is
+/// drawn again on every pointer move.
+#[derive(Default)]
+struct Preview {
+    kept: backup::Counts,
+    dropped: backup::Counts,
+    mapped: usize,
+    auto: usize,
+    unanswered: usize,
+    /// Per folder: where it was placed by hand or found, else where a placed folder above it
+    /// takes it and which folder that is.
+    places: Vec<(String, Option<String>, Option<String>)>,
+}
+
+/// Each folder's card is one height, so only the cards scrolled into view are built.
+const CARD: f32 = 62.0;
+const STRIDE: f32 = CARD + 6.0;
+const LIST_MAX: f32 = 260.0;
 
 fn on_disk(path: &str) -> bool {
     Path::new(path).is_dir()
@@ -31,7 +57,7 @@ impl Wizard {
     pub fn new(backup: Value) -> Wizard {
         let summary = backup::summarise(&backup);
         let foreign = summary.style != Style::Windows;
-        let mut wizard = Wizard { backup, summary, foreign, mapping: Mapping::new(), guessed: HashSet::new(), refused: HashSet::new(), scroll: 0.0 };
+        let mut wizard = Wizard { backup, summary, foreign, mapping: Mapping::new(), guessed: HashSet::new(), refused: HashSet::new(), scroll: 0.0, show_placed: false, preview: Preview::default() };
         let mut identity = Mapping::new();
         for path in wizard.paths() {
             if on_disk(&path) {
@@ -71,6 +97,30 @@ impl Wizard {
         for path in hand {
             self.guessed.remove(path);
         }
+        self.refresh();
+    }
+
+    fn refresh(&mut self) {
+        let (_, kept, dropped) = backup::remap(&self.backup, &self.mapping);
+        let places = self
+            .summary
+            .folders
+            .iter()
+            .map(|f| {
+                let target = self.mapping.get(&f.path).cloned().unwrap_or_default();
+                let cover = if target.is_empty() { backup::covered_by(&f.path, &self.mapping) } else { None };
+                let derived = cover.as_ref().and_then(|_| backup::remap_path(&f.path, &self.mapping));
+                (target, derived, cover)
+            })
+            .collect();
+        self.preview = Preview {
+            kept,
+            dropped,
+            mapped: self.mapping.values().filter(|v| !v.is_empty()).count(),
+            auto: self.summary.folders.iter().filter(|f| self.guessed.contains(&f.path)).count(),
+            unanswered: self.summary.folders.iter().filter(|f| !self.mapping.contains_key(&f.path) && backup::covered_by(&f.path, &self.mapping).is_none() && !self.refused.contains(&f.path)).count(),
+            places,
+        };
     }
 
     pub fn locate(&mut self, index: usize, picked: &Path) {
@@ -101,6 +151,7 @@ impl Wizard {
         self.mapping.remove(&folder);
         self.guessed.remove(&folder);
         self.refused.insert(folder);
+        self.refresh();
     }
 }
 
@@ -126,12 +177,9 @@ fn button(t: &Theme, kind: &str, enabled: bool, icon_name: Option<&'static str>,
 pub fn dialog(s: &State, t: &Theme, viewport: (f32, f32)) -> Vec<El<Action>> {
     let Some(w) = &s.importing else { return Vec::new() };
     let width = 620f32.min(viewport.0 - 32.0);
-    let (preview, kept, dropped) = backup::remap(&w.backup, &w.mapping);
-    let _ = preview;
-    let mapped = w.mapping.values().filter(|v| !v.is_empty()).count();
+    let p = &w.preview;
+    let (kept, dropped, mapped, auto, unanswered) = (&p.kept, &p.dropped, p.mapped, p.auto, p.unanswered);
     let opening: Vec<&backup::Folder> = w.summary.folders.iter().filter(|f| f.library && w.mapping.contains_key(&f.path)).collect();
-    let auto = w.summary.folders.iter().filter(|f| w.guessed.contains(&f.path)).count();
-    let unanswered = w.summary.folders.iter().filter(|f| !w.mapping.contains_key(&f.path) && backup::covered_by(&f.path, &w.mapping).is_none() && !w.refused.contains(&f.path)).count();
     let (total, lost) = (kept.entries(), dropped.entries());
 
     let header = col()
@@ -179,14 +227,26 @@ pub fn dialog(s: &State, t: &Theme, viewport: (f32, f32)) -> Vec<El<Action>> {
         body = body.child(row);
     }
 
-    let mut list = col().gap(6.0);
+    // The body's padding either side, and the scrollbar's gutter.
+    let inner = width - 32.0 - 10.0;
+    // What still needs an answer - placed nowhere, or skipped, which can be taken back - and
+    // the placed ones only when asked for.
+    let settled_at = |i: usize| p.places.get(i).is_some_and(|(target, derived, _)| !target.is_empty() || derived.is_some());
+    let listed: Vec<usize> = (0..w.summary.folders.len()).filter(|&i| w.show_placed || !settled_at(i)).collect();
+    let placed = w.summary.folders.len() - (0..w.summary.folders.len()).filter(|&i| !settled_at(i)).count();
+    let count = listed.len();
+    let list_h = (count as f32 * STRIDE - 6.0).clamp(0.0, LIST_MAX);
     if w.summary.folders.is_empty() {
-        list = list.child(text("Nothing in this backup is tied to a folder - settings only.", style(12.0, 400, t.muted_foreground)));
+        body = body.child(text("Nothing in this backup is tied to a folder - settings only.", style(12.0, 400, t.muted_foreground)));
+    } else if count == 0 {
+        body = body.child(text("Every folder has a place.", style(12.0, 400, t.muted_foreground)));
     }
-    for (i, folder) in w.summary.folders.iter().enumerate() {
-        let target = w.mapping.get(&folder.path).cloned().unwrap_or_default();
-        let cover = if target.is_empty() { backup::covered_by(&folder.path, &w.mapping) } else { None };
-        let derived = cover.as_ref().and_then(|_| backup::remap_path(&folder.path, &w.mapping));
+    let mut list = div().w(inner).h((count as f32 * STRIDE - 6.0).max(0.0)).shrink0();
+    let first = (w.scroll / STRIDE).floor().max(0.0) as usize;
+    let shown = (LIST_MAX / STRIDE).ceil() as usize + 2;
+    for (row, &i) in listed.iter().enumerate().skip(first).take(shown) {
+        let folder = &w.summary.folders[i];
+        let (target, derived, cover) = p.places.get(i).cloned().unwrap_or_default();
         let settled = !target.is_empty() || derived.is_some();
         let mut name = div().gap(6.0).items_center().min_w(0.0).child(text(folder.label.clone(), style(12.5, 500, t.foreground)).min_w(0.0));
         if folder.library {
@@ -207,19 +267,41 @@ pub fn dialog(s: &State, t: &Theme, viewport: (f32, f32)) -> Vec<El<Action>> {
         if !target.is_empty() {
             top = top.child(button(t, "ghost", true, None, "Skip", Action::ImportSkip(i)));
         }
-        let mut card = col().px(8.0).py(6.0).rounded(4.0).border(if settled { t.primary.alpha(0.5) } else { t.border.alpha(0.7) }, 1.0).maybe(settled, |e| e.bg(t.primary.alpha(0.05))).child(top);
-        if settled {
+        // Every card has the second line, so every card is one height: where it goes, or why
+        // it goes nowhere yet.
+        let line = if settled {
             let shown = if target.is_empty() { derived.clone().unwrap_or_default() } else { target.clone() };
             let colour = if target.is_empty() { t.muted_foreground } else { t.primary };
-            let mut line = div().mt(4.0).gap(4.0).items_center().child(icon("arrow-right", 12.0, colour)).child(text(shown, style(11.0, 400, colour)).min_w(0.0));
+            let mut line = div().gap(4.0).items_center().child(icon("arrow-right", 12.0, colour)).child(text(shown, style(11.0, 400, colour)).min_w(0.0));
             if let (true, Some(cover)) = (target.is_empty(), &cover) {
                 line = line.child(text(format!("· with {}", backup::last_segment(cover)), style(10.0, 400, colour)).shrink0());
             }
-            card = card.child(line);
-        }
+            line
+        } else if w.refused.contains(&folder.path) {
+            div().child(text("Skipped: nothing of it comes across.", style(11.0, 400, t.muted_foreground.alpha(0.7))))
+        } else {
+            div().child(text("Not here yet. Locate it, or leave it out.", style(11.0, 400, t.muted_foreground.alpha(0.7))))
+        };
+        let card = col()
+            .absolute(0.0, row as f32 * STRIDE)
+            .w(inner)
+            .h(CARD)
+            .px(8.0)
+            .py(6.0)
+            .rounded(4.0)
+            .border(if settled { t.primary.alpha(0.5) } else { t.border.alpha(0.7) }, 1.0)
+            .maybe(settled, |e| e.bg(t.primary.alpha(0.05)))
+            .child(top)
+            .child(line.mt(4.0));
         list = list.child(card);
     }
-    body = body.child(div().max_h(260.0).scroll_named("import", w.scroll).scrollbar(t.border).child(list.w_full()));
+    if count > 0 {
+        body = body.child(div().h(list_h).shrink0().scroll_named("import", w.scroll).scrollbar(t.border).child(list));
+    }
+    if placed > 0 {
+        let label = if w.show_placed { "Hide the placed folders".to_string() } else { format!("Show the {placed} placed folder{} too", if placed == 1 { "" } else { "s" }) };
+        body = body.child(div().child(button(t, "ghost", true, Some(if w.show_placed { "chevron-up" } else { "chevron-down" }), &label, Action::ImportShowPlaced)));
+    }
 
     let mut tally = col()
         .px(8.0)
@@ -268,8 +350,7 @@ pub fn dialog(s: &State, t: &Theme, viewport: (f32, f32)) -> Vec<El<Action>> {
     let panel = col().w(width).rounded(8.0).border(t.border, 1.0).bg(t.popover).shadow(16.0, 40.0, 0.35).child(header).child(body).child(footer).child(
         div().absolute(width - 32.0, 10.0).size(22.0, 22.0).items_center().justify_center().rounded(4.0).hover_bg(t.accent).on(Action::ImportCancel).child(icon("x", 14.0, t.muted_foreground)),
     );
-    let rows = w.summary.folders.len().min(5) as f32;
-    let height = 72.0 + 40.0 + rows * 52.0 + 110.0 + if w.foreign { 70.0 } else { 0.0 } + 45.0;
+    let height = 72.0 + 40.0 + list_h + if placed > 0 { 36.0 } else { 0.0 } + 110.0 + if w.foreign { 70.0 } else { 0.0 } + 45.0;
     let _ = tnum;
     vec![
         div().absolute(0.0, 0.0).w(viewport.0).h(viewport.1).bg(Rgba::rgb8(0, 0, 0).alpha(0.5)).on(Action::ImportCancel),

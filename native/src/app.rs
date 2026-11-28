@@ -4569,6 +4569,12 @@ impl App {
                     }
                 }
             }
+            Action::ImportShowPlaced => {
+                if let Some(w) = self.state.importing.as_mut() {
+                    w.show_placed = !w.show_placed;
+                    w.scroll = 0.0;
+                }
+            }
             Action::ImportFindAll => {
                 if let Some(dir) = crate::dialogs::pick_folder("Which folder holds them all", None, self.hwnd()) {
                     if let Some(w) = self.state.importing.as_mut() {
